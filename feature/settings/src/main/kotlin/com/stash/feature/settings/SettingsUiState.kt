@@ -147,6 +147,12 @@ data class SettingsUiState(
     val databaseBackupState: DatabaseBackupState = DatabaseBackupState.Idle,
     /** Whether the import confirmation dialog is showing. */
     val showImportConfirmation: Boolean = false,
+    /** Whether completed sync downloads are uploaded to a Navidrome ingest endpoint. */
+    val navidromeExportEnabled: Boolean = false,
+    /** Base URL for the Navidrome ingest service, e.g. https://host/stash-ingest. */
+    val navidromeExportUrl: String = "",
+    /** Bearer token for the Navidrome ingest service. */
+    val navidromeExportToken: String = "",
 )
 
 /**

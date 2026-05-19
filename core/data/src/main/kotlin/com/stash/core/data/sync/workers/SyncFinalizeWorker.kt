@@ -7,6 +7,7 @@ import androidx.work.CoroutineWorker
 import androidx.work.WorkerParameters
 import com.stash.core.data.db.dao.RemoteSnapshotDao
 import com.stash.core.data.db.dao.SyncHistoryDao
+import com.stash.core.data.sync.NavidromeExportScheduler
 import com.stash.core.data.sync.SyncNotificationManager
 import com.stash.core.data.sync.SyncStateManager
 import com.stash.core.model.SyncState
@@ -27,6 +28,7 @@ class SyncFinalizeWorker @AssistedInject constructor(
     private val remoteSnapshotDao: RemoteSnapshotDao,
     private val syncStateManager: SyncStateManager,
     private val syncNotificationManager: SyncNotificationManager,
+    private val navidromeExportScheduler: NavidromeExportScheduler,
 ) : CoroutineWorker(appContext, params) {
 
     companion object {
@@ -65,6 +67,8 @@ class SyncFinalizeWorker @AssistedInject constructor(
 
             // Clean up snapshot tables for this sync run.
             remoteSnapshotDao.deleteAllSnapshotsBySyncId(syncId)
+
+            navidromeExportScheduler.enqueuePlaylistExport()
 
             // Cancel the ongoing progress notification.
             syncNotificationManager.cancelProgress()

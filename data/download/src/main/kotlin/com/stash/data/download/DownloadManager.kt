@@ -6,6 +6,7 @@ import com.stash.core.data.db.dao.TrackDao
 import com.stash.core.data.lastfm.LastFmApiClient
 import com.stash.core.data.lastfm.LastFmCredentials
 import com.stash.core.data.mapper.toDomain
+import com.stash.core.data.sync.NavidromeExportScheduler
 import com.stash.core.model.MusicSource
 import com.stash.core.model.Track
 import com.stash.data.download.files.FileOrganizer
@@ -85,6 +86,7 @@ class DownloadManager @Inject constructor(
     private val losslessPrefs: LosslessSourcePreferences,
     private val trackFinalizer: TrackFinalizer,
     private val loudnessMeasurer: com.stash.core.data.audio.LoudnessMeasurer,
+    private val navidromeUploadScheduler: NavidromeExportScheduler,
 ) {
     /** Limits concurrent downloads. 8 parallel slots — with native opus (no FFmpeg
      *  transcode) downloads are almost entirely network-bound so more parallelism helps. */
@@ -271,6 +273,12 @@ class DownloadManager @Inject constructor(
         }
 
         Log.i(TAG, "Downloaded: ${effectiveTrack.artist} - ${effectiveTrack.title} → ${committed.filePath}")
+        navidromeUploadScheduler.enqueueTrack(
+            filePath = committed.filePath,
+            artist = effectiveTrack.artist,
+            album = effectiveTrack.album.ifEmpty { null },
+            title = effectiveTrack.title,
+        )
         emitProgress(track.id, 1f, DownloadStatus.COMPLETED)
         return TrackDownloadResult.Success(committed.filePath)
     }
@@ -401,6 +409,12 @@ class DownloadManager @Inject constructor(
                 loudnessMeasurer.measureAndPersistInBackground(
                     trackId = track.id,
                     file = File(finalized.committed.filePath),
+                )
+                navidromeUploadScheduler.enqueueTrack(
+                    filePath = finalized.committed.filePath,
+                    artist = track.artist,
+                    album = track.album.takeIf { it.isNotBlank() },
+                    title = track.title,
                 )
 
                 emitProgress(track.id, 1f, DownloadStatus.COMPLETED)

@@ -34,6 +34,8 @@ import com.stash.data.download.files.LibrarySizeBreakdown
 import com.stash.data.download.files.LibrarySizeHolder
 import com.stash.data.download.files.MoveLibraryCoordinator
 import com.stash.data.download.files.MoveLibraryState
+import com.stash.data.download.export.NavidromeExportConfig
+import com.stash.data.download.export.NavidromeExportPreferences
 import com.stash.data.download.lossless.AggregatorRateLimiter
 import com.stash.data.download.lossless.LosslessQualityTier
 import com.stash.data.download.lossless.LosslessSourcePreferences
@@ -97,6 +99,7 @@ class SettingsViewModel @Inject constructor(
     private val crashFileStore: CrashFileStore,
     private val streamingPreference: com.stash.core.data.prefs.StreamingPreference,
     private val databaseBackupManager: DatabaseBackupManager,
+    private val navidromeExportPreferences: NavidromeExportPreferences,
 ) : ViewModel() {
 
     /**
@@ -124,6 +127,24 @@ class SettingsViewModel @Inject constructor(
         if (enabled == streamingEnabled.value) return
         viewModelScope.launch {
             musicRepository.applyStreamingMode(enabled = enabled)
+        }
+    }
+
+    fun onNavidromeExportEnabledChanged(enabled: Boolean) {
+        viewModelScope.launch {
+            navidromeExportPreferences.setEnabled(enabled)
+        }
+    }
+
+    fun onNavidromeExportUrlChanged(url: String) {
+        viewModelScope.launch {
+            navidromeExportPreferences.setServerUrl(url)
+        }
+    }
+
+    fun onNavidromeExportTokenChanged(token: String) {
+        viewModelScope.launch {
+            navidromeExportPreferences.setToken(token)
         }
     }
 
@@ -198,6 +219,7 @@ class SettingsViewModel @Inject constructor(
         autoSavedCountLast7Days,
         losslessPrefs.youtubeFallbackEnabled,
         stashMixPreference.enabled,
+        navidromeExportPreferences.config,
     ) { values ->
         @Suppress("UNCHECKED_CAST")
         val spotifyAuth = values[0] as AuthState
@@ -227,6 +249,7 @@ class SettingsViewModel @Inject constructor(
         val autoSavedCount7d = values[24] as Int
         val youtubeFallbackEnabled = values[25] as Boolean
         val stashMixesEnabled = values[26] as Boolean
+        val navidromeExportConfig = values[27] as NavidromeExportConfig
 
         val lastFmState: LastFmAuthState = local.lastFmAuthOverride
             ?: when {
@@ -278,6 +301,9 @@ class SettingsViewModel @Inject constructor(
             hasCrashReport = local.hasCrashReport,
             databaseBackupState = local.databaseBackupState,
             showImportConfirmation = local.showImportConfirmation,
+            navidromeExportEnabled = navidromeExportConfig.enabled,
+            navidromeExportUrl = navidromeExportConfig.serverUrl,
+            navidromeExportToken = navidromeExportConfig.token,
         )
     }.stateIn(
         scope = viewModelScope,

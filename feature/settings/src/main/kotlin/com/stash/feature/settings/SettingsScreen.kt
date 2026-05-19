@@ -244,6 +244,9 @@ fun SettingsScreen(
         onHeartDefaultStashChanged = viewModel::onHeartDefaultStashChanged,
         onHeartDefaultSpotifyChanged = viewModel::onHeartDefaultSpotifyChanged,
         onHeartDefaultYtMusicChanged = viewModel::onHeartDefaultYtMusicChanged,
+        onNavidromeExportEnabledChanged = viewModel::onNavidromeExportEnabledChanged,
+        onNavidromeExportUrlChanged = viewModel::onNavidromeExportUrlChanged,
+        onNavidromeExportTokenChanged = viewModel::onNavidromeExportTokenChanged,
         onExportDatabase = viewModel::onExportDatabase,
         onImportDatabase = viewModel::onImportDatabase,
         onConfirmImportDatabase = {
@@ -307,6 +310,9 @@ private fun SettingsContent(
     onHeartDefaultStashChanged: (Boolean) -> Unit,
     onHeartDefaultSpotifyChanged: (Boolean) -> Unit,
     onHeartDefaultYtMusicChanged: (Boolean) -> Unit,
+    onNavidromeExportEnabledChanged: (Boolean) -> Unit,
+    onNavidromeExportUrlChanged: (String) -> Unit,
+    onNavidromeExportTokenChanged: (String) -> Unit,
     onExportDatabase: (Uri) -> Unit,
     onImportDatabase: (Uri) -> Unit,
     onConfirmImportDatabase: () -> Unit,
@@ -488,6 +494,53 @@ private fun SettingsContent(
                 )
             },
         )
+
+        // -- Navidrome export -------------------------------------------------
+        SectionHeader(title = "Navidrome")
+        GlassCard {
+            Column(
+                modifier = Modifier.fillMaxWidth(),
+                verticalArrangement = Arrangement.spacedBy(12.dp),
+            ) {
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    Column(modifier = Modifier.weight(1f)) {
+                        Text(
+                            text = "Auto upload",
+                            style = MaterialTheme.typography.titleMedium,
+                            color = MaterialTheme.colorScheme.onSurface,
+                        )
+                        Text(
+                            text = "Runs on Wi-Fi while charging after downloads finish.",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
+                    }
+                    Switch(
+                        checked = uiState.navidromeExportEnabled,
+                        onCheckedChange = onNavidromeExportEnabledChanged,
+                    )
+                }
+                OutlinedTextField(
+                    value = uiState.navidromeExportUrl,
+                    onValueChange = onNavidromeExportUrlChanged,
+                    modifier = Modifier.fillMaxWidth(),
+                    singleLine = true,
+                    label = { Text("Ingest URL") },
+                    placeholder = { Text("https://learnwithclawdbot.com/stash-ingest") },
+                )
+                OutlinedTextField(
+                    value = uiState.navidromeExportToken,
+                    onValueChange = onNavidromeExportTokenChanged,
+                    modifier = Modifier.fillMaxWidth(),
+                    singleLine = true,
+                    label = { Text("Token") },
+                )
+            }
+        }
 
         // Last.fm lives in the Accounts group (v0.4.1 relocation) so
         // users who are scanning for "sign-in / connect" surfaces see
