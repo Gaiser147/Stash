@@ -43,16 +43,38 @@ class NavidromePlaylistExportWorker @AssistedInject constructor(
                             title = track.title,
                             ext = ext,
                         )
-                        when (ingestClient.uploadFile(filePath, relativePath)) {
-                            NavidromeUploadOutcome.Success -> entries += PlaylistEntry(
-                                track = track,
-                                navidromePath = scheduler.navidromeLibraryEntry(
-                                    artist = track.artist,
-                                    album = track.album.takeIf { it.isNotBlank() },
-                                    title = track.title,
-                                    ext = ext,
-                                ),
-                            )
+                        val album = track.album.takeIf { it.isNotBlank() }
+                        val metadata = NavidromeTrackMetadata(
+                            title = track.title,
+                            artist = track.artist,
+                            album = album,
+                            albumArtist = track.albumArtist.takeIf { it.isNotBlank() } ?: track.artist,
+                        )
+                        when (ingestClient.uploadFile(filePath, relativePath, metadata)) {
+                            NavidromeUploadOutcome.Success -> {
+                                val artSource = track.albumArtPath ?: track.albumArtUrl
+                                when (
+                                    ingestClient.uploadCover(
+                                        artSource,
+                                        scheduler.albumCoverRelativePath(track.artist, album, artSource),
+                                    )
+                                ) {
+                                    NavidromeUploadOutcome.Success -> Unit
+                                    NavidromeUploadOutcome.PermanentFailure -> {
+                                        Log.w(TAG, "Permanent Navidrome cover upload failure for track ${track.id}")
+                                    }
+                                    NavidromeUploadOutcome.RetryableFailure -> sawRetryableFailure = true
+                                }
+                                entries += PlaylistEntry(
+                                    track = track,
+                                    navidromePath = scheduler.navidromeLibraryEntry(
+                                        artist = track.artist,
+                                        album = album,
+                                        title = track.title,
+                                        ext = ext,
+                                    ),
+                                )
+                            }
                             NavidromeUploadOutcome.PermanentFailure -> {
                                 Log.w(TAG, "Skipping permanent Navidrome upload failure for track ${track.id}")
                             }

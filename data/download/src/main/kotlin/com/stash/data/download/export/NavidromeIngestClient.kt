@@ -2,6 +2,7 @@ package com.stash.data.download.export
 
 import android.content.Context
 import android.net.Uri
+import android.util.Base64
 import android.util.Log
 import dagger.hilt.android.qualifiers.ApplicationContext
 import java.io.File
@@ -17,6 +18,7 @@ import okhttp3.RequestBody
 import okhttp3.RequestBody.Companion.toRequestBody
 import okio.BufferedSink
 import okio.source
+import org.json.JSONObject
 
 sealed interface NavidromeUploadOutcome {
     data object Success : NavidromeUploadOutcome
@@ -24,13 +26,24 @@ sealed interface NavidromeUploadOutcome {
     data object RetryableFailure : NavidromeUploadOutcome
 }
 
+data class NavidromeTrackMetadata(
+    val title: String,
+    val artist: String,
+    val album: String?,
+    val albumArtist: String?,
+)
+
 @Singleton
 class NavidromeIngestClient @Inject constructor(
     @ApplicationContext private val context: Context,
     private val prefs: NavidromeExportPreferences,
     private val httpClient: OkHttpClient,
 ) {
-    suspend fun uploadFile(filePath: String, relativePath: String): NavidromeUploadOutcome = withContext(Dispatchers.IO) {
+    suspend fun uploadFile(
+        filePath: String,
+        relativePath: String,
+        metadata: NavidromeTrackMetadata? = null,
+    ): NavidromeUploadOutcome = withContext(Dispatchers.IO) {
         val config = prefs.current()
         if (!config.configured) return@withContext NavidromeUploadOutcome.Success
 
@@ -50,11 +63,45 @@ class NavidromeIngestClient @Inject constructor(
                 .header("Authorization", "Bearer ${config.token}")
                 .header("X-Stash-Sha256", sha256(uploadFile))
                 .header("X-Stash-Size", uploadFile.length().toString())
+                .apply {
+                    metadataHeader(metadata)?.let { header("X-Stash-Metadata", it) }
+                }
                 .build()
 
             execute(request, "file $relativePath")
         } catch (e: Exception) {
             Log.w(TAG, "Navidrome file upload failed", e)
+            NavidromeUploadOutcome.RetryableFailure
+        } finally {
+            if (deleteWhenDone) runCatching { uploadFile.delete() }
+        }
+    }
+
+    suspend fun uploadCover(artPathOrUrl: String?, relativePath: String): NavidromeUploadOutcome = withContext(Dispatchers.IO) {
+        val config = prefs.current()
+        if (!config.configured || artPathOrUrl.isNullOrBlank()) return@withContext NavidromeUploadOutcome.Success
+
+        val uploadFile = materializeArtwork(artPathOrUrl).getOrElse { e ->
+            Log.w(TAG, "Could not open cover source: $artPathOrUrl", e)
+            return@withContext NavidromeUploadOutcome.RetryableFailure
+        }
+        val deleteWhenDone = uploadFile.parentFile == context.cacheDir && uploadFile.name.startsWith("navidrome_art_")
+
+        try {
+            if (!uploadFile.exists() || uploadFile.length() <= 0) {
+                return@withContext NavidromeUploadOutcome.RetryableFailure
+            }
+            val request = Request.Builder()
+                .url("${config.serverUrl.trimEnd('/')}/v1/covers/${encodePath(relativePath)}")
+                .put(FileRequestBody(uploadFile))
+                .header("Authorization", "Bearer ${config.token}")
+                .header("X-Stash-Sha256", sha256(uploadFile))
+                .header("X-Stash-Size", uploadFile.length().toString())
+                .build()
+
+            execute(request, "cover $relativePath")
+        } catch (e: Exception) {
+            Log.w(TAG, "Navidrome cover upload failed", e)
             NavidromeUploadOutcome.RetryableFailure
         } finally {
             if (deleteWhenDone) runCatching { uploadFile.delete() }
@@ -103,6 +150,45 @@ class NavidromeIngestClient @Inject constructor(
             temp.outputStream().use { output -> input.copyTo(output) }
         } ?: error("Could not open $uri")
         temp
+    }
+
+    private fun materializeArtwork(source: String): Result<File> = runCatching {
+        if (!source.startsWith("http://") && !source.startsWith("https://")) {
+            return@runCatching materialize(source).getOrThrow()
+        }
+        val request = Request.Builder().url(source).get().build()
+        httpClient.newCall(request).execute().use { response ->
+            if (!response.isSuccessful) error("cover fetch failed: ${response.code}")
+            val body = response.body ?: error("cover response had no body")
+            val ext = when (body.contentType()?.subtype?.lowercase()) {
+                "jpeg", "jpg" -> "jpg"
+                "png" -> "png"
+                "webp" -> "webp"
+                else -> extensionOf(source, fallback = "jpg")
+            }
+            val temp = File(context.cacheDir, "navidrome_art_${System.currentTimeMillis()}.$ext")
+            body.byteStream().use { input ->
+                temp.outputStream().use { output -> input.copyTo(output) }
+            }
+            temp
+        }
+    }
+
+    private fun metadataHeader(metadata: NavidromeTrackMetadata?): String? {
+        metadata ?: return null
+        val json = JSONObject()
+            .put("title", metadata.title)
+            .put("artist", metadata.artist)
+        metadata.album?.takeIf { it.isNotBlank() }?.let { json.put("album", it) }
+        metadata.albumArtist?.takeIf { it.isNotBlank() }?.let { json.put("album_artist", it) }
+        val bytes = json.toString().toByteArray(Charsets.UTF_8)
+        return Base64.encodeToString(bytes, Base64.URL_SAFE or Base64.NO_WRAP or Base64.NO_PADDING)
+    }
+
+    private fun extensionOf(pathOrUrl: String, fallback: String): String {
+        val name = Uri.parse(pathOrUrl).lastPathSegment.orEmpty()
+        val ext = name.substringAfterLast('.', fallback).lowercase()
+        return ext.takeIf { it in setOf("jpg", "jpeg", "png", "webp") } ?: fallback
     }
 
     private fun sha256(file: File): String {

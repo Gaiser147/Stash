@@ -278,6 +278,9 @@ class DownloadManager @Inject constructor(
             artist = effectiveTrack.artist,
             album = effectiveTrack.album.ifEmpty { null },
             title = effectiveTrack.title,
+            albumArtist = effectiveTrack.artist,
+            albumArtUrl = effectiveTrack.albumArtUrl,
+            albumArtPath = effectiveTrack.albumArtPath,
         )
         emitProgress(track.id, 1f, DownloadStatus.COMPLETED)
         return TrackDownloadResult.Success(committed.filePath)
@@ -415,6 +418,9 @@ class DownloadManager @Inject constructor(
                     artist = track.artist,
                     album = track.album.takeIf { it.isNotBlank() },
                     title = track.title,
+                    albumArtist = track.artist,
+                    albumArtUrl = track.albumArtUrl,
+                    albumArtPath = track.albumArtPath,
                 )
 
                 emitProgress(track.id, 1f, DownloadStatus.COMPLETED)

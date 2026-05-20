@@ -30,6 +30,9 @@ class NavidromeUploadScheduler @Inject constructor(
         artist: String,
         album: String?,
         title: String,
+        albumArtist: String?,
+        albumArtUrl: String?,
+        albumArtPath: String?,
     ) {
         if (!prefs.current().configured) return
         val relativePath = buildRelativePath(artist, album, title, extensionOf(filePath))
@@ -40,6 +43,12 @@ class NavidromeUploadScheduler @Inject constructor(
                 Data.Builder()
                     .putString(NavidromeUploadWorker.KEY_FILE_PATH, filePath)
                     .putString(NavidromeUploadWorker.KEY_RELATIVE_PATH, relativePath)
+                    .putString(NavidromeUploadWorker.KEY_TITLE, title)
+                    .putString(NavidromeUploadWorker.KEY_ARTIST, artist)
+                    .putString(NavidromeUploadWorker.KEY_ALBUM, album)
+                    .putString(NavidromeUploadWorker.KEY_ALBUM_ARTIST, albumArtist)
+                    .putString(NavidromeUploadWorker.KEY_ALBUM_ART_URL, albumArtUrl)
+                    .putString(NavidromeUploadWorker.KEY_ALBUM_ART_PATH, albumArtPath)
                     .build(),
             )
             .build()
@@ -69,6 +78,15 @@ class NavidromeUploadScheduler @Inject constructor(
     fun relativePathForTrack(artist: String, album: String?, title: String, ext: String): String =
         buildRelativePath(artist, album, title, ext)
 
+    fun albumCoverRelativePath(artist: String, album: String?, artPathOrUrl: String?): String {
+        val ext = coverExtensionOf(artPathOrUrl)
+        return listOf(
+            slugify(artist).ifBlank { "unknown-artist" },
+            slugify(album?.takeIf { it.isNotBlank() } ?: "singles").ifBlank { "singles" },
+            "cover.$ext",
+        ).joinToString("/")
+    }
+
     fun extensionOfPath(path: String): String = extensionOf(path)
 
     private fun uploadConstraints(): Constraints = Constraints.Builder()
@@ -83,6 +101,14 @@ class NavidromeUploadScheduler @Inject constructor(
             File(path).name
         }
         return source.substringAfterLast('.', "flac").lowercase(Locale.US).ifBlank { "flac" }
+    }
+
+    private fun coverExtensionOf(pathOrUrl: String?): String {
+        val source = pathOrUrl?.let {
+            if (it.startsWith("content://")) Uri.parse(it).lastPathSegment.orEmpty() else it
+        }.orEmpty()
+        val ext = source.substringBefore('?').substringAfterLast('.', "jpg").lowercase(Locale.US)
+        return ext.takeIf { it in setOf("jpg", "jpeg", "png", "webp") } ?: "jpg"
     }
 
     private fun buildRelativePath(artist: String, album: String?, title: String, ext: String): String =
