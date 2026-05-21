@@ -7,6 +7,7 @@ import android.util.Log
 import dagger.hilt.android.qualifiers.ApplicationContext
 import java.io.File
 import java.security.MessageDigest
+import java.util.UUID
 import javax.inject.Inject
 import javax.inject.Singleton
 import kotlinx.coroutines.Dispatchers
@@ -22,6 +23,7 @@ import org.json.JSONObject
 
 sealed interface NavidromeUploadOutcome {
     data object Success : NavidromeUploadOutcome
+    data object SkippedNoSource : NavidromeUploadOutcome
     data object PermanentFailure : NavidromeUploadOutcome
     data object RetryableFailure : NavidromeUploadOutcome
 }
@@ -31,6 +33,17 @@ data class NavidromeTrackMetadata(
     val artist: String,
     val album: String?,
     val albumArtist: String?,
+)
+
+data class NavidromeSyncSummary(
+    val tracksUploaded: Int,
+    val tracksSkipped: Int,
+    val trackFailures: Int,
+    val coversUploaded: Int,
+    val coversSkipped: Int,
+    val coverFailures: Int,
+    val playlistsUploaded: Int,
+    val playlistFailures: Int,
 )
 
 @Singleton
@@ -79,7 +92,8 @@ class NavidromeIngestClient @Inject constructor(
 
     suspend fun uploadCover(artPathOrUrl: String?, relativePath: String): NavidromeUploadOutcome = withContext(Dispatchers.IO) {
         val config = prefs.current()
-        if (!config.configured || artPathOrUrl.isNullOrBlank()) return@withContext NavidromeUploadOutcome.Success
+        if (!config.configured) return@withContext NavidromeUploadOutcome.Success
+        if (artPathOrUrl.isNullOrBlank()) return@withContext NavidromeUploadOutcome.SkippedNoSource
 
         val uploadFile = materializeArtwork(artPathOrUrl).getOrElse { e ->
             Log.w(TAG, "Could not open cover source: $artPathOrUrl", e)
@@ -126,6 +140,35 @@ class NavidromeIngestClient @Inject constructor(
         }
     }
 
+    suspend fun syncComplete(summary: NavidromeSyncSummary): NavidromeUploadOutcome = withContext(Dispatchers.IO) {
+        val config = prefs.current()
+        if (!config.configured) return@withContext NavidromeUploadOutcome.Success
+
+        try {
+            val body = JSONObject()
+                .put("tracksUploaded", summary.tracksUploaded)
+                .put("tracksSkipped", summary.tracksSkipped)
+                .put("trackFailures", summary.trackFailures)
+                .put("coversUploaded", summary.coversUploaded)
+                .put("coversSkipped", summary.coversSkipped)
+                .put("coverFailures", summary.coverFailures)
+                .put("playlistsUploaded", summary.playlistsUploaded)
+                .put("playlistFailures", summary.playlistFailures)
+                .toString()
+                .toRequestBody("application/json; charset=utf-8".toMediaType())
+            val request = Request.Builder()
+                .url("${config.serverUrl.trimEnd('/')}/v1/sync-complete")
+                .post(body)
+                .header("Authorization", "Bearer ${config.token}")
+                .build()
+
+            execute(request, "sync summary")
+        } catch (e: Exception) {
+            Log.w(TAG, "Navidrome sync summary failed", e)
+            NavidromeUploadOutcome.RetryableFailure
+        }
+    }
+
     private fun execute(request: Request, label: String): NavidromeUploadOutcome {
         httpClient.newCall(request).execute().use { response ->
             return if (response.isSuccessful) {
@@ -166,9 +209,22 @@ class NavidromeIngestClient @Inject constructor(
                 "webp" -> "webp"
                 else -> extensionOf(source, fallback = "jpg")
             }
-            val temp = File(context.cacheDir, "navidrome_art_${System.currentTimeMillis()}.$ext")
+            val temp = File(context.cacheDir, "navidrome_art_${UUID.randomUUID()}.$ext")
+            body.contentLength().takeIf { it > MAX_COVER_BYTES }?.let {
+                error("cover is too large: $it bytes")
+            }
             body.byteStream().use { input ->
-                temp.outputStream().use { output -> input.copyTo(output) }
+                temp.outputStream().use { output ->
+                    val buffer = ByteArray(64 * 1024)
+                    var total = 0L
+                    while (true) {
+                        val read = input.read(buffer)
+                        if (read == -1) break
+                        total += read
+                        if (total > MAX_COVER_BYTES) error("cover exceeded $MAX_COVER_BYTES bytes")
+                        output.write(buffer, 0, read)
+                    }
+                }
             }
             temp
         }
@@ -217,5 +273,6 @@ class NavidromeIngestClient @Inject constructor(
 
     companion object {
         private const val TAG = "NavidromeIngestClient"
+        private const val MAX_COVER_BYTES = 10L * 1024L * 1024L
     }
 }

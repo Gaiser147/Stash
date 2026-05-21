@@ -13,6 +13,7 @@ class NavidromeUploadWorker @AssistedInject constructor(
     @Assisted params: WorkerParameters,
     private val ingestClient: NavidromeIngestClient,
     private val scheduler: NavidromeUploadScheduler,
+    private val coverResolver: NavidromeCoverResolver,
 ) : CoroutineWorker(appContext, params) {
     override suspend fun doWork(): Result {
         val filePath = inputData.getString(KEY_FILE_PATH) ?: return Result.failure()
@@ -21,7 +22,16 @@ class NavidromeUploadWorker @AssistedInject constructor(
         val artist = inputData.getString(KEY_ARTIST).orEmpty()
         val album = inputData.getString(KEY_ALBUM)
         val albumArtist = inputData.getString(KEY_ALBUM_ARTIST)
-        val artSource = inputData.getString(KEY_ALBUM_ART_PATH) ?: inputData.getString(KEY_ALBUM_ART_URL)
+        val albumArtUrl = inputData.getString(KEY_ALBUM_ART_URL)
+        val albumArtPath = inputData.getString(KEY_ALBUM_ART_PATH)
+        val youtubeId = inputData.getString(KEY_YOUTUBE_ID)
+        val artSource = coverResolver.resolve(
+            artist = artist,
+            title = title,
+            albumArtPath = albumArtPath,
+            albumArtUrl = albumArtUrl,
+            youtubeId = youtubeId,
+        )
         val metadata = if (title.isNotBlank() && artist.isNotBlank()) {
             NavidromeTrackMetadata(
                 title = title,
@@ -51,6 +61,7 @@ class NavidromeUploadWorker @AssistedInject constructor(
     private fun resultFor(outcome: NavidromeUploadOutcome): Result =
         when (outcome) {
             NavidromeUploadOutcome.Success -> Result.success()
+            NavidromeUploadOutcome.SkippedNoSource -> Result.success()
             NavidromeUploadOutcome.PermanentFailure -> Result.failure()
             NavidromeUploadOutcome.RetryableFailure -> Result.retry()
         }
@@ -64,5 +75,6 @@ class NavidromeUploadWorker @AssistedInject constructor(
         const val KEY_ALBUM_ARTIST = "album_artist"
         const val KEY_ALBUM_ART_URL = "album_art_url"
         const val KEY_ALBUM_ART_PATH = "album_art_path"
+        const val KEY_YOUTUBE_ID = "youtube_id"
     }
 }

@@ -9,6 +9,7 @@ interface NavidromeExportScheduler {
         albumArtist: String? = null,
         albumArtUrl: String? = null,
         albumArtPath: String? = null,
+        youtubeId: String? = null,
     )
 
     suspend fun enqueuePlaylistExport()

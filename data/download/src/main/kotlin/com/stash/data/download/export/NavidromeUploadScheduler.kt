@@ -33,6 +33,7 @@ class NavidromeUploadScheduler @Inject constructor(
         albumArtist: String?,
         albumArtUrl: String?,
         albumArtPath: String?,
+        youtubeId: String?,
     ) {
         if (!prefs.current().configured) return
         val relativePath = buildRelativePath(artist, album, title, extensionOf(filePath))
@@ -49,12 +50,13 @@ class NavidromeUploadScheduler @Inject constructor(
                     .putString(NavidromeUploadWorker.KEY_ALBUM_ARTIST, albumArtist)
                     .putString(NavidromeUploadWorker.KEY_ALBUM_ART_URL, albumArtUrl)
                     .putString(NavidromeUploadWorker.KEY_ALBUM_ART_PATH, albumArtPath)
+                    .putString(NavidromeUploadWorker.KEY_YOUTUBE_ID, youtubeId)
                     .build(),
             )
             .build()
         WorkManager.getInstance(context).enqueueUniqueWork(
             "navidrome-upload-${stableId(filePath, relativePath)}",
-            ExistingWorkPolicy.KEEP,
+            ExistingWorkPolicy.REPLACE,
             work,
         )
     }

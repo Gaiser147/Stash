@@ -4,6 +4,7 @@ import com.stash.core.data.db.dao.PlaylistDao
 import com.stash.core.data.db.dao.TrackDao
 import com.stash.core.data.lastfm.LastFmApiClient
 import com.stash.core.data.lastfm.LastFmCredentials
+import com.stash.core.data.sync.NavidromeExportScheduler
 import com.stash.core.model.Track
 import com.stash.data.download.files.FileOrganizer
 import com.stash.data.download.lossless.LosslessSourcePreferences
@@ -55,6 +56,7 @@ class DownloadManagerDeferTest {
     private val losslessPrefs: LosslessSourcePreferences = mockk(relaxed = true)
     private val trackFinalizer: TrackFinalizer = mockk(relaxed = true)
     private val loudnessMeasurer: com.stash.core.data.audio.LoudnessMeasurer = mockk(relaxed = true)
+    private val navidromeUploadScheduler: NavidromeExportScheduler = mockk(relaxed = true)
 
     private fun newSubject(): DownloadManager = DownloadManager(
         downloadExecutor = downloadExecutor,
@@ -74,6 +76,7 @@ class DownloadManagerDeferTest {
         losslessPrefs = losslessPrefs,
         trackFinalizer = trackFinalizer,
         loudnessMeasurer = loudnessMeasurer,
+        navidromeUploadScheduler = navidromeUploadScheduler,
     )
 
     private fun stubTrack(): Track = Track(

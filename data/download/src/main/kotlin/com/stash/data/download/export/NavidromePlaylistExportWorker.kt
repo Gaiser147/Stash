@@ -20,11 +20,13 @@ class NavidromePlaylistExportWorker @AssistedInject constructor(
     private val playlistDao: PlaylistDao,
     private val scheduler: NavidromeUploadScheduler,
     private val ingestClient: NavidromeIngestClient,
+    private val coverResolver: NavidromeCoverResolver,
 ) : CoroutineWorker(appContext, params) {
     override suspend fun doWork(): Result {
         if (!prefs.current().configured) return Result.success()
 
         var sawRetryableFailure = false
+        val stats = ExportStats()
         val sources = listOf(MusicSource.SPOTIFY, MusicSource.YOUTUBE)
 
         sources.forEach { source ->
@@ -52,18 +54,24 @@ class NavidromePlaylistExportWorker @AssistedInject constructor(
                         )
                         when (ingestClient.uploadFile(filePath, relativePath, metadata)) {
                             NavidromeUploadOutcome.Success -> {
-                                val artSource = track.albumArtPath ?: track.albumArtUrl
+                                stats.tracksUploaded++
+                                val artSource = coverResolver.resolve(track)
                                 when (
                                     ingestClient.uploadCover(
                                         artSource,
                                         scheduler.albumCoverRelativePath(track.artist, album, artSource),
                                     )
                                 ) {
-                                    NavidromeUploadOutcome.Success -> Unit
+                                    NavidromeUploadOutcome.Success -> stats.coversUploaded++
+                                    NavidromeUploadOutcome.SkippedNoSource -> stats.coversSkipped++
                                     NavidromeUploadOutcome.PermanentFailure -> {
+                                        stats.coverFailures++
                                         Log.w(TAG, "Permanent Navidrome cover upload failure for track ${track.id}")
                                     }
-                                    NavidromeUploadOutcome.RetryableFailure -> sawRetryableFailure = true
+                                    NavidromeUploadOutcome.RetryableFailure -> {
+                                        stats.coverFailures++
+                                        sawRetryableFailure = true
+                                    }
                                 }
                                 entries += PlaylistEntry(
                                     track = track,
@@ -76,21 +84,37 @@ class NavidromePlaylistExportWorker @AssistedInject constructor(
                                 )
                             }
                             NavidromeUploadOutcome.PermanentFailure -> {
+                                stats.trackFailures++
                                 Log.w(TAG, "Skipping permanent Navidrome upload failure for track ${track.id}")
                             }
-                            NavidromeUploadOutcome.RetryableFailure -> sawRetryableFailure = true
+                            NavidromeUploadOutcome.RetryableFailure -> {
+                                stats.trackFailures++
+                                sawRetryableFailure = true
+                            }
+                            NavidromeUploadOutcome.SkippedNoSource -> stats.tracksSkipped++
                         }
                     }
 
                 val fileName = playlistFileName(source, playlist.id, playlist.name)
                 when (ingestClient.uploadPlaylist(fileName, buildM3u(entries))) {
-                    NavidromeUploadOutcome.Success -> Unit
+                    NavidromeUploadOutcome.Success -> stats.playlistsUploaded++
                     NavidromeUploadOutcome.PermanentFailure -> {
+                        stats.playlistFailures++
                         Log.w(TAG, "Permanent Navidrome playlist upload failure for ${playlist.name}")
                     }
-                    NavidromeUploadOutcome.RetryableFailure -> sawRetryableFailure = true
+                    NavidromeUploadOutcome.RetryableFailure -> {
+                        stats.playlistFailures++
+                        sawRetryableFailure = true
+                    }
+                    NavidromeUploadOutcome.SkippedNoSource -> stats.playlistFailures++
                 }
             }
+        }
+
+        when (ingestClient.syncComplete(stats.toSummary())) {
+            NavidromeUploadOutcome.Success, NavidromeUploadOutcome.SkippedNoSource -> Unit
+            NavidromeUploadOutcome.PermanentFailure -> Log.w(TAG, "Permanent Navidrome sync summary failure")
+            NavidromeUploadOutcome.RetryableFailure -> sawRetryableFailure = true
         }
 
         return if (sawRetryableFailure) Result.retry() else Result.success()
@@ -125,6 +149,28 @@ class NavidromePlaylistExportWorker @AssistedInject constructor(
         val track: TrackEntity,
         val navidromePath: String,
     )
+
+    private data class ExportStats(
+        var tracksUploaded: Int = 0,
+        var tracksSkipped: Int = 0,
+        var trackFailures: Int = 0,
+        var coversUploaded: Int = 0,
+        var coversSkipped: Int = 0,
+        var coverFailures: Int = 0,
+        var playlistsUploaded: Int = 0,
+        var playlistFailures: Int = 0,
+    ) {
+        fun toSummary() = NavidromeSyncSummary(
+            tracksUploaded = tracksUploaded,
+            tracksSkipped = tracksSkipped,
+            trackFailures = trackFailures,
+            coversUploaded = coversUploaded,
+            coversSkipped = coversSkipped,
+            coverFailures = coverFailures,
+            playlistsUploaded = playlistsUploaded,
+            playlistFailures = playlistFailures,
+        )
+    }
 
     companion object {
         private const val TAG = "NavidromePlaylistExport"

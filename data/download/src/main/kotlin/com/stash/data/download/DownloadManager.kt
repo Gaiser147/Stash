@@ -281,6 +281,7 @@ class DownloadManager @Inject constructor(
             albumArtist = effectiveTrack.artist,
             albumArtUrl = effectiveTrack.albumArtUrl,
             albumArtPath = effectiveTrack.albumArtPath,
+            youtubeId = effectiveTrack.youtubeId,
         )
         emitProgress(track.id, 1f, DownloadStatus.COMPLETED)
         return TrackDownloadResult.Success(committed.filePath)
@@ -421,6 +422,7 @@ class DownloadManager @Inject constructor(
                     albumArtist = track.artist,
                     albumArtUrl = track.albumArtUrl,
                     albumArtPath = track.albumArtPath,
+                    youtubeId = track.youtubeId,
                 )
 
                 emitProgress(track.id, 1f, DownloadStatus.COMPLETED)
