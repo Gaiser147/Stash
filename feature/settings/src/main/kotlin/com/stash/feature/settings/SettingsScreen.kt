@@ -264,6 +264,8 @@ fun SettingsScreen(
         onDiagnosticsRefresh = viewModel::refreshDiagnostics,
         streamingEnabled = viewModel.streamingEnabled.collectAsStateWithLifecycle().value,
         onStreamingToggle = viewModel::onStreamingToggle,
+        streamOnCellular = viewModel.streamOnCellular.collectAsStateWithLifecycle().value,
+        onStreamOnCellularToggle = viewModel::onStreamOnCellularToggle,
         treePicker = treePicker,
         onSetPickerIntent = { pendingPickerIntent = it },
         modifier = modifier,
@@ -339,6 +341,10 @@ private fun SettingsContent(
     streamingEnabled: Boolean,
     /** Routed to [SettingsViewModel.onStreamingToggle] in the host. */
     onStreamingToggle: (Boolean) -> Unit,
+    /** Live "stream on cellular" pref — see [SettingsViewModel.streamOnCellular]. */
+    streamOnCellular: Boolean,
+    /** Routed to [SettingsViewModel.onStreamOnCellularToggle] in the host. */
+    onStreamOnCellularToggle: (Boolean) -> Unit,
     modifier: Modifier = Modifier,
 ) {
     val extendedColors = StashTheme.extendedColors
@@ -369,24 +375,6 @@ private fun SettingsContent(
             style = MaterialTheme.typography.headlineLarge,
             color = MaterialTheme.colorScheme.onBackground,
         )
-
-        // -- Playback (Online / Offline mode) --------------------------------
-        // Canonical home for the streaming-mode preference. Settings is where
-        // users expect to find app-wide modes; the Home top-bar chip
-        // (StreamingModeChip) is the quick-access surface that writes to the
-        // same preference. Both render the OnlineOfflinePicker so the control
-        // surface is identical regardless of entry point.
-        if (com.stash.core.common.constants.StashConstants.STREAMING_ENGINE_ENABLED) {
-            SectionHeader(title = "Playback")
-            GlassCard {
-                Column(modifier = Modifier.fillMaxWidth()) {
-                    com.stash.core.ui.components.OnlineOfflinePicker(
-                        streamingEnabled = streamingEnabled,
-                        onSelect = onStreamingToggle,
-                    )
-                }
-            }
-        }
 
         // -- Support section --------------------------------------------------
         val uriHandler = androidx.compose.ui.platform.LocalUriHandler.current
@@ -438,6 +426,53 @@ private fun SettingsContent(
                         )
                         Spacer(modifier = Modifier.width(6.dp))
                         Text("Star", style = MaterialTheme.typography.labelMedium)
+                    }
+                }
+            }
+        }
+
+        // -- Playback (Online / Offline mode) --------------------------------
+        // Canonical home for the streaming-mode preference. Settings is where
+        // users expect to find app-wide modes; the Home top-bar chip
+        // (StreamingModeChip) is the quick-access surface that writes to the
+        // same preference. Both render the OnlineOfflinePicker so the control
+        // surface is identical regardless of entry point.
+        if (com.stash.core.common.constants.StashConstants.STREAMING_ENGINE_ENABLED) {
+            SectionHeader(title = "Playback")
+            GlassCard {
+                Column(modifier = Modifier.fillMaxWidth()) {
+                    com.stash.core.ui.components.OnlineOfflinePicker(
+                        streamingEnabled = streamingEnabled,
+                        onSelect = onStreamingToggle,
+                    )
+
+                    // Cellular toggle. Visible regardless of streaming on/off so
+                    // the user can pre-set their preference. When streaming is off
+                    // the value still persists; PlayerRepositoryImpl reads it only
+                    // when streamingEnabled == true so there's no behavioral coupling.
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(horizontal = 16.dp, vertical = 12.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                    ) {
+                        Column(modifier = Modifier.weight(1f)) {
+                            Text(
+                                text = "Stream on cellular",
+                                style = MaterialTheme.typography.bodyMedium,
+                                color = MaterialTheme.colorScheme.onSurface,
+                            )
+                            Text(
+                                text = "Allow streaming over mobile data (5G / LTE). Off by default to avoid surprise data use.",
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            )
+                        }
+                        Spacer(Modifier.width(12.dp))
+                        Switch(
+                            checked = streamOnCellular,
+                            onCheckedChange = onStreamOnCellularToggle,
+                        )
                     }
                 }
             }

@@ -64,6 +64,18 @@ class QobuzSource @Inject constructor(
     /** Observable view of the most recently rejected captcha cookie. */
     val lastKnownBadCookie: StateFlow<String?> = _lastKnownBadCookie.asStateFlow()
 
+    /**
+     * Clear the lastKnownBad flag. Called by [SquidCookieAutoRefresher]
+     * after a successful `/api/altcha/verify` round-trip — that endpoint
+     * IS the server's authoritative cookie validation, so if it accepted
+     * the cookie any subsequent transient 403 (e.g. cookie-validator
+     * propagation lag across edge nodes) shouldn't pin the UI to "Expired"
+     * indefinitely. Effectively a "I just proved this cookie works" reset.
+     */
+    fun clearLastKnownBad() {
+        _lastKnownBadCookie.value = null
+    }
+
     override suspend fun isEnabled(): Boolean {
         // Circuit-broken via repeated failures? Skip.
         if (rateLimiter.stateOf(id).isCircuitBroken) return false
@@ -109,6 +121,7 @@ class QobuzSource @Inject constructor(
         resolveInternal(query, bypassRateLimit = true)
 
     private suspend fun resolveInternal(query: TrackQuery, bypassRateLimit: Boolean): SourceResult? {
+        Log.d(TAG, "resolve attempt artist='${query.artist}' title='${query.title}' isrc=${query.isrc ?: "none"}")
         // 1. Search squid.wtf for candidates. ISRC is Qobuz's best
         // index key — when we have one, send it as the query directly.
         val searchTerm = query.isrc ?: "${query.artist} ${query.title}"
@@ -116,7 +129,10 @@ class QobuzSource @Inject constructor(
             ?: return null
 
         val candidates = searchData.tracks?.items.orEmpty()
-        if (candidates.isEmpty()) return null
+        if (candidates.isEmpty()) {
+            Log.d(TAG, "no_match artist='${query.artist}' title='${query.title}' (search returned empty)")
+            return null
+        }
 
         // 2. Score and pick the best candidate that crosses the
         // confidence threshold.
@@ -135,7 +151,7 @@ class QobuzSource @Inject constructor(
             val top = scored.sortedByDescending { it.second }.take(3)
             Log.d(
                 TAG,
-                "no candidate above threshold ($MIN_CONFIDENCE) for '${query.artist} - ${query.title}': " +
+                "reason=below_confidence no candidate above threshold ($MIN_CONFIDENCE) for '${query.artist} - ${query.title}': " +
                     top.joinToString(", ") { (c, s) ->
                         "[${"%.2f".format(s)} '${c.title}' by '${c.performer?.name}']"
                     },
@@ -169,28 +185,31 @@ class QobuzSource @Inject constructor(
             ?: albumImage?.thumbnail
             ?: albumImage?.small
 
-        return SourceResult(
+        val format = AudioFormat(
+            // squid.wtf strips the upstream `mime_type`; map from
+            // the requested format_id since Qobuz returns the
+            // matching codec for each.
+            codec = if (requestedQuality == QobuzQuality.MP3_320) "mp3" else "flac",
+            // Bitrate left at 0 — FLAC is variable; the
+            // canonical value comes from AudioDurationExtractor
+            // after the file's on disk.
+            bitrateKbps = 0,
+            sampleRateHz = (best.first.maximumSamplingRate * 1000f).toInt(),
+            bitsPerSample = best.first.maximumBitDepth,
+        )
+        val result = SourceResult(
             sourceId = id,
             downloadUrl = download.url,
             // squid.wtf's CDN URLs are pre-signed query strings — no
             // extra headers needed for the actual file fetch.
             downloadHeaders = emptyMap(),
-            format = AudioFormat(
-                // squid.wtf strips the upstream `mime_type`; map from
-                // the requested format_id since Qobuz returns the
-                // matching codec for each.
-                codec = if (requestedQuality == QobuzQuality.MP3_320) "mp3" else "flac",
-                // Bitrate left at 0 — FLAC is variable; the
-                // canonical value comes from AudioDurationExtractor
-                // after the file's on disk.
-                bitrateKbps = 0,
-                sampleRateHz = (best.first.maximumSamplingRate * 1000f).toInt(),
-                bitsPerSample = best.first.maximumBitDepth,
-            ),
+            format = format,
             confidence = best.second,
             sourceTrackId = best.first.id.toString(),
             coverArtUrl = artUrl,
         )
+        Log.d(TAG, "resolved '${query.title}' url=${result.downloadUrl.take(60)}... codec=${format.codec}")
+        return result
     }
 
     override suspend fun rateLimitState(): RateLimitState = rateLimiter.stateOf(id)
@@ -215,6 +234,8 @@ class QobuzSource @Inject constructor(
             rateLimiter.reportSuccess(id)
             result
         } catch (e: QobuzApiException) {
+            val isCaptchaRequired = e.status == 403 &&
+                e.message?.contains("Captcha", ignoreCase = true) == true
             when {
                 e.status == 429 -> rateLimiter.reportRateLimited(id)
                 // 403 "Captcha required" is the normal expired-cookie
@@ -224,8 +245,8 @@ class QobuzSource @Inject constructor(
                 // disable the source for 30min even after the user
                 // refreshes the cookie. We skip the call but don't
                 // accumulate failures.
-                e.status == 403 && e.message?.contains("Captcha", ignoreCase = true) == true -> {
-                    Log.i(TAG, "captcha required — cookie likely expired; skipping without circuit-break")
+                isCaptchaRequired -> {
+                    Log.w(TAG, "failed reason=captcha_required cookie likely expired; skipping without circuit-break")
                     captchaExpiredNotifier.notifyExpired()
                     // Mark the current cookie as bad so isEnabled() skips squid until
                     // the user pastes a new value. Prevents wasting ~16s/track on
@@ -235,11 +256,13 @@ class QobuzSource @Inject constructor(
                 }
                 else -> rateLimiter.reportFailure(id)
             }
-            Log.w(TAG, "squid.wtf API call failed: $e")
+            if (!isCaptchaRequired) {
+                Log.w(TAG, "failed reason=network squid.wtf API call failed", e)
+            }
             null
         } catch (e: Exception) {
             rateLimiter.reportFailure(id)
-            Log.w(TAG, "squid.wtf call threw: ${e.javaClass.simpleName}: ${e.message}")
+            Log.w(TAG, "failed reason=network squid.wtf call threw: ${e.javaClass.simpleName}: ${e.message}", e)
             null
         }
     }
@@ -322,7 +345,13 @@ class QobuzSource @Inject constructor(
                 // contractions like "don't" tokenize as "don t" instead
                 // of "dont" and pollute the Jaccard set.
                 .replace(Regex("[''`]"), "")
-                .replace(Regex("[^\\p{L}\\p{N}\\s]"), " ")
+                // v0.9.x: include \p{S} (Symbols, incl. Currency) so stylized artist
+                // names like "¥$" (Kanye+Ty Dolla $ign), "$NOT", "+44", "!!!" survive
+                // normalization. Without this they stripped to empty string and
+                // artistSimilarity returned 0 for every catalog match, even when the
+                // title was an exact hit. Punctuation (\p{P}) still gets stripped, so
+                // commas/dashes/parens still tokenize correctly.
+                .replace(Regex("[^\\p{L}\\p{N}\\p{S}\\s]"), " ")
                 .replace(Regex("\\s+"), " ")
                 .trim()
 
@@ -346,12 +375,16 @@ class QobuzSource @Inject constructor(
          *  - Spotify: "Diana Ross and the Supremes" → Qobuz: "The Supremes"
          *  - Spotify: "Joey Bada$$ feat. Jay Electronica" → Qobuz: "Joey Bada$$"
          *  - Spotify: "Ghostemane, Shakewell, Pouya" → Qobuz: "Ghostemane"
+         *  - Spotify: "¥$, Kanye West, Ty Dolla $ign" → Qobuz: "¥$"
          *
          * Includes the single-canonical-artist case (Qobuz indexes
          * one lead artist where Spotify expands to a featuring list).
          * "Distinctive" gating guards against generic 1-3 char tokens
          * ("Air", "U2") spuriously matching unrelated acts that
          * happen to share that token.
+         * Stylized short names with symbols (¥$, $NOT, +44) bypass the
+         * length-only check via the non-alphanumeric clause — they're rare
+         * enough to be safe matches.
          *
          * Final fallback is plain jaccard, so unrelated artists with
          * partial token overlap still score reasonably.
@@ -367,7 +400,14 @@ class QobuzSource @Inject constructor(
 
             val smallerSize = minOf(setA.size, setB.size)
             val smallerFullyCovered = intersection.size == smallerSize
-            val hasDistinctiveOverlap = intersection.any { it.length > 3 }
+            // Distinctive = length > 3 OR contains a non-alphanumeric character.
+            // The second clause catches stylized short artist names like "¥$",
+            // "$NOT", "+44" — they're unique enough not to spuriously match.
+            // Common short generic tokens ("the", "u2") remain non-distinctive
+            // since they're pure alphanumeric and short.
+            val hasDistinctiveOverlap = intersection.any { token ->
+                token.length > 3 || token.any { ch -> !ch.isLetterOrDigit() }
+            }
 
             val coverageScore = if (smallerFullyCovered && hasDistinctiveOverlap) {
                 1.0f

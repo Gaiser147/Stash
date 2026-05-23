@@ -106,6 +106,7 @@ fun AlbumDiscoveryScreen(
                     onShuffle = vm::shuffleDownloaded,
                     onDownloadAll = vm::onDownloadAllClicked,
                     onPlayAlbum = { vm.playAlbum(startIndex = 0) },
+                    onAddToQueue = vm::addAlbumToQueue,
                 )
             }
 

@@ -74,6 +74,7 @@ class NowPlayingViewModel @Inject constructor(
     init {
         observePlayerStateLive()
         observeUserPlaylists()
+        observeStreamingHaltedEvents()
     }
 
     // ------------------------------------------------------------------
@@ -139,6 +140,9 @@ class NowPlayingViewModel @Inject constructor(
                         bitsPerSample = streamFormat.bitsPerSample ?: baseTrack.bitsPerSample,
                         sampleRateHz = streamFormat.sampleRateHz ?: baseTrack.sampleRateHz,
                         qualityKbps = if (streamFormat.qualityKbps > 0) streamFormat.qualityKbps else baseTrack.qualityKbps,
+                        // streamOrigin only exists on MediaItem-derived tracks (not in
+                        // Room), so always overlay from the active item when streaming.
+                        streamOrigin = streamFormat.streamOrigin,
                     )
                 } else baseTrack
                 val trackKey = if (track?.id == 0L) track.youtubeId.hashCode().toLong() else track?.id
@@ -189,6 +193,28 @@ class NowPlayingViewModel @Inject constructor(
                         },
                     )
                 }
+            }
+            .launchIn(viewModelScope)
+    }
+
+    /**
+     * Subscribes to [PlayerRepository.streamingHaltedEvents] and surfaces
+     * each halt as a Toast via [_userMessages]. The cascade-guard in
+     * PlayerRepositoryImpl already paused the player by the time this
+     * fires — the Toast is purely informational so the user understands
+     * why playback stopped.
+     *
+     * Toast (not Snackbar) matches the existing NowPlayingScreen
+     * convention — see the comment near the `userMessages` collector in
+     * NowPlayingScreen.kt for why we don't wrap this screen in a
+     * Scaffold.
+     */
+    private fun observeStreamingHaltedEvents() {
+        playerRepository.streamingHaltedEvents
+            .onEach {
+                _userMessages.emit(
+                    "Streaming is failing \u2014 try a downloaded track or check your connection"
+                )
             }
             .launchIn(viewModelScope)
     }

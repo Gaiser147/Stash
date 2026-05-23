@@ -72,8 +72,8 @@ android {
         applicationId = "com.stash.app"
         minSdk = 26
         targetSdk = 35
-        versionCode = 69
-        versionName = "0.9.32"
+        versionCode = 70
+        versionName = "0.9.33"
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
         // AppAuth redirect scheme removed -- Spotify now uses sp_dc cookie auth
         // Last.fm API credentials exposed via BuildConfig for the app-level
@@ -189,6 +189,9 @@ dependencies {
     implementation(libs.core.ktx)
     implementation(libs.activity.compose)
     implementation(libs.lifecycle.runtime.compose)
+    // ProcessLifecycleOwner — used by StashApplication to start/stop
+    // SquidCookieAutoRefresher on app foreground/background transitions.
+    implementation(libs.lifecycle.process)
     implementation(libs.navigation.compose)
     implementation(libs.hilt.android)
     ksp(libs.hilt.android.compiler)

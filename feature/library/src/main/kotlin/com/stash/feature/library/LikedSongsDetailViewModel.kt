@@ -4,6 +4,7 @@ import androidx.lifecycle.SavedStateHandle
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import com.stash.core.data.repository.MusicRepository
+import com.stash.core.media.BulkPlayAction
 import com.stash.core.media.PlayerRepository
 import com.stash.core.model.MusicSource
 import com.stash.core.model.PlaylistType
@@ -14,6 +15,7 @@ import kotlinx.coroutines.FlowPreview
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.flatMapLatest
 import kotlinx.coroutines.flow.flowOf
@@ -46,6 +48,12 @@ class LikedSongsDetailViewModel @Inject constructor(
 
     private val _searchQuery = MutableStateFlow("")
     private val _showSearch = MutableStateFlow(false)
+
+    private val _tappedTrackId = MutableStateFlow<Long?>(null)
+    val tappedTrackId: StateFlow<Long?> = _tappedTrackId.asStateFlow()
+
+    private val _bulkPlayInFlight = MutableStateFlow<BulkPlayAction?>(null)
+    val bulkPlayInFlight: StateFlow<BulkPlayAction?> = _bulkPlayInFlight.asStateFlow()
 
     fun onSearchQueryChanged(query: String) { _searchQuery.value = query }
     fun clearSearch() { _searchQuery.value = "" }
@@ -97,17 +105,22 @@ class LikedSongsDetailViewModel @Inject constructor(
 
     fun playTrack(trackId: Long) {
         viewModelScope.launch {
-            // Streaming mode: keep streamable tracks in the queue (resolved
-            // via Kennyy inside setQueue). Offline mode: filter to disk-only.
-            val streamingOn = streamingPreference.current()
-            val playable = if (streamingOn) {
-                uiState.value.tracks
-            } else {
-                uiState.value.tracks.filter { it.filePath != null }
+            _tappedTrackId.value = trackId
+            try {
+                // Streaming mode: keep streamable tracks in the queue (resolved
+                // via Kennyy inside setQueue). Offline mode: filter to disk-only.
+                val streamingOn = streamingPreference.current()
+                val playable = if (streamingOn) {
+                    uiState.value.tracks
+                } else {
+                    uiState.value.tracks.filter { it.filePath != null }
+                }
+                if (playable.isEmpty()) return@launch
+                val index = playable.indexOfFirst { it.id == trackId }.coerceAtLeast(0)
+                playerRepository.setQueue(playable, index)
+            } finally {
+                _tappedTrackId.value = null
             }
-            if (playable.isEmpty()) return@launch
-            val index = playable.indexOfFirst { it.id == trackId }.coerceAtLeast(0)
-            playerRepository.setQueue(playable, index)
         }
     }
 
@@ -120,7 +133,15 @@ class LikedSongsDetailViewModel @Inject constructor(
                 uiState.value.tracks.filter { it.filePath != null }
             }
             if (playable.isEmpty()) return@launch
-            playerRepository.setQueue(playable.shuffled(), 0)
+            val shuffled = playable.shuffled()
+            _tappedTrackId.value = shuffled[0].id
+            _bulkPlayInFlight.value = BulkPlayAction.SHUFFLE_ALL
+            try {
+                playerRepository.setQueue(shuffled, 0)
+            } finally {
+                _tappedTrackId.value = null
+                _bulkPlayInFlight.compareAndSet(BulkPlayAction.SHUFFLE_ALL, null)
+            }
         }
     }
 
@@ -133,7 +154,14 @@ class LikedSongsDetailViewModel @Inject constructor(
                 uiState.value.tracks.filter { it.filePath != null }
             }
             if (playable.isEmpty()) return@launch
-            playerRepository.setQueue(playable, 0)
+            _tappedTrackId.value = playable[0].id
+            _bulkPlayInFlight.value = BulkPlayAction.PLAY_ALL
+            try {
+                playerRepository.setQueue(playable, 0)
+            } finally {
+                _tappedTrackId.value = null
+                _bulkPlayInFlight.compareAndSet(BulkPlayAction.PLAY_ALL, null)
+            }
         }
     }
 

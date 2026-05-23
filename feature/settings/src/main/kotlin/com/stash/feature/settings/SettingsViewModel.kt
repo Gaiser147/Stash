@@ -130,6 +130,27 @@ class SettingsViewModel @Inject constructor(
         }
     }
 
+    /**
+     * Live "stream on cellular" preference. Surfaced as a switch in the
+     * Settings Playback section; PlayerRepositoryImpl.buildMediaItemForTrack
+     * reads it via streamingPreference.streamOnCellular to refuse streams
+     * on metered networks when this is false (the default).
+     */
+    val streamOnCellular: kotlinx.coroutines.flow.StateFlow<Boolean> =
+        streamingPreference.streamOnCellular.stateIn(
+            scope = viewModelScope,
+            started = kotlinx.coroutines.flow.SharingStarted.WhileSubscribed(5_000),
+            initialValue = false,
+        )
+
+    /** Persist the cellular-streaming preference flip. */
+    fun onStreamOnCellularToggle(value: Boolean) {
+        if (value == streamOnCellular.value) return
+        viewModelScope.launch {
+            streamingPreference.setStreamOnCellular(value)
+        }
+    }
+
     fun onNavidromeExportEnabledChanged(enabled: Boolean) {
         viewModelScope.launch {
             navidromeExportPreferences.setEnabled(enabled)

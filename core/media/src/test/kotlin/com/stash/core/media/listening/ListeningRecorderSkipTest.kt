@@ -6,6 +6,7 @@ import com.stash.core.data.db.entity.ListeningEventEntity
 import com.stash.core.data.db.entity.TrackSkipEventEntity
 import com.stash.core.media.PlayerRepository
 import com.stash.core.media.StreamRoutingResult
+import com.stash.core.media.StreamingHaltedEvent
 import com.stash.core.model.PlayerState
 import com.stash.core.model.Track
 import com.stash.core.model.TrackItem
@@ -15,8 +16,11 @@ import io.mockk.mockk
 import io.mockk.slot
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.SharedFlow
 import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.asSharedFlow
 import kotlinx.coroutines.test.advanceTimeBy
 import kotlinx.coroutines.test.advanceUntilIdle
 import kotlinx.coroutines.test.runCurrent
@@ -38,6 +42,8 @@ class ListeningRecorderSkipTest {
         private val flow = MutableStateFlow(initial)
         override val playerState: StateFlow<PlayerState> get() = flow
         override val currentPosition: Flow<Long> get() = throw UnsupportedOperationException()
+        override val streamingHaltedEvents: SharedFlow<StreamingHaltedEvent> =
+            MutableSharedFlow<StreamingHaltedEvent>().asSharedFlow()
         fun set(state: PlayerState) {
             flow.value = state
         }
@@ -50,6 +56,7 @@ class ListeningRecorderSkipTest {
         override suspend fun shuffleLibrary() = Unit
         override suspend fun addNext(track: Track) = Unit
         override suspend fun addToQueue(track: Track) = Unit
+        override suspend fun addToQueue(tracks: List<Track>) = Unit
         override suspend fun toggleShuffle() = Unit
         override suspend fun cycleRepeatMode() = Unit
         override suspend fun removeFromQueue(index: Int) = Unit

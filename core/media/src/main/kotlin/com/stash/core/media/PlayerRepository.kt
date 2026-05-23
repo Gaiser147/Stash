@@ -75,6 +75,13 @@ interface PlayerRepository {
      */
     val currentPosition: Flow<Long>
 
+    /**
+     * Hot SharedFlow of cascade-halt events. Emitted at most once per
+     * outage (resets after successful playback or user transport).
+     * UI surface: in-app Snackbar in NowPlaying.
+     */
+    val streamingHaltedEvents: kotlinx.coroutines.flow.SharedFlow<StreamingHaltedEvent>
+
     /** Start or resume playback. */
     suspend fun play()
 
@@ -114,6 +121,17 @@ interface PlayerRepository {
      * Playback continues uninterrupted.
      */
     suspend fun addToQueue(track: Track)
+
+    /**
+     * Append [tracks] (in order) to the end of the current queue.
+     * Single MediaController.addMediaItems round-trip — preferred
+     * over looping the single-track variant for known-size batches
+     * like an album's full tracklist or an artist's catalog. Empty
+     * list is a no-op.
+     *
+     * Playback continues uninterrupted.
+     */
+    suspend fun addToQueue(tracks: List<Track>)
 
     /** Toggle shuffle mode on/off. */
     suspend fun toggleShuffle()

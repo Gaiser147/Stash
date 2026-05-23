@@ -12,11 +12,16 @@ import javax.inject.Singleton
  * — null from one resolver just means "try the next one".
  *
  * Current order:
- *   1. [KennyyStreamResolver] — `kennyy.com.br`, no captcha gate. Almost
- *      always usable, primary stream source.
- *   2. [QobuzStreamResolver]  — `qobuz.squid.wtf`. Same Qobuz catalog,
+ *   1. [KennyyStreamResolver]  — `kennyy.com.br`, Qobuz lossless. No
+ *      captcha gate; almost always usable. Primary source.
+ *   2. [QobuzStreamResolver]   — `qobuz.squid.wtf`. Same Qobuz catalog,
  *      requires a user-pasted `captcha_verified_at` cookie. Auto-skipped
  *      when no cookie is set or the current cookie has been marked stale.
+ *   3. [YouTubeStreamResolver] — yt-dlp / InnerTube extraction. Last
+ *      resort, reached only when the track genuinely isn't in the Qobuz
+ *      catalog (Bandcamp re-uploads, region-exclusive, underground
+ *      releases). Lossy quality (AAC/Opus ~128-160 kbps), surfaced as a
+ *      "via YT" badge in Now Playing so the user knows.
  *
  * Exposes the same `resolve(track) -> StreamUrl?` shape as the individual
  * resolvers so callers ([PlayerRepositoryImpl], [StreamingMediaSourceFactory],
@@ -32,18 +37,27 @@ import javax.inject.Singleton
 class StreamSourceRegistry @Inject constructor(
     private val kennyy: KennyyStreamResolver,
     private val qobuz: QobuzStreamResolver,
+    private val youtube: YouTubeStreamResolver,
 ) {
 
     /**
      * Try each resolver in priority order; return the first non-null
      * [StreamUrl]. Returns null when no source produced a match — caller
      * should surface this as [StreamRoutingResult.NotAvailable].
+     *
+     * @param allowYouTube pass `false` to skip the YouTube fallback
+     *   resolver, leaving only the two Qobuz operators. Used by
+     *   [PlayerRepositoryImpl.setQueue]'s background-fill path so
+     *   yt-dlp's limited 2-slot extraction semaphore stays available
+     *   for the foreground user-tap critical path. Foreground (tapped
+     *   track) calls leave this true.
      */
-    suspend fun resolve(track: TrackEntity): StreamUrl? {
-        val resolvers = listOf(
-            "kennyy" to kennyy::resolve,
-            "squid" to qobuz::resolve,
-        )
+    suspend fun resolve(track: TrackEntity, allowYouTube: Boolean = true): StreamUrl? {
+        val resolvers = buildList<Pair<String, suspend (TrackEntity) -> StreamUrl?>> {
+            add("kennyy" to kennyy::resolve)
+            add("squid" to qobuz::resolve)
+            if (allowYouTube) add("youtube" to youtube::resolve)
+        }
         for ((name, fn) in resolvers) {
             val result = runCatching { fn(track) }
                 .onFailure { e ->
@@ -57,7 +71,7 @@ class StreamSourceRegistry @Inject constructor(
                 if (name != "kennyy") {
                     // Diagnostic: anything other than the primary source is
                     // a fallback path worth noticing. Helps explain "this
-                    // track played but slowly" reports.
+                    // track played but at lower quality" reports.
                     Log.i(TAG, "$name served ${track.id} '${track.title}' (kennyy missed)")
                 }
                 return result

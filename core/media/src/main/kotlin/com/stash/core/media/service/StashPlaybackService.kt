@@ -94,6 +94,14 @@ class StashPlaybackService : MediaLibraryService() {
         const val EXTRA_STREAM_SAMPLE_RATE = "stash_stream_sample_rate"
         /** Stated bitrate in kbps. */
         const val EXTRA_STREAM_BITRATE = "stash_stream_bitrate"
+        /**
+         * Resolver origin that produced this stream's URL —
+         * `"kennyy"` / `"squid"` (Qobuz lossless) or `"youtube"`
+         * (yt-dlp / InnerTube extraction, lossy). Read by Now Playing
+         * to surface a "via YT" badge so the user knows when playback
+         * has dropped from FLAC to YouTube-extracted audio.
+         */
+        const val EXTRA_STREAM_ORIGIN = "stash_stream_origin"
 
         private const val ROOT_ID = "ROOT"
         private const val PLAYLISTS_ID = "PLAYLISTS"

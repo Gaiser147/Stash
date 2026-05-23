@@ -4,8 +4,8 @@ import com.google.common.truth.Truth.assertThat
 import com.stash.core.data.db.dao.TrackDao
 import com.stash.core.data.db.entity.TrackEntity
 import com.stash.core.data.prefs.StreamingPreference
-import com.stash.core.media.streaming.KennyyStreamResolver
 import com.stash.core.media.streaming.PrefetchOrchestrator
+import com.stash.core.media.streaming.StreamSourceRegistry
 import com.stash.core.media.streaming.StreamUrl
 import com.stash.core.media.streaming.StreamUrlCache
 import io.mockk.coEvery
@@ -42,7 +42,7 @@ import org.junit.Test
 class StreamingPrefetchTest {
 
     private val streamingPreference: StreamingPreference = mockk()
-    private val streamResolver: KennyyStreamResolver = mockk()
+    private val streamResolver: StreamSourceRegistry = mockk()
     private val streamUrlCache: StreamUrlCache = mockk(relaxUnitFun = true)
     private val trackDao: TrackDao = mockk()
 

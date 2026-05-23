@@ -259,6 +259,66 @@ class AlbumDiscoveryViewModelTest {
     }
 
     @Test
+    fun `addAlbumToQueue calls batch addToQueue with all tracks`() = runTest {
+        val detail = albumDetail(
+            tracks = listOf("v1", "v2", "v3").map(::trackSummary),
+        )
+        val cache = mock<AlbumCache>().also {
+            whenever(it.get(any())).thenReturn(detail)
+        }
+        val player = mock<PlayerRepository>()
+
+        val vm = vmWith(cache = cache, playerRepository = player)
+        advanceUntilIdle()
+
+        vm.addAlbumToQueue()
+        advanceUntilIdle()
+
+        val captor = argumentCaptor<List<Track>>()
+        verify(player).addToQueue(captor.capture())
+        assertEquals(
+            listOf("v1", "v2", "v3"),
+            captor.firstValue.mapNotNull { it.youtubeId },
+        )
+    }
+
+    @Test
+    fun `addAlbumToQueue emits snackbar with track count`() = runTest {
+        val detail = albumDetail(
+            tracks = listOf("v1", "v2", "v3").map(::trackSummary),
+        )
+        val cache = mock<AlbumCache>().also {
+            whenever(it.get(any())).thenReturn(detail)
+        }
+        val player = mock<PlayerRepository>()
+
+        val vm = vmWith(cache = cache, playerRepository = player)
+        advanceUntilIdle()
+
+        vm.userMessages.test {
+            vm.addAlbumToQueue()
+            advanceUntilIdle()
+            assertEquals("Adding 3 tracks to queue...", awaitItem())
+            cancelAndIgnoreRemainingEvents()
+        }
+    }
+
+    @Test
+    fun `addAlbumToQueue no-ops when album not loaded`() = runTest {
+        val cache = mock<AlbumCache>()
+        // Never resolves — album stays in Loading, tracks stays empty.
+        whenever(cache.get(any())).doSuspendableAnswer { awaitCancellation() }
+        val player = mock<PlayerRepository>()
+
+        val vm = vmWith(cache = cache, playerRepository = player)
+
+        vm.addAlbumToQueue()
+        advanceUntilIdle()
+
+        verify(player, times(0)).addToQueue(any<List<Track>>())
+    }
+
+    @Test
     fun `shuffleDownloaded plays only downloaded subset`() = runTest {
         val detail = albumDetail(
             tracks = listOf("v1", "v2", "v3").map(::trackSummary),

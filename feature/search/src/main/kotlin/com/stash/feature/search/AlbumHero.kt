@@ -19,6 +19,7 @@ import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
+import androidx.compose.material.icons.automirrored.filled.PlaylistAdd
 import androidx.compose.material.icons.filled.Album
 import androidx.compose.material.icons.filled.Download
 import androidx.compose.material.icons.filled.PlayArrow
@@ -74,6 +75,10 @@ import com.stash.core.ui.util.formatTotalDuration
  *                      album from index 0 — streaming-mode (Kennyy) or
  *                      downloaded-only depending on user preference,
  *                      routed through `PlayerRepository.setQueue`.
+ * @param onAddToQueue  Invoked when the "Queue" chip is tapped. Appends the
+ *                      album's tracks to the end of the current playback
+ *                      queue without interrupting playback, routed through
+ *                      `PlayerRepository.addToQueue(List)`.
  */
 @Composable
 fun AlbumHero(
@@ -83,6 +88,7 @@ fun AlbumHero(
     onShuffle: () -> Unit,
     onDownloadAll: () -> Unit,
     onPlayAlbum: () -> Unit,
+    onAddToQueue: () -> Unit,
     modifier: Modifier = Modifier,
 ) {
     val extendedColors = StashTheme.extendedColors
@@ -222,6 +228,22 @@ fun AlbumHero(
                     Spacer(Modifier.width(6.dp))
                     Text(
                         text = "Play",
+                        style = MaterialTheme.typography.labelLarge,
+                    )
+                }
+                OutlinedButton(
+                    onClick = onAddToQueue,
+                    contentPadding = PaddingValues(horizontal = 16.dp, vertical = 10.dp),
+                    shape = RoundedCornerShape(12.dp),
+                ) {
+                    Icon(
+                        imageVector = Icons.AutoMirrored.Filled.PlaylistAdd,
+                        contentDescription = null,
+                        modifier = Modifier.size(18.dp),
+                    )
+                    Spacer(Modifier.width(6.dp))
+                    Text(
+                        text = "Queue",
                         style = MaterialTheme.typography.labelLarge,
                     )
                 }

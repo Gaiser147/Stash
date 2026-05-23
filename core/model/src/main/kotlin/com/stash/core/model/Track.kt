@@ -66,4 +66,18 @@ data class Track(
      * `TrackEntity.isStreamableCheckedAt`.
      */
     val isStreamableCheckedAt: Long? = null,
+    /**
+     * Resolver origin that produced the *currently active* stream URL
+     * for this track, when it's playing. Set on the in-memory Track
+     * reconstructed by `PlayerRepositoryImpl.MediaItem.toTrack` from
+     * the playing `MediaItem`'s extras. Never persisted to Room.
+     *
+     * Conventional values: `"kennyy"` / `"squid"` (Qobuz lossless) or
+     * `"youtube"` (yt-dlp / InnerTube extraction, lossy). NULL when
+     * playback is from a downloaded file or no extras were attached.
+     *
+     * Used by `NowPlayingScreen` to render a "via YT" suffix on the
+     * format chip when the streaming fallback kicks in.
+     */
+    val streamOrigin: String? = null,
 )

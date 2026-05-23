@@ -13,8 +13,10 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.QueueMusic
 import androidx.compose.material.icons.filled.BookmarkBorder
@@ -91,6 +93,12 @@ fun NowPlayingScreen(
     // Decouples the Flag button (which is just "there's a problem") from
     // the action (find a replacement / delete / delete + block).
     var showWrongMatchDialog by remember { mutableStateOf(false) }
+
+    // Scroll state is intentionally not keyed by track — on tall screens
+    // content doesn't overflow so scroll stays at 0; on narrow screens the
+    // user's scroll position aligns with controls and we want it preserved
+    // across track changes.
+    val scrollState = rememberScrollState()
 
     // One-shot Toast confirmation for the "wrong match" flag action. Toast
     // instead of Snackbar so we don't have to restructure the screen into
@@ -225,6 +233,7 @@ fun NowPlayingScreen(
             modifier = Modifier
                 .fillMaxSize()
                 .statusBarsPadding()
+                .verticalScroll(scrollState)
                 .padding(horizontal = 24.dp),
             horizontalAlignment = Alignment.CenterHorizontally,
         ) {
@@ -346,7 +355,7 @@ fun NowPlayingScreen(
                 onCycleRepeatMode = viewModel::onCycleRepeatMode,
             )
 
-            Spacer(modifier = Modifier.weight(1f))
+            Spacer(modifier = Modifier.height(48.dp))
         }
     }
 }
@@ -393,13 +402,7 @@ private fun TopBar(
             )
         }
 
-        Text(
-            text = "NOW PLAYING",
-            style = MaterialTheme.typography.labelMedium,
-            color = Color.White.copy(alpha = 0.7f),
-            textAlign = TextAlign.Center,
-            modifier = Modifier.weight(1f),
-        )
+        Spacer(modifier = Modifier.weight(1f))
 
         // Flag as wrong match — only shown when a track is loaded. Lives
         // here (not in the Playlist Detail row menu) because Now Playing
@@ -492,8 +495,8 @@ private fun AlbumArtSection(
                 .shadow(
                     elevation = 40.dp,
                     shape = RoundedCornerShape(20.dp),
-                    ambientColor = accentColor.copy(alpha = 0.5f),
-                    spotColor = accentColor.copy(alpha = 0.5f),
+                    ambientColor = accentColor.copy(alpha = 0.25f),
+                    spotColor = accentColor.copy(alpha = 0.25f),
                 ),
         )
 
@@ -646,6 +649,14 @@ private fun trackQualityText(track: com.stash.core.model.Track): String? {
             add("${bitDepth}-bit/${"%.1f".format(sampleRateKHz)} kHz")
         }
         if (bitrate != null) add("$bitrate kbps")
+        // Flag the YouTube fallback so the user can tell when a track is
+        // playing from yt-dlp/InnerTube extraction rather than Qobuz. The
+        // codec ("AAC") alone doesn't convey this — Qobuz also serves AAC
+        // at MP3_320 tier. Only the streamOrigin field distinguishes the
+        // two. We don't badge "via Kennyy" / "via squid" because those
+        // are the expected primary sources; only the lossy fallback
+        // deserves a callout.
+        if (track.streamOrigin == "youtube") add("via YT")
     }.joinToString(" · ")
 }
 

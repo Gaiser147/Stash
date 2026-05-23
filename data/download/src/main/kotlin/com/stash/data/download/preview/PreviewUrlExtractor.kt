@@ -10,12 +10,17 @@ import com.yausername.youtubedl_android.YoutubeDL
 import com.yausername.youtubedl_android.YoutubeDLRequest
 import dagger.hilt.android.qualifiers.ApplicationContext
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.CoroutineStart
+import kotlinx.coroutines.Deferred
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.async
 import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.sync.Semaphore
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeout
+import java.util.concurrent.ConcurrentHashMap
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.jsonArray
 import kotlinx.serialization.json.jsonObject
@@ -68,15 +73,40 @@ class PreviewUrlExtractor @Inject constructor(
         suspend fun ytDlpExtract(id: String): String
     }
 
+    /**
+     * Shared scope for in-flight extracts. Caller cancellation only stops
+     * the *caller's* await(); the underlying extract keeps running so any
+     * other awaiter (or a future tap) still gets the URL. The scope lives
+     * for the singleton's lifetime; entries clean up via invokeOnCompletion.
+     */
+    private val extractorScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
+
+    /**
+     * Single-flight cache. Key = videoId; value = the in-flight Deferred.
+     * On completion (success OR failure) the entry self-removes via
+     * invokeOnCompletion so the next call for the same videoId starts a
+     * fresh extract.
+     */
+    private val inFlightExtracts = ConcurrentHashMap<String, Deferred<String>>()
+
     companion object {
         private const val TAG = "PreviewUrlExtractor"
         private const val YTDLP_TIMEOUT_MS = 60_000L
         private const val INNERTUBE_TIMEOUT_MS = 10_000L
         private const val FORMAT_SELECTOR = "251/250/bestaudio"
 
-        /** Concurrency caps for the two extractors. Shared process-wide. */
+        /**
+         * Concurrency caps for the two extractors. Shared process-wide.
+         *
+         * yt-dlp-android throws YoutubeDLException at ~120ms when a second
+         * execute() runs while one is in flight (or shortly after a cancelled
+         * one). On-device LATDIAG from feat/tap-cancel-hardening showed
+         * cascading failures with cap=2. Cap=1 forces serialization at the
+         * JNI boundary; coalescing (above) ensures redundant calls for the
+         * same videoId never reach the semaphore at all.
+         */
         private const val INNERTUBE_CONCURRENCY = 8
-        private const val YTDLP_CONCURRENCY = 2
+        private const val YTDLP_CONCURRENCY = 1   // was 2 — see spec
 
         /**
          * Shared so parallel callers (e.g. `PreviewPrefetcher`) respect the
@@ -155,8 +185,77 @@ class PreviewUrlExtractor @Inject constructor(
      *
      * Races InnerTube (fast, ~1-2s) against yt-dlp (slow, ~15-35s). See
      * the class KDoc for the full strategy.
+     *
+     * Concurrent calls for the same [videoId] are coalesced via [coalesce]
+     * so only one extract runs at a time per ID.
      */
-    suspend fun extractStreamUrl(videoId: String): String {
+    suspend fun extractStreamUrl(videoId: String): String =
+        coalesce(videoId) { doExtract(it) }
+
+    /**
+     * Test-only: exercises the coalescing wrapper with the existing
+     * TestHooks SPI. The race body is replaced by a hook-driven function
+     * so the test can observe coalescing without needing real Android deps.
+     *
+     * Does NOT exercise the real race(...) semantics — those are tested
+     * by raceForTest in the same file. This helper tests only the
+     * single-flight / coalescing layer above the race.
+     *
+     * Instance member (not companion) because `coalesce` needs `this`.
+     */
+    internal suspend fun extractStreamUrlForTest(
+        hooks: TestHooks,
+        videoId: String,
+    ): String = coalesce(videoId) { id ->
+        hooks.innerTubeExtract(id) ?: hooks.ytDlpExtract(id)
+    }
+
+    /**
+     * Single-flight wrapper. If an extract for [videoId] is already in flight,
+     * the new caller awaits its result; otherwise a fresh Deferred is started
+     * on [extractorScope] and other callers join it.
+     *
+     * The Deferred lives on a scope independent of any caller's lifetime —
+     * caller cancellation only stops the caller's own await(); the underlying
+     * extract continues to completion so any other awaiter still gets a URL.
+     *
+     * **Completion ordering.** `invokeOnCompletion` fires synchronously when
+     * the Deferred completes, *before* any suspended awaiter is resumed. So
+     * by the time `await()` returns to any caller, the map entry is already
+     * gone. A racing caller arriving in that microscopic window starts a
+     * brand-new extract — which is benign because the just-completed URL
+     * is in `PreviewUrlCache` (populated by the prefetcher and other
+     * post-success caching paths), so the redundant extract returns fast
+     * from cache lookup rather than re-running yt-dlp.
+     *
+     * **Two-arg `remove(key, value)`** is used so a stale cleanup callback
+     * cannot accidentally remove a *successor's* Deferred if a new caller
+     * for the same videoId raced in just after the prior one completed.
+     */
+    private suspend fun coalesce(
+        videoId: String,
+        doRace: suspend (String) -> String,
+    ): String {
+        // Fast path — share an in-flight extract if one exists.
+        inFlightExtracts[videoId]?.let { return it.await() }
+
+        // Create a LAZY Deferred so a putIfAbsent loser's Deferred never starts.
+        val freshlyCreated = extractorScope.async(start = CoroutineStart.LAZY) {
+            doRace(videoId)
+        }
+        val deferred = inFlightExtracts.putIfAbsent(videoId, freshlyCreated)
+            ?: freshlyCreated.also { d ->
+                d.invokeOnCompletion { inFlightExtracts.remove(videoId, d) }
+                d.start()
+            }
+        return deferred.await()
+    }
+
+    /**
+     * Underlying race body — original `extractStreamUrl` implementation.
+     * Called via [coalesce] from the public entry point.
+     */
+    private suspend fun doExtract(videoId: String): String {
         val t0 = System.currentTimeMillis()
         Log.d("LATDIAG", "extract-start videoId=$videoId")
         return try {

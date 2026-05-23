@@ -30,7 +30,7 @@ import org.robolectric.RobolectricTestRunner
 class StreamingMediaSourceFactoryTest {
 
     private val streamCache: androidx.media3.datasource.cache.SimpleCache = mockk(relaxed = true)
-    private val resolver: KennyyStreamResolver = mockk(relaxed = true)
+    private val resolver: StreamSourceRegistry = mockk(relaxed = true)
     private val urlCache: StreamUrlCache = mockk(relaxed = true)
     private val trackDao: TrackDao = mockk(relaxed = true)
 

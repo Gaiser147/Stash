@@ -4,6 +4,7 @@ import androidx.lifecycle.SavedStateHandle
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import com.stash.core.data.repository.MusicRepository
+import com.stash.core.media.BulkPlayAction
 import com.stash.core.media.PlayerRepository
 import com.stash.core.model.Track
 import com.stash.core.ui.util.withSearchFilter
@@ -12,6 +13,7 @@ import kotlinx.coroutines.FlowPreview
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.stateIn
@@ -70,6 +72,12 @@ class AlbumDetailViewModel @Inject constructor(
     private val _searchQuery = MutableStateFlow("")
     private val _showSearch = MutableStateFlow(false)
 
+    private val _tappedTrackId = MutableStateFlow<Long?>(null)
+    val tappedTrackId: StateFlow<Long?> = _tappedTrackId.asStateFlow()
+
+    private val _bulkPlayInFlight = MutableStateFlow<BulkPlayAction?>(null)
+    val bulkPlayInFlight: StateFlow<BulkPlayAction?> = _bulkPlayInFlight.asStateFlow()
+
     fun onSearchQueryChanged(query: String) { _searchQuery.value = query }
     fun clearSearch() { _searchQuery.value = "" }
     fun toggleSearch() {
@@ -123,10 +131,15 @@ class AlbumDetailViewModel @Inject constructor(
      */
     fun playTrack(trackId: Long) {
         viewModelScope.launch {
-            val downloaded = uiState.value.tracks.filter { it.filePath != null }
-            if (downloaded.isEmpty()) return@launch
-            val index = downloaded.indexOfFirst { it.id == trackId }.coerceAtLeast(0)
-            playerRepository.setQueue(downloaded, index)
+            _tappedTrackId.value = trackId
+            try {
+                val downloaded = uiState.value.tracks.filter { it.filePath != null }
+                if (downloaded.isEmpty()) return@launch
+                val index = downloaded.indexOfFirst { it.id == trackId }.coerceAtLeast(0)
+                playerRepository.setQueue(downloaded, index)
+            } finally {
+                _tappedTrackId.value = null
+            }
         }
     }
 
@@ -141,7 +154,15 @@ class AlbumDetailViewModel @Inject constructor(
         viewModelScope.launch {
             val downloaded = uiState.value.tracks.filter { it.filePath != null }
             if (downloaded.isEmpty()) return@launch
-            playerRepository.setQueue(downloaded.shuffled(), 0)
+            val shuffled = downloaded.shuffled()
+            _tappedTrackId.value = shuffled[0].id
+            _bulkPlayInFlight.value = BulkPlayAction.SHUFFLE_ALL
+            try {
+                playerRepository.setQueue(shuffled, 0)
+            } finally {
+                _tappedTrackId.value = null
+                _bulkPlayInFlight.compareAndSet(BulkPlayAction.SHUFFLE_ALL, null)
+            }
         }
     }
 

@@ -213,26 +213,54 @@ class AlbumDiscoveryViewModel @Inject constructor(
      */
     fun playAlbum(startIndex: Int = 0) {
         viewModelScope.launch {
-            val tracks = _uiState.value.tracks
+            val tracks = synthesizeDomainTracks()
             if (tracks.isEmpty()) return@launch
             val safeStart = startIndex.coerceIn(0, tracks.size - 1)
-            val albumTitle = _uiState.value.hero.title
-            val albumArtist = _uiState.value.hero.artist
-            val albumArt = _uiState.value.hero.thumbnailUrl
-            val domainTracks = tracks.map { t ->
-                com.stash.core.model.Track(
-                    id = t.videoId.hashCode().toLong(),
-                    title = t.title,
-                    artist = t.artist.ifBlank { albumArtist },
-                    album = albumTitle,
-                    durationMs = (t.durationSeconds * 1000L).toLong(),
-                    albumArtUrl = t.thumbnailUrl ?: albumArt,
-                    youtubeId = t.videoId,
-                    source = com.stash.core.model.MusicSource.YOUTUBE,
-                    isStreamable = true,
-                )
-            }
-            playerRepository.setQueue(domainTracks, safeStart)
+            playerRepository.setQueue(tracks, safeStart)
+        }
+    }
+
+    /**
+     * Append this album's tracks to the end of the current playback queue
+     * without interrupting playback. Sibling to [playAlbum]; both share
+     * [synthesizeDomainTracks] for track synthesis.
+     */
+    fun addAlbumToQueue() {
+        viewModelScope.launch {
+            val tracks = synthesizeDomainTracks()
+            if (tracks.isEmpty()) return@launch
+            // Emit immediately — URL resolution can take ~20-30s for 15
+            // streaming tracks against a degraded Kennyy/Squid. Without this
+            // optimistic toast the user gets zero feedback during the wait.
+            _userMessages.emit("Adding ${tracks.size} tracks to queue...")
+            playerRepository.addToQueue(tracks)
+        }
+    }
+
+    /**
+     * Synthesize [Track] domain objects from the loaded album's tracklist.
+     * Shared between [playAlbum] and [addAlbumToQueue]. Empty when the
+     * album hasn't loaded yet.
+     */
+    private fun synthesizeDomainTracks(): List<com.stash.core.model.Track> {
+        val state = _uiState.value
+        val tracks = state.tracks
+        if (tracks.isEmpty()) return emptyList()
+        val albumTitle = state.hero.title
+        val albumArtist = state.hero.artist
+        val albumArt = state.hero.thumbnailUrl
+        return tracks.map { t ->
+            com.stash.core.model.Track(
+                id = t.videoId.hashCode().toLong(),
+                title = t.title,
+                artist = t.artist.ifBlank { albumArtist },
+                album = albumTitle,
+                durationMs = (t.durationSeconds * 1000L).toLong(),
+                albumArtUrl = t.thumbnailUrl ?: albumArt,
+                youtubeId = t.videoId,
+                source = com.stash.core.model.MusicSource.YOUTUBE,
+                isStreamable = true,
+            )
         }
     }
 
