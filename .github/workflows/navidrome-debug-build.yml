@@ -8,6 +8,10 @@ on:
 permissions:
   contents: write
 
+concurrency:
+  group: navidrome-debug-build-${{ github.repository }}
+  cancel-in-progress: false
+
 jobs:
   build-debug:
     name: Merge upstream and build debug APK
@@ -28,7 +32,14 @@ jobs:
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
 
       - name: Merge upstream master
-        run: git merge --no-edit upstream/master
+        run: |
+          if ! git merge --no-edit upstream/master; then
+            echo "::error::Merge conflict while merging upstream/master into codex/navidrome-auto-sync"
+            git status --short
+            echo "Unmerged files:"
+            git diff --name-only --diff-filter=U
+            exit 1
+          fi
 
       - name: Set up JDK 17
         uses: actions/setup-java@v4
@@ -49,7 +60,12 @@ jobs:
         run: ./gradlew :app:assembleDebug --no-daemon
 
       - name: Push updated Navidrome branch
-        run: git push origin HEAD:codex/navidrome-auto-sync
+        run: |
+          if git diff --quiet origin/codex/navidrome-auto-sync..HEAD; then
+            echo "No upstream changes to push."
+          else
+            git push origin HEAD:codex/navidrome-auto-sync
+          fi
 
       - name: Locate debug APK
         id: find_apk
