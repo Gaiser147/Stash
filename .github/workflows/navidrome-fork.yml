@@ -152,10 +152,10 @@ jobs:
           test -s "$root/state/state.sqlite3"
           ffprobe -v error -select_streams a:0 -show_entries stream=codec_type \
             -of csv=p=0 "$root/library/Stash/e2e/artist/album/track.flac" \
-            | rg '^audio$'
-          rg 'Stash/e2e/artist/album/track.flac' \
+            | grep -Fx 'audio'
+          grep -F 'Stash/e2e/artist/album/track.flac' \
             "$root/library/Playlists/Stash/e2e.m3u8"
-          rg '"tls": true' "$root/server.log"
+          grep -F '"tls": true' "$root/server.log"
 
       - name: Stop private ingest fixture
         if: always() && steps.ingest_fixture.outputs.available == 'true'
