@@ -83,11 +83,27 @@ full export simultaneously. A preview is not evidence that the primary debug
 app can be upgraded in place; that still requires the installed-device signer
 check described above.
 
+The first manually promoted preview is public as
+[v0.9.75-navidrome-preview.1](https://github.com/Gaiser147/Stash/releases/tag/v0.9.75-navidrome-preview.1).
+Its release assets are the
+[APK](https://github.com/Gaiser147/Stash/releases/download/v0.9.75-navidrome-preview.1/Stash-Navidrome-Preview-v0.9.75-1.apk),
+[provenance JSON](https://github.com/Gaiser147/Stash/releases/download/v0.9.75-navidrome-preview.1/Stash-Navidrome-Preview-v0.9.75-1.provenance.json),
+and [SHA-256 list](https://github.com/Gaiser147/Stash/releases/download/v0.9.75-navidrome-preview.1/SHA256SUMS.txt).
+The tag points to verified build commit `a3ec3648`; GitHub Actions run
+[`29327950480`](https://github.com/Gaiser147/Stash/actions/runs/29327950480)
+passed the affected Android tests, pinned ingest TLS contract, APK assembly,
+package/label extraction, signature checks, and provenance generation. The APK
+SHA-256 is
+`855784170051ca1ac5c4861686bcf7e8efaa17d522ef6225b2c3fd5570e34828`.
+
 ## CI and release boundaries
 
 `.github/workflows/navidrome-fork.yml` runs affected unit tests and creates a
-debug APK. It does not publish a release, merge upstream, deploy the ingest
-service, or install an APK on a device. The verification job times out after 45
+debug APK. It does not automatically publish a release, merge upstream, deploy
+the ingest service, or install an APK on a device. A verified artifact may be
+promoted manually to a clearly labeled prerelease, as with
+`v0.9.75-navidrome-preview.1`; promotion must preserve the exact CI-produced
+APK and its commit-bound provenance. The verification job times out after 45
 minutes instead of occupying a runner indefinitely. Artifacts contain the APK
 plus a JSON provenance record with repository, commit, workflow run, signing
 mode, application ID, visible app label, install mode, APK SHA-256, and APK

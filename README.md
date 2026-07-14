@@ -47,7 +47,8 @@ These are run by people doing it for the love of it — mostly solo, mostly free
 - **Optional Navidrome export** — This fork can send downloaded audio, artwork, and playlist manifests to an authenticated HTTPS ingest service. It is off by default; see [Navidrome export](docs/NAVIDROME_EXPORT.md).
 - **Safe fork preview** — without the retained debug-upgrade key, fork CI emits
   a separate `com.stash.app.preview` app that can be tested beside an existing
-  debug installation without replacing its data.
+  debug installation without replacing its data. Download the verified
+  [v0.9.75 Navidrome preview](https://github.com/Gaiser147/Stash/releases/tag/v0.9.75-navidrome-preview.1).
 
 ### Playback
 
@@ -68,6 +69,24 @@ These are run by people doing it for the love of it — mostly solo, mostly free
 ## Install
 
 Three paths. Pick whichever you'd actually use.
+
+### Navidrome fork preview
+
+The verified fork preview is available from the public GitHub prerelease:
+
+- [Release notes and all assets](https://github.com/Gaiser147/Stash/releases/tag/v0.9.75-navidrome-preview.1)
+- [Download the preview APK](https://github.com/Gaiser147/Stash/releases/download/v0.9.75-navidrome-preview.1/Stash-Navidrome-Preview-v0.9.75-1.apk)
+- [Build provenance](https://github.com/Gaiser147/Stash/releases/download/v0.9.75-navidrome-preview.1/Stash-Navidrome-Preview-v0.9.75-1.provenance.json)
+- [SHA-256 checksums](https://github.com/Gaiser147/Stash/releases/download/v0.9.75-navidrome-preview.1/SHA256SUMS.txt)
+
+It installs as `com.stash.app.preview` with the visible name **Stash Navidrome
+Preview**, beside `com.stash.app.debug`. Its database, settings, WorkManager
+jobs, and Keystore entries are separate. Preview data is disposable: a later
+CI-only preview can use a different signing key and require uninstalling only
+the preview app. This APK is not an in-place update for the existing debug app.
+
+Verified APK SHA-256:
+`855784170051ca1ac5c4861686bcf7e8efaa17d522ef6225b2c3fd5570e34828`.
 
 ### Direct APK
 
