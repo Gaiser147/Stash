@@ -23,10 +23,13 @@ signer differs. The private keystore must only be supplied through protected
 GitHub Actions secrets and must never enter Git or an artifact.
 
 The four protected stable-signing inputs are configured in the fork repository.
-The next canonical branch run must therefore produce version `0.9.75`, version
-code `111`, as artifact `stash-in-place-upgrade-candidate` with
-`application_id=com.stash.app.debug` and `install_mode=in-place-upgrade`. This
-is still a candidate, not a device-accepted release.
+Canonical branch run `29332684474` at commit `771b9e3f` produced version
+`0.9.75`, version code `111`, as artifact
+`stash-in-place-upgrade-candidate` with `application_id=com.stash.app.debug`,
+`install_mode=in-place-upgrade`, and APK SHA-256
+`121d5f5787cec94f0b3471ba1918b82a7545cf8cc6bc82aa2eaf06c2ab633b1f`.
+Its v2 signing certificate matches the installed app exactly. This is still a
+candidate, not a device-accepted release.
 
 Stash `0.9.32` used Room schema 26. The current app uses schema 32 and registers
 every migration from `26→27` through `31→32`. There is no
