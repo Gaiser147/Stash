@@ -113,6 +113,7 @@ jobs:
           SIGNING_MODE: ${{ steps.debug_signing.outputs.configured == 'true' && 'stable-signed' || 'ci-only' }}
           DEBUG_KEYSTORE_PASSWORD: ${{ secrets.STASH_DEBUG_KEYSTORE_PASSWORD }}
           DEBUG_KEY_ALIAS: ${{ secrets.STASH_DEBUG_KEY_ALIAS }}
+          EXPECTED_STABLE_SIGNER_SHA256: 3b89ee42d3535464d02d289427b71e3ffae4f9ea9e8b7628bcdabf44a55ae9be
         shell: bash
         run: |
           provenance="$RUNNER_TEMP/stash-artifact-provenance.json"
@@ -151,6 +152,10 @@ jobs:
               echo "::error::APK signer does not match the configured stable keystore"
               exit 1
             fi
+            if [ "$signer_sha256" != "$EXPECTED_STABLE_SIGNER_SHA256" ]; then
+              echo "::error::Configured keystore does not match the retained upgrade signer"
+              exit 1
+            fi
           fi
           jq -n \
             --arg repository "$GITHUB_REPOSITORY" \
@@ -162,6 +167,7 @@ jobs:
             --arg apk_file "$(basename "$APK_PATH")" \
             --arg apk_sha256 "$apk_sha256" \
             --arg apk_signer_sha256 "$signer_sha256" \
+            --arg expected_stable_signer_sha256 "$EXPECTED_STABLE_SIGNER_SHA256" \
             '{
               repository: $repository,
               commit: $commit,
@@ -171,7 +177,8 @@ jobs:
               signing: $signing,
               apk_file: $apk_file,
               apk_sha256: $apk_sha256,
-              apk_signer_sha256: $apk_signer_sha256
+              apk_signer_sha256: $apk_signer_sha256,
+              expected_stable_signer_sha256: $expected_stable_signer_sha256
             }' > "$provenance"
           echo "path=$provenance" >> "$GITHUB_OUTPUT"
           echo "APK SHA-256: $apk_sha256" >> "$GITHUB_STEP_SUMMARY"
