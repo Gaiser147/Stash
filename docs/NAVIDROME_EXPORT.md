@@ -62,7 +62,13 @@ This repository currently contains the Android client contract, not a production
 
 The previous fork defaulted export on, embedded a private endpoint, and stored the bearer token as plaintext preferences. The new implementation removes the hardcoded endpoint, defaults export off, and migrates a stored legacy token into encrypted storage when the preferences are first read. Because the old default URL was not necessarily persisted, re-enter the endpoint and explicitly enable export after upgrading.
 
-Old GitHub-hosted debug APKs may have been signed with ephemeral runner keys. Android cannot install a differently signed APK over an existing app with the same ID. Back up Stash from its database backup UI before any required uninstall, configure a persistent fork signing key for future builds, and verify an actual in-place update before treating the new artifact as upgrade-safe.
+Old GitHub-hosted debug APKs may have been signed with ephemeral runner keys.
+Android cannot install a differently signed APK over an existing app with the
+same ID. The actual installed 0.9.32 app has now been verified against the
+retained persistent fork key, so the canonical 0.9.75 candidate does not
+require an uninstall. Back up Stash from its database backup UI and follow the
+rooted-device in-place runbook; never uninstall or clear the package during
+this acceptance test.
 
 The retained local debug keystore, the locally archived May 2026 APK, and the
 APK extracted from the installed Android package all use signing-certificate
