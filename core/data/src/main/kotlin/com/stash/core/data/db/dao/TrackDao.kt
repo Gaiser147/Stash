@@ -282,7 +282,7 @@ interface TrackDao {
           AND bl.canonical_key IS NULL
           AND (
               t.is_downloaded = 1
-              OR :includeStreamable
+              OR (:includeStreamable AND t.is_streamable = 1)
               OR (p.type = 'STASH_MIX' AND t.is_streamable = 1)
           )
         ORDER BY
