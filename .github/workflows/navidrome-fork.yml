@@ -21,6 +21,7 @@ jobs:
     if: github.event_name != 'schedule'
     name: Test and build debug APK
     runs-on: ubuntu-latest
+    timeout-minutes: 45
     steps:
       - uses: actions/checkout@v7
 
@@ -105,11 +106,45 @@ jobs:
           fi
           echo "path=$apk" >> "$GITHUB_OUTPUT"
 
+      - name: Write artifact provenance
+        id: provenance
+        env:
+          APK_PATH: ${{ steps.apk.outputs.path }}
+          SIGNING_MODE: ${{ steps.debug_signing.outputs.configured == 'true' && 'stable-signed' || 'ci-only' }}
+        shell: bash
+        run: |
+          provenance="$RUNNER_TEMP/stash-artifact-provenance.json"
+          apk_sha256="$(sha256sum "$APK_PATH" | cut -d ' ' -f 1)"
+          jq -n \
+            --arg repository "$GITHUB_REPOSITORY" \
+            --arg commit "$GITHUB_SHA" \
+            --arg ref "$GITHUB_REF" \
+            --arg run_id "$GITHUB_RUN_ID" \
+            --arg run_attempt "$GITHUB_RUN_ATTEMPT" \
+            --arg signing "$SIGNING_MODE" \
+            --arg apk_file "$(basename "$APK_PATH")" \
+            --arg apk_sha256 "$apk_sha256" \
+            '{
+              repository: $repository,
+              commit: $commit,
+              ref: $ref,
+              workflow_run: $run_id,
+              workflow_attempt: $run_attempt,
+              signing: $signing,
+              apk_file: $apk_file,
+              apk_sha256: $apk_sha256
+            }' > "$provenance"
+          echo "path=$provenance" >> "$GITHUB_OUTPUT"
+          echo "APK SHA-256: $apk_sha256" >> "$GITHUB_STEP_SUMMARY"
+          echo "Signing mode: $SIGNING_MODE" >> "$GITHUB_STEP_SUMMARY"
+
       - name: Upload debug artifact
         uses: actions/upload-artifact@v7
         with:
           name: stash-navidrome-${{ steps.debug_signing.outputs.configured == 'true' && 'stable-signed' || 'ci-only' }}
-          path: ${{ steps.apk.outputs.path }}
+          path: |
+            ${{ steps.apk.outputs.path }}
+            ${{ steps.provenance.outputs.path }}
           retention-days: 14
 
       - name: Remove temporary signer
@@ -120,6 +155,7 @@ jobs:
     if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
     name: Check latest upstream release
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@v7
         with:

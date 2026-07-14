@@ -26,6 +26,25 @@ import com.stash.feature.settings.SettingsUiState
 import java.text.DateFormat
 import java.util.Date
 
+internal data class NavidromeExportStatus(
+    val message: String,
+    val isError: Boolean = false,
+)
+
+internal fun navidromeExportStatus(result: String): NavidromeExportStatus? = when (result) {
+    "configuration_saved" -> NavidromeExportStatus("Connection settings saved")
+    "configuration_cleared" -> NavidromeExportStatus("Connection removed")
+    "full_export_queued" -> NavidromeExportStatus("Full library export is queued")
+    "export_in_progress" -> NavidromeExportStatus("Export is running or waiting to retry")
+    "track_uploaded" -> NavidromeExportStatus("Latest track export completed")
+    "full_export_complete" -> NavidromeExportStatus("Full library export completed")
+    "playlist_export_complete" -> NavidromeExportStatus("Playlist export completed")
+    "export_incomplete" -> NavidromeExportStatus("Latest export completed with errors", isError = true)
+    "track_upload_failed" -> NavidromeExportStatus("Latest audio upload failed", isError = true)
+    "cover_upload_failed" -> NavidromeExportStatus("Latest artwork upload failed", isError = true)
+    else -> null
+}
+
 @Composable
 fun NavidromeExportSection(
     state: SettingsUiState,
@@ -99,7 +118,31 @@ fun NavidromeExportSection(
             modifier = Modifier.padding(horizontal = 0.dp),
         )
 
-        if (state.navidromeExportLastSuccessAt > 0L) {
+        if (state.navidromeExportLastAttemptAt > 0L) {
+            val formatted = remember(state.navidromeExportLastAttemptAt) {
+                DateFormat.getDateTimeInstance(DateFormat.MEDIUM, DateFormat.SHORT)
+                    .format(Date(state.navidromeExportLastAttemptAt))
+            }
+            Text(
+                text = "Last export attempt: $formatted",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+        }
+        navidromeExportStatus(state.navidromeExportLastResult)?.let { status ->
+            Text(
+                text = status.message,
+                style = MaterialTheme.typography.bodySmall,
+                color = if (status.isError) {
+                    MaterialTheme.colorScheme.error
+                } else {
+                    MaterialTheme.colorScheme.onSurfaceVariant
+                },
+            )
+        }
+        if (state.navidromeExportLastSuccessAt > 0L &&
+            state.navidromeExportLastSuccessAt != state.navidromeExportLastAttemptAt
+        ) {
             val formatted = remember(state.navidromeExportLastSuccessAt) {
                 DateFormat.getDateTimeInstance(DateFormat.MEDIUM, DateFormat.SHORT)
                     .format(Date(state.navidromeExportLastSuccessAt))

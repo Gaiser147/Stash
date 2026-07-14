@@ -26,6 +26,8 @@ It does not send Spotify or YouTube cookies, passwords, OAuth tokens, listening 
 
 Work is handled by Android WorkManager with exponential retry. HTTP 408, 429, and server failures are retried; other 4xx responses are treated as permanent configuration or contract failures. Audio uploads use a longer write timeout than ordinary API calls so large lossless files can finish on slower Wi-Fi.
 
+The settings screen keeps a non-secret status record for the most recent worker attempt and the last successful export. A manual full export is shown as queued before WorkManager starts it; running, completed, incomplete, audio-failure, and artwork-failure states use fixed user-facing labels rather than displaying arbitrary server responses.
+
 ## Ingest contract v1
 
 Every request carries:
@@ -58,4 +60,4 @@ Old GitHub-hosted debug APKs may have been signed with ephemeral runner keys. An
 
 ## CI and release boundaries
 
-`.github/workflows/navidrome-fork.yml` runs affected unit tests and creates a debug APK. It does not publish a release, merge upstream, deploy the ingest service, or install an APK on a device. Artifacts without all stable-signing secrets are labeled `ci-only`. Weekly upstream checks create or refresh an issue instead of merging code automatically; scheduled workflows become active only after the workflow exists on the repository's default branch.
+`.github/workflows/navidrome-fork.yml` runs affected unit tests and creates a debug APK. It does not publish a release, merge upstream, deploy the ingest service, or install an APK on a device. The verification job times out after 45 minutes instead of occupying a runner indefinitely. Artifacts contain the APK plus a JSON provenance record with repository, commit, workflow run, signing mode, and APK SHA-256; builds without all stable-signing secrets are labeled `ci-only`. Weekly upstream checks create or refresh an issue instead of merging code automatically; scheduled workflows become active only after the workflow exists on the repository's default branch.

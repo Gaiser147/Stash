@@ -133,7 +133,16 @@ class NavidromeExportPreferences @Inject constructor(
     }
 
     suspend fun recordAttempt(now: Long = System.currentTimeMillis()) {
-        context.navidromeExportDataStore.edit { it[Keys.lastAttemptAt] = now }
+        context.navidromeExportDataStore.edit {
+            it[Keys.lastAttemptAt] = now
+            it[Keys.lastResult] = RESULT_EXPORT_IN_PROGRESS
+        }
+    }
+
+    suspend fun recordQueued(result: String) {
+        context.navidromeExportDataStore.edit {
+            it[Keys.lastResult] = result.take(80)
+        }
     }
 
     suspend fun recordResult(result: String, successful: Boolean, now: Long = System.currentTimeMillis()) {
@@ -171,4 +180,9 @@ class NavidromeExportPreferences @Inject constructor(
         val encrypted = Base64.decode(value, Base64.NO_WRAP)
         encryption.decrypt(encrypted).toString(Charsets.UTF_8)
     }.getOrDefault("")
+
+    companion object {
+        const val RESULT_EXPORT_IN_PROGRESS = "export_in_progress"
+        const val RESULT_FULL_EXPORT_QUEUED = "full_export_queued"
+    }
 }

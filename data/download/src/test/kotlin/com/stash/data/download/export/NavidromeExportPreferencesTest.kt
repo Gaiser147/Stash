@@ -48,4 +48,24 @@ class NavidromeExportPreferencesTest {
         preferences.clearConnection()
         preferences.setEnabled(true)
     }
+
+    @Test
+    fun `attempt and queued states are persisted without changing last success`() = runTest {
+        preferences.clearConnection()
+        preferences.recordResult("track_uploaded", successful = true, now = 100L)
+
+        preferences.recordAttempt(now = 200L)
+        val attempting = preferences.current()
+        assertThat(attempting.lastAttemptAt).isEqualTo(200L)
+        assertThat(attempting.lastSuccessAt).isEqualTo(100L)
+        assertThat(attempting.lastResult)
+            .isEqualTo(NavidromeExportPreferences.RESULT_EXPORT_IN_PROGRESS)
+
+        preferences.recordQueued(NavidromeExportPreferences.RESULT_FULL_EXPORT_QUEUED)
+        val queued = preferences.current()
+        assertThat(queued.lastAttemptAt).isEqualTo(200L)
+        assertThat(queued.lastSuccessAt).isEqualTo(100L)
+        assertThat(queued.lastResult)
+            .isEqualTo(NavidromeExportPreferences.RESULT_FULL_EXPORT_QUEUED)
+    }
 }

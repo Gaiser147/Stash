@@ -450,6 +450,7 @@ class SettingsViewModel @Inject constructor(
             navidromeExportTokenConfigured = navidromeExport.tokenConfigured,
             navidromeExportWifiOnly = navidromeExport.wifiOnly,
             navidromeExportChargingOnly = navidromeExport.chargingOnly,
+            navidromeExportLastAttemptAt = navidromeExport.lastAttemptAt,
             navidromeExportLastSuccessAt = navidromeExport.lastSuccessAt,
             navidromeExportLastResult = navidromeExport.lastResult,
             navidromeExportMessage = local.navidromeExportMessage,
@@ -1242,7 +1243,12 @@ class SettingsViewModel @Inject constructor(
 
     fun onRunFullNavidromeExport() {
         viewModelScope.launch {
-            runCatching { navidromeExportScheduler.enqueueFullExport() }
+            runCatching {
+                navidromeExportScheduler.enqueueFullExport()
+                navidromeExportPreferences.recordQueued(
+                    NavidromeExportPreferences.RESULT_FULL_EXPORT_QUEUED,
+                )
+            }
                 .onSuccess {
                     _localState.update { it.copy(navidromeExportMessage = "Full Navidrome sync queued.") }
                 }
