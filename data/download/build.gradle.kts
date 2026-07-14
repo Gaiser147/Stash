@@ -162,6 +162,7 @@ dependencies {
     testImplementation(libs.mockk)
     // MockWebServer for QobuzApiClient tests — fake server, real OkHttp client.
     testImplementation("com.squareup.okhttp3:mockwebserver:4.12.0")
+    testImplementation("com.squareup.okhttp3:okhttp-tls:4.12.0")
     // Robolectric — Android environment for DataStore-backed pref tests
     // (LosslessSourcePreferencesYoutubeFallbackTest), mirroring the
     // EqStoreTest setup in :core:media.
