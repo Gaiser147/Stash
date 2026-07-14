@@ -69,3 +69,13 @@ The retained local debug keystore and the locally archived May 2026 APK both use
 ## CI and release boundaries
 
 `.github/workflows/navidrome-fork.yml` runs affected unit tests and creates a debug APK. It does not publish a release, merge upstream, deploy the ingest service, or install an APK on a device. The verification job times out after 45 minutes instead of occupying a runner indefinitely. Artifacts contain the APK plus a JSON provenance record with repository, commit, workflow run, signing mode, APK SHA-256, and APK signing-certificate SHA-256. CI verifies the APK signature and, when stable-signing secrets are configured, fails unless the APK certificate matches that keystore. Builds without all stable-signing secrets are labeled `ci-only`. Weekly upstream checks create or refresh an issue instead of merging code automatically; scheduled workflows become active only after the workflow exists on the repository's default branch.
+
+Canonical branch CI additionally checks out private `Gaiser147/stash-ingest` at
+the full commit SHA recorded in the workflow by using a dedicated read-only
+deploy key. It starts that exact server on loopback with a one-run TLS
+certificate and test-only token, then runs the production Kotlin client through
+authenticated capabilities, a twice-submitted audio upload, a playlist upload,
+and sync completion. The job verifies the real transformed media, rewritten
+playlist, SQLite state, and TLS startup log, and uploads only redacted log plus
+client/server commit provenance. Fork PRs without the private read-only key keep
+the MockWebServer tests but cannot satisfy this canonical cross-repository gate.

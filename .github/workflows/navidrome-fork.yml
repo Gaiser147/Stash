@@ -65,12 +65,118 @@ jobs:
             echo "configured=true" >> "$GITHUB_OUTPUT"
           fi
 
+      - name: Check private ingest fixture access
+        id: ingest_fixture
+        env:
+          DEPLOY_KEY: ${{ secrets.STASH_INGEST_DEPLOY_KEY }}
+        run: |
+          if [ -n "$DEPLOY_KEY" ]; then
+            echo "available=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "available=false" >> "$GITHUB_OUTPUT"
+            echo "::warning::Private stash-ingest fixture is unavailable; canonical branch CI must provide STASH_INGEST_DEPLOY_KEY."
+          fi
+
+      - name: Check out pinned stash-ingest contract
+        if: steps.ingest_fixture.outputs.available == 'true'
+        uses: actions/checkout@v7
+        with:
+          repository: Gaiser147/stash-ingest
+          ref: d78c69486fc3632c90bc4f9d44a69d3a33b91adf
+          path: _e2e/stash-ingest
+          ssh-key: ${{ secrets.STASH_INGEST_DEPLOY_KEY }}
+          persist-credentials: false
+
+      - name: Start pinned stash-ingest TLS fixture
+        if: steps.ingest_fixture.outputs.available == 'true'
+        env:
+          INGEST_COMMIT: d78c69486fc3632c90bc4f9d44a69d3a33b91adf
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install --yes --no-install-recommends ffmpeg
+          root="$RUNNER_TEMP/stash-ingest-e2e"
+          mkdir -p "$root/library" "$root/state"
+          openssl req -x509 -newkey rsa:2048 -nodes -days 1 \
+            -subj '/CN=localhost' \
+            -addext 'subjectAltName=DNS:localhost,IP:127.0.0.1' \
+            -keyout "$root/key.pem" -out "$root/cert.pem" >/dev/null 2>&1
+          ffmpeg -hide_banner -loglevel error -f lavfi \
+            -i 'sine=frequency=440:duration=0.2' -c:a flac "$root/fixture.flac"
+          STASH_INGEST_TOKEN='dedicated-e2e-token' \
+          STASH_INGEST_LIBRARY_ROOT="$root/library" \
+          STASH_INGEST_STATE_DB="$root/state/state.sqlite3" \
+          PYTHONPATH="$GITHUB_WORKSPACE/_e2e/stash-ingest" \
+            python3 -m stash_ingest --host 127.0.0.1 --port 4655 \
+              --tls-cert "$root/cert.pem" --tls-key "$root/key.pem" \
+              >"$root/server.log" 2>&1 &
+          echo "$!" > "$root/server.pid"
+          ready=false
+          for _ in $(seq 1 50); do
+            if curl --silent --fail --cacert "$root/cert.pem" \
+              -H 'Authorization: Bearer dedicated-e2e-token' \
+              -H 'X-Stash-Contract: 1' \
+              https://localhost:4655/v1/capabilities >/dev/null 2>&1; then
+              ready=true
+              break
+            fi
+            sleep 0.2
+          done
+          if [ "$ready" != true ]; then
+            cat "$root/server.log"
+            exit 1
+          fi
+          echo "STASH_INGEST_E2E_URL=https://localhost:4655" >> "$GITHUB_ENV"
+          echo "STASH_INGEST_E2E_TOKEN=dedicated-e2e-token" >> "$GITHUB_ENV"
+          echo "STASH_INGEST_E2E_CERT=$root/cert.pem" >> "$GITHUB_ENV"
+          echo "STASH_INGEST_E2E_AUDIO=$root/fixture.flac" >> "$GITHUB_ENV"
+          jq -n \
+            --arg client_commit "$GITHUB_SHA" \
+            --arg server_commit "$INGEST_COMMIT" \
+            --arg contract "1" \
+            '{client_commit: $client_commit, server_commit: $server_commit, contract: $contract}' \
+            > "$root/provenance.json"
+
       - name: Test Navidrome integration and affected modules
         run: >-
           ./gradlew
           :data:download:testDebugUnitTest
           :feature:settings:testDebugUnitTest
           --no-daemon
+
+      - name: Verify combined ingest evidence
+        if: steps.ingest_fixture.outputs.available == 'true'
+        run: |
+          root="$RUNNER_TEMP/stash-ingest-e2e"
+          test -s "$root/library/Stash/e2e/artist/album/track.flac"
+          test -s "$root/library/Playlists/Stash/e2e.m3u8"
+          test -s "$root/state/state.sqlite3"
+          ffprobe -v error -select_streams a:0 -show_entries stream=codec_type \
+            -of csv=p=0 "$root/library/Stash/e2e/artist/album/track.flac" \
+            | rg '^audio$'
+          rg 'Stash/e2e/artist/album/track.flac' \
+            "$root/library/Playlists/Stash/e2e.m3u8"
+          rg '"tls": true' "$root/server.log"
+
+      - name: Stop private ingest fixture
+        if: always() && steps.ingest_fixture.outputs.available == 'true'
+        run: |
+          root="$RUNNER_TEMP/stash-ingest-e2e"
+          if [ -s "$root/server.pid" ]; then
+            kill "$(cat "$root/server.pid")" 2>/dev/null || true
+            wait "$(cat "$root/server.pid")" 2>/dev/null || true
+          fi
+          rm -f "$root/key.pem" "$root/cert.pem"
+
+      - name: Upload combined ingest evidence
+        if: always() && steps.ingest_fixture.outputs.available == 'true'
+        uses: actions/upload-artifact@v7
+        with:
+          name: stash-ingest-e2e-evidence
+          path: |
+            ${{ runner.temp }}/stash-ingest-e2e/server.log
+            ${{ runner.temp }}/stash-ingest-e2e/provenance.json
+          if-no-files-found: ignore
+          retention-days: 14
 
       - name: Upload unit test reports
         if: always()
