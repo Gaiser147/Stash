@@ -52,6 +52,7 @@ fun NavidromeExportSection(
     onEnabledChanged: (Boolean) -> Unit,
     onWifiOnlyChanged: (Boolean) -> Unit,
     onChargingOnlyChanged: (Boolean) -> Unit,
+    onTestConnection: () -> Unit,
     onSyncNow: () -> Unit,
     onClearConnection: () -> Unit,
     onClearMessage: () -> Unit,
@@ -155,6 +156,14 @@ fun NavidromeExportSection(
         }
         state.navidromeExportMessage?.let {
             Text(it, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.primary)
+        }
+
+        OutlinedButton(
+            onClick = onTestConnection,
+            enabled = configured && !state.navidromeExportConnectionChecking,
+            modifier = Modifier.fillMaxWidth(),
+        ) {
+            Text(if (state.navidromeExportConnectionChecking) "Checking connection…" else "Test connection")
         }
 
         Row(

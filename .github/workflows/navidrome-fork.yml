@@ -111,10 +111,35 @@ jobs:
         env:
           APK_PATH: ${{ steps.apk.outputs.path }}
           SIGNING_MODE: ${{ steps.debug_signing.outputs.configured == 'true' && 'stable-signed' || 'ci-only' }}
+          DEBUG_KEYSTORE_PASSWORD: ${{ secrets.STASH_DEBUG_KEYSTORE_PASSWORD }}
+          DEBUG_KEY_ALIAS: ${{ secrets.STASH_DEBUG_KEY_ALIAS }}
         shell: bash
         run: |
           provenance="$RUNNER_TEMP/stash-artifact-provenance.json"
           apk_sha256="$(sha256sum "$APK_PATH" | cut -d ' ' -f 1)"
+          apksigner="$(find "$ANDROID_HOME/build-tools" -type f -name apksigner -print | sort -V | tail -n1)"
+          if [ -z "$apksigner" ]; then
+            echo "::error::Android apksigner was not found"
+            exit 1
+          fi
+          "$apksigner" verify "$APK_PATH"
+          signer_sha256="$("$apksigner" verify --print-certs "$APK_PATH" \
+            | awk -F': ' '/Signer #1 certificate SHA-256 digest/ {print tolower($2); exit}')"
+          if [ -z "$signer_sha256" ]; then
+            echo "::error::Could not read the APK signing certificate"
+            exit 1
+          fi
+          if [ "$SIGNING_MODE" = "stable-signed" ]; then
+            expected_signer="$(keytool -list -v \
+              -keystore "$RUNNER_TEMP/stash-debug.jks" \
+              -storepass "$DEBUG_KEYSTORE_PASSWORD" \
+              -alias "$DEBUG_KEY_ALIAS" \
+              | awk -F': ' '/SHA256:/ {value=tolower($2); gsub(":", "", value); print value; exit}')"
+            if [ "$signer_sha256" != "$expected_signer" ]; then
+              echo "::error::APK signer does not match the configured stable keystore"
+              exit 1
+            fi
+          fi
           jq -n \
             --arg repository "$GITHUB_REPOSITORY" \
             --arg commit "$GITHUB_SHA" \
@@ -124,6 +149,7 @@ jobs:
             --arg signing "$SIGNING_MODE" \
             --arg apk_file "$(basename "$APK_PATH")" \
             --arg apk_sha256 "$apk_sha256" \
+            --arg apk_signer_sha256 "$signer_sha256" \
             '{
               repository: $repository,
               commit: $commit,
@@ -132,10 +158,12 @@ jobs:
               workflow_attempt: $run_attempt,
               signing: $signing,
               apk_file: $apk_file,
-              apk_sha256: $apk_sha256
+              apk_sha256: $apk_sha256,
+              apk_signer_sha256: $apk_signer_sha256
             }' > "$provenance"
           echo "path=$provenance" >> "$GITHUB_OUTPUT"
           echo "APK SHA-256: $apk_sha256" >> "$GITHUB_STEP_SUMMARY"
+          echo "APK signer SHA-256: $signer_sha256" >> "$GITHUB_STEP_SUMMARY"
           echo "Signing mode: $SIGNING_MODE" >> "$GITHUB_STEP_SUMMARY"
 
       - name: Upload debug artifact

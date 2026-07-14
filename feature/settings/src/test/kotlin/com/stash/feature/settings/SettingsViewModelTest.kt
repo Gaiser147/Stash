@@ -75,6 +75,7 @@ class SettingsViewModelTest {
         databaseBackupManager = mockk(relaxed = true),
         navidromeExportPreferences = mockk(relaxed = true),
         navidromeExportScheduler = mockk(relaxed = true),
+        navidromeIngestClient = mockk(relaxed = true),
     )
 
     @Test fun `onQbdlxEnabledChange persists via setQbdlxEnabled`() = runTest {

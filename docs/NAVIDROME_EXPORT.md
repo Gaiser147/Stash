@@ -7,9 +7,10 @@ The Navidrome feature in this fork is a one-way, opt-in export of Stash's downlo
 1. Deploy or obtain a compatible `stash-ingest` endpoint over HTTPS and create a dedicated bearer token.
 2. In Stash, open **Settings → Accounts & sync → Your Navidrome**.
 3. Enter the ingest base URL and token, then save. The URL must use HTTPS and cannot contain credentials, a query, or a fragment.
-4. Enable **Automatic export**. New completed downloads and changed playlist manifests will then be queued.
-5. Leave **Unmetered network only** and **Only while charging** enabled unless immediate delivery matters more than data and battery use.
-6. Use **Sync all now** once after setup, after restoring Stash data, or when reconciling an existing library.
+4. Use **Test connection**. A current server authenticates the token and contract through `/v1/capabilities`; a legacy v1 server can only confirm reachability until the first export.
+5. Enable **Automatic export**. New completed downloads and changed playlist manifests will then be queued.
+6. Leave **Unmetered network only** and **Only while charging** enabled unless immediate delivery matters more than data and battery use.
+7. Use **Sync all now** once after setup, after restoring Stash data, or when reconciling an existing library.
 
 The bearer token is encrypted with the same Tink AES-256-GCM/Android Keystore mechanism used for other app secrets. The Settings UI never reads it back. Entering a blank token while editing a configured connection preserves the encrypted value.
 
@@ -35,7 +36,10 @@ Every request carries:
 ```text
 Authorization: Bearer <dedicated ingest token>
 X-Stash-Contract: 1
+X-Stash-Request-Id: <random UUID>
 ```
+
+Current servers echo the contract and request ID in their response so a failed app attempt can be correlated with a redacted server log event. Legacy servers safely ignore the additional request ID.
 
 The configured base URL is followed by one of these paths:
 
@@ -60,4 +64,4 @@ Old GitHub-hosted debug APKs may have been signed with ephemeral runner keys. An
 
 ## CI and release boundaries
 
-`.github/workflows/navidrome-fork.yml` runs affected unit tests and creates a debug APK. It does not publish a release, merge upstream, deploy the ingest service, or install an APK on a device. The verification job times out after 45 minutes instead of occupying a runner indefinitely. Artifacts contain the APK plus a JSON provenance record with repository, commit, workflow run, signing mode, and APK SHA-256; builds without all stable-signing secrets are labeled `ci-only`. Weekly upstream checks create or refresh an issue instead of merging code automatically; scheduled workflows become active only after the workflow exists on the repository's default branch.
+`.github/workflows/navidrome-fork.yml` runs affected unit tests and creates a debug APK. It does not publish a release, merge upstream, deploy the ingest service, or install an APK on a device. The verification job times out after 45 minutes instead of occupying a runner indefinitely. Artifacts contain the APK plus a JSON provenance record with repository, commit, workflow run, signing mode, APK SHA-256, and APK signing-certificate SHA-256. CI verifies the APK signature and, when stable-signing secrets are configured, fails unless the APK certificate matches that keystore. Builds without all stable-signing secrets are labeled `ci-only`. Weekly upstream checks create or refresh an issue instead of merging code automatically; scheduled workflows become active only after the workflow exists on the repository's default branch.

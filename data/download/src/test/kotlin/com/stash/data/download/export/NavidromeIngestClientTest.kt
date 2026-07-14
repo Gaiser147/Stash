@@ -84,6 +84,8 @@ class NavidromeIngestClientTest {
         assertThat(request.path).isEqualTo("/stash-ingest/v1/files/artist/album/track.flac")
         assertThat(request.getHeader("Authorization")).isEqualTo("Bearer dedicated-test-token")
         assertThat(request.getHeader("X-Stash-Contract")).isEqualTo("1")
+        assertThat(request.getHeader("X-Stash-Request-Id"))
+            .matches("[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}")
         assertThat(request.getHeader("X-Stash-Size")).isEqualTo(audio.length().toString())
         assertThat(request.getHeader("X-Stash-Sha256")).isEqualTo(sha256(audio.readBytes()))
         assertThat(request.body.readByteArray()).isEqualTo(audio.readBytes())
@@ -112,6 +114,46 @@ class NavidromeIngestClientTest {
 
         assertThat(client.uploadPlaylist("mix.m3u8", playlist))
             .isEqualTo(NavidromeUploadOutcome.PermanentFailure)
+        requireNotNull(server.takeRequest(3, TimeUnit.SECONDS))
+    }
+
+    @Test
+    fun `connection check verifies authenticated capabilities`() = runTest {
+        server.enqueue(
+            MockResponse()
+                .setResponseCode(200)
+                .setHeader("X-Stash-Contract", "1")
+                .setBody("""{"ok":true,"contract":"1","features":{"remoteDelete":false}}"""),
+        )
+
+        assertThat(client.checkConnection()).isEqualTo(NavidromeConnectionCheck.Verified)
+        val request = requireNotNull(server.takeRequest(3, TimeUnit.SECONDS))
+        assertThat(request.path).isEqualTo("/stash-ingest/v1/capabilities")
+        assertThat(request.getHeader("Authorization")).isEqualTo("Bearer dedicated-test-token")
+        assertThat(request.getHeader("X-Stash-Contract")).isEqualTo("1")
+        assertThat(request.getHeader("X-Stash-Request-Id")).isNotEmpty()
+    }
+
+    @Test
+    fun `connection check falls back to legacy health`() = runTest {
+        server.enqueue(MockResponse().setResponseCode(404))
+        server.enqueue(MockResponse().setResponseCode(200).setBody("""{"ok":true}"""))
+
+        assertThat(client.checkConnection()).isEqualTo(NavidromeConnectionCheck.LegacyReachable)
+        assertThat(requireNotNull(server.takeRequest(3, TimeUnit.SECONDS)).path)
+            .isEqualTo("/stash-ingest/v1/capabilities")
+        assertThat(requireNotNull(server.takeRequest(3, TimeUnit.SECONDS)).path)
+            .isEqualTo("/stash-ingest/v1/health")
+    }
+
+    @Test
+    fun `connection check distinguishes rejected token and incompatible body`() = runTest {
+        server.enqueue(MockResponse().setResponseCode(401))
+        server.enqueue(MockResponse().setResponseCode(200).setBody("""{"ok":true,"contract":"2"}"""))
+
+        assertThat(client.checkConnection()).isEqualTo(NavidromeConnectionCheck.AuthenticationFailed)
+        requireNotNull(server.takeRequest(3, TimeUnit.SECONDS))
+        assertThat(client.checkConnection()).isEqualTo(NavidromeConnectionCheck.Incompatible)
         requireNotNull(server.takeRequest(3, TimeUnit.SECONDS))
     }
 

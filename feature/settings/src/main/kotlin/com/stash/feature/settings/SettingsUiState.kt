@@ -187,6 +187,7 @@ data class SettingsUiState(
     val navidromeExportLastAttemptAt: Long = 0L,
     val navidromeExportLastSuccessAt: Long = 0L,
     val navidromeExportLastResult: String = "",
+    val navidromeExportConnectionChecking: Boolean = false,
     val navidromeExportMessage: String? = null,
 )
 

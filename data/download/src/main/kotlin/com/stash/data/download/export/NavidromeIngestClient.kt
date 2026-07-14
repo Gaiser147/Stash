@@ -5,6 +5,7 @@ import android.net.Uri
 import android.util.Base64
 import android.util.Log
 import dagger.hilt.android.qualifiers.ApplicationContext
+import java.io.ByteArrayOutputStream
 import java.io.File
 import java.security.MessageDigest
 import java.util.UUID
@@ -27,6 +28,15 @@ sealed interface NavidromeUploadOutcome {
     data object SkippedNoSource : NavidromeUploadOutcome
     data object PermanentFailure : NavidromeUploadOutcome
     data object RetryableFailure : NavidromeUploadOutcome
+}
+
+sealed interface NavidromeConnectionCheck {
+    data object Verified : NavidromeConnectionCheck
+    data object LegacyReachable : NavidromeConnectionCheck
+    data object AuthenticationFailed : NavidromeConnectionCheck
+    data object Incompatible : NavidromeConnectionCheck
+    data object Unreachable : NavidromeConnectionCheck
+    data object NotConfigured : NavidromeConnectionCheck
 }
 
 data class NavidromeTrackMetadata(
@@ -175,11 +185,80 @@ class NavidromeIngestClient @Inject constructor(
             }
         }
 
-    private suspend fun endpointAndToken(): Endpoint? {
+    suspend fun checkConnection(): NavidromeConnectionCheck = withContext(Dispatchers.IO) {
+        val endpoint = endpointAndToken(requireEnabled = false)
+            ?: return@withContext NavidromeConnectionCheck.NotConfigured
+        try {
+            val capabilities = Request.Builder()
+                .url("${endpoint.baseUrl}/v1/capabilities")
+                .get()
+                .authenticated(endpoint.token)
+                .build()
+            uploadHttpClient.newCall(capabilities).execute().use { response ->
+                when {
+                    response.code == 401 || response.code == 403 -> {
+                        return@withContext NavidromeConnectionCheck.AuthenticationFailed
+                    }
+                    response.code == 404 -> Unit
+                    response.isSuccessful && validCapabilities(readSmallResponse(response.body)) -> {
+                        return@withContext NavidromeConnectionCheck.Verified
+                    }
+                    response.isSuccessful || response.code in PERMANENT_STATUS_CODES -> {
+                        return@withContext NavidromeConnectionCheck.Incompatible
+                    }
+                    else -> return@withContext NavidromeConnectionCheck.Unreachable
+                }
+            }
+
+            val legacyHealth = Request.Builder()
+                .url("${endpoint.baseUrl}/v1/health")
+                .get()
+                .authenticated(endpoint.token)
+                .build()
+            uploadHttpClient.newCall(legacyHealth).execute().use { response ->
+                when {
+                    response.code == 401 || response.code == 403 -> {
+                        NavidromeConnectionCheck.AuthenticationFailed
+                    }
+                    response.isSuccessful && validLegacyHealth(readSmallResponse(response.body)) -> {
+                        NavidromeConnectionCheck.LegacyReachable
+                    }
+                    response.code in PERMANENT_STATUS_CODES -> NavidromeConnectionCheck.Incompatible
+                    else -> NavidromeConnectionCheck.Unreachable
+                }
+            }
+        } catch (_: Exception) {
+            NavidromeConnectionCheck.Unreachable
+        }
+    }
+
+    private suspend fun endpointAndToken(requireEnabled: Boolean = true): Endpoint? {
         val config = prefs.current()
-        if (!config.configured) return null
         val baseUrl = NavidromeEndpoint.normalize(config.serverUrl) ?: return null
+        if (config.token.isBlank() || (requireEnabled && !config.enabled)) return null
         return Endpoint(baseUrl, config.token)
+    }
+
+    private fun validCapabilities(body: String?): Boolean = runCatching {
+        val json = JSONObject(body.orEmpty())
+        json.optBoolean("ok") && json.optString("contract") == CONTRACT_VERSION
+    }.getOrDefault(false)
+
+    private fun validLegacyHealth(body: String?): Boolean = runCatching {
+        JSONObject(body.orEmpty()).optBoolean("ok")
+    }.getOrDefault(false)
+
+    private fun readSmallResponse(body: okhttp3.ResponseBody?): String? {
+        body ?: return null
+        if (body.contentLength() > MAX_CONTROL_RESPONSE_BYTES) return null
+        return runCatching {
+            ByteArrayOutputStream().use { output ->
+                body.byteStream().use { input ->
+                    copyBounded(input, output, MAX_CONTROL_RESPONSE_BYTES)
+                }
+                output.toString(Charsets.UTF_8.name())
+            }
+        }.getOrNull()
     }
 
     private fun execute(request: Request, operation: String): NavidromeUploadOutcome {
@@ -285,6 +364,7 @@ class NavidromeIngestClient @Inject constructor(
     private fun Request.Builder.authenticated(token: String): Request.Builder =
         header("Authorization", "Bearer $token")
             .header("X-Stash-Contract", CONTRACT_VERSION)
+            .header("X-Stash-Request-Id", UUID.randomUUID().toString())
 
     private class FileRequestBody(private val file: File) : RequestBody() {
         override fun contentType() = OCTET_STREAM_MEDIA_TYPE
@@ -300,6 +380,7 @@ class NavidromeIngestClient @Inject constructor(
         private const val TAG = "NavidromeIngestClient"
         private const val CONTRACT_VERSION = "1"
         private const val MAX_COVER_BYTES = 10L * 1024L * 1024L
+        private const val MAX_CONTROL_RESPONSE_BYTES = 64L * 1024L
         private val PERMANENT_STATUS_CODES = (400..499).filterNot { it == 408 || it == 429 }.toSet()
         private val COVER_EXTENSIONS = setOf("jpg", "jpeg", "png", "webp")
         private val OCTET_STREAM_MEDIA_TYPE = "application/octet-stream".toMediaType()

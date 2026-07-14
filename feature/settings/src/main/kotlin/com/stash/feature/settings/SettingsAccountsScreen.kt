@@ -207,6 +207,7 @@ fun SettingsAccountsScreen(
                 onEnabledChanged = viewModel::onNavidromeExportEnabledChanged,
                 onWifiOnlyChanged = viewModel::onNavidromeExportWifiOnlyChanged,
                 onChargingOnlyChanged = viewModel::onNavidromeExportChargingOnlyChanged,
+                onTestConnection = viewModel::onTestNavidromeExportConnection,
                 onSyncNow = viewModel::onRunFullNavidromeExport,
                 onClearConnection = viewModel::onClearNavidromeExportConnection,
                 onClearMessage = viewModel::onClearNavidromeExportMessage,

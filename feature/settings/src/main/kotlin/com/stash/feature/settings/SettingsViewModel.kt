@@ -45,7 +45,9 @@ import com.stash.data.download.lossless.qbdlx.QbdlxTokenChoice
 import com.stash.data.download.lossless.qobuz.QobuzSource
 import com.stash.data.download.prefs.StreamingQualityPreferences
 import com.stash.data.download.export.NavidromeExportConfig
+import com.stash.data.download.export.NavidromeConnectionCheck
 import com.stash.data.download.export.NavidromeExportPreferences
+import com.stash.data.download.export.NavidromeIngestClient
 import com.stash.feature.settings.components.squidCaptchaStatus
 import com.stash.core.data.repository.MusicRepository
 import com.stash.core.model.QualityTier
@@ -112,6 +114,7 @@ class SettingsViewModel @Inject constructor(
     private val databaseBackupManager: DatabaseBackupManager,
     private val navidromeExportPreferences: NavidromeExportPreferences,
     private val navidromeExportScheduler: NavidromeExportScheduler,
+    private val navidromeIngestClient: NavidromeIngestClient,
 ) : ViewModel() {
 
     /**
@@ -453,6 +456,7 @@ class SettingsViewModel @Inject constructor(
             navidromeExportLastAttemptAt = navidromeExport.lastAttemptAt,
             navidromeExportLastSuccessAt = navidromeExport.lastSuccessAt,
             navidromeExportLastResult = navidromeExport.lastResult,
+            navidromeExportConnectionChecking = local.navidromeExportConnectionChecking,
             navidromeExportMessage = local.navidromeExportMessage,
         )
     }.stateIn(
@@ -1258,6 +1262,31 @@ class SettingsViewModel @Inject constructor(
         }
     }
 
+    fun onTestNavidromeExportConnection() {
+        if (_localState.value.navidromeExportConnectionChecking) return
+        _localState.update {
+            it.copy(navidromeExportConnectionChecking = true, navidromeExportMessage = null)
+        }
+        viewModelScope.launch {
+            val result = navidromeIngestClient.checkConnection()
+            val message = when (result) {
+                NavidromeConnectionCheck.Verified -> "Connection verified: token and contract accepted."
+                NavidromeConnectionCheck.LegacyReachable ->
+                    "Endpoint reachable. This legacy server cannot validate the token before an export."
+                NavidromeConnectionCheck.AuthenticationFailed -> "Connection failed: the ingest token was rejected."
+                NavidromeConnectionCheck.Incompatible -> "Connection failed: incompatible ingest endpoint."
+                NavidromeConnectionCheck.Unreachable -> "Connection failed: endpoint could not be reached."
+                NavidromeConnectionCheck.NotConfigured -> "Configure the HTTPS endpoint and token first."
+            }
+            _localState.update {
+                it.copy(
+                    navidromeExportConnectionChecking = false,
+                    navidromeExportMessage = message,
+                )
+            }
+        }
+    }
+
     fun onClearNavidromeExportConnection() {
         viewModelScope.launch {
             navidromeExportPreferences.clearConnection()
@@ -1350,6 +1379,7 @@ class SettingsViewModel @Inject constructor(
          * on confirm, so dismissing leaves mirroring off.
          */
         val pendingMirrorWarning: Destination? = null,
+        val navidromeExportConnectionChecking: Boolean = false,
         val navidromeExportMessage: String? = null,
     )
 
