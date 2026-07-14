@@ -198,6 +198,21 @@ fun SettingsAccountsScreen(
             }
         }
 
+        SettingsSectionLabel("Your Navidrome")
+
+        GlassCard {
+            com.stash.feature.settings.components.NavidromeExportSection(
+                state = uiState,
+                onSaveConnection = viewModel::onSaveNavidromeExportConnection,
+                onEnabledChanged = viewModel::onNavidromeExportEnabledChanged,
+                onWifiOnlyChanged = viewModel::onNavidromeExportWifiOnlyChanged,
+                onChargingOnlyChanged = viewModel::onNavidromeExportChargingOnlyChanged,
+                onSyncNow = viewModel::onRunFullNavidromeExport,
+                onClearConnection = viewModel::onClearNavidromeExportConnection,
+                onClearMessage = viewModel::onClearNavidromeExportMessage,
+            )
+        }
+
         SettingsSectionLabel("Sync your likes", beta = true)
 
         GlassCard {

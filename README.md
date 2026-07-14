@@ -9,7 +9,7 @@
 
 Stash mirrors your Spotify and YouTube Music libraries to your Android phone. You connect each service, pick the playlists and mixes you want, and Stash either downloads them as real FLAC files for offline playback or surfaces them as a streaming index so you can stream tracks without filling up your storage. Same library, two modes, one tap to switch.
 
-There's no Stash account. No subscription. No ads. No analytics. Your credentials live on your phone, encrypted, and the only network traffic Stash makes is to Spotify and YouTube themselves.
+There's no required Stash account or Stash-operated backend. No subscription. No ads. No analytics. Music-service credentials live on your phone, encrypted. Optional integrations, including Last.fm and the fork's one-way Navidrome export, make only the connections you explicitly configure.
 
 <p align="center">
   <img src="docs/screenshots/home.png" width="280" alt="Home screen — Daily Mixes, sync stats, supporter pill">
@@ -44,6 +44,7 @@ These are run by people doing it for the love of it — mostly solo, mostly free
 - **Last.fm scrobbling**, optional, off by default
 - **Wrong-match flag** — if Stash picked the wrong version, tap once from Now Playing and it queues a re-search
 - **Likes and History mirroring** — When enabled, each track you like & stream in Stash lands in your Spotify & YouTube accounts.
+- **Optional Navidrome export** — This fork can send downloaded audio, artwork, and playlist manifests to an authenticated HTTPS ingest service. It is off by default; see [Navidrome export](docs/NAVIDROME_EXPORT.md).
 
 ### Playback
 
@@ -54,9 +55,9 @@ These are run by people doing it for the love of it — mostly solo, mostly free
 
 ### Privacy
 
-- No Stash servers. No accounts. No analytics. No third-party crash reporters.
+- No required Stash server or account. No analytics. No third-party crash reporters.
 - Cookies stored on-device, encrypted with AES-256-GCM via Google's [Tink](https://developers.google.com/tink)
-- The only network requests Stash makes are to Spotify and YouTube directly
+- Optional integrations are off until configured and never receive Spotify or YouTube login cookies.
 - GPL-3.0, every line of code is open source
 
 ---
@@ -155,6 +156,10 @@ Stash will start pulling your YouTube Music daily mixes, discover mix, replay mi
 Open the Sync tab. Before you tap Sync Now, expand the **Spotify Sync Preferences** card and pick the playlists and mixes you actually want — each playlist has its own toggle. For mixes, decide between **Refresh** mode (each sync replaces the mix's contents, cleaning up old tracks) and **Accumulate** mode (each sync stacks new tracks on top of what's there)
 
 The first sync is the slow one — a thousand-song library takes about an hour in Offline mode because every track has to download. After that, scheduled syncs just pick up whatever's new and run quietly in the background.
+
+### Optional Navidrome export
+
+Fork builds include an opt-in, one-way export for downloaded files and playlist manifests. It requires a separate authenticated HTTPS `stash-ingest` service; the Android app does not write directly to Navidrome's API or expose Navidrome credentials. Setup, data flow, migration notes, and the versioned HTTP contract are documented in [docs/NAVIDROME_EXPORT.md](docs/NAVIDROME_EXPORT.md).
 
 ### When background sync stops working
 

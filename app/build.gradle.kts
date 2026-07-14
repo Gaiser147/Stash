@@ -44,6 +44,20 @@ val hasReleaseSigning = releaseStoreFilePath != null &&
     releaseKeyAlias != null &&
     releaseKeyPassword != null
 
+// Optional stable signer for fork debug artifacts. Without these values the
+// ordinary Android debug key is used, which is suitable for CI compilation but
+// must not be advertised as an in-place update for an installed fork build.
+val debugStoreFilePath = System.getenv("STASH_DEBUG_KEYSTORE_FILE")
+val debugStorePassword = System.getenv("STASH_DEBUG_KEYSTORE_PASSWORD")
+val debugKeyAlias = System.getenv("STASH_DEBUG_KEY_ALIAS")
+val debugKeyPassword = System.getenv("STASH_DEBUG_KEY_PASSWORD")
+val hasStableDebugSigning = listOf(
+    debugStoreFilePath,
+    debugStorePassword,
+    debugKeyAlias,
+    debugKeyPassword,
+).all { !it.isNullOrBlank() }
+
 // ── Last.fm API credentials ────────────────────────────────────────────────
 //
 // Read from `local.properties` (gitignored) or env vars (CI). Users who want
@@ -122,6 +136,14 @@ android {
                 keyPassword = releaseKeyPassword
             }
         }
+        if (hasStableDebugSigning) {
+            create("stableDebug") {
+                storeFile = rootProject.file(debugStoreFilePath!!)
+                storePassword = debugStorePassword
+                keyAlias = debugKeyAlias
+                keyPassword = debugKeyPassword
+            }
+        }
     }
 
     buildTypes {
@@ -152,6 +174,9 @@ android {
         debug {
             applicationIdSuffix = ".debug"
             isDebuggable = true
+            if (hasStableDebugSigning) {
+                signingConfig = signingConfigs.getByName("stableDebug")
+            }
         }
     }
     compileOptions {

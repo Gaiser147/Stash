@@ -73,6 +73,8 @@ class SettingsViewModelTest {
         streamingPreference = mockk(relaxed = true),
         crossfadePreference = mockk(relaxed = true),
         databaseBackupManager = mockk(relaxed = true),
+        navidromeExportPreferences = mockk(relaxed = true),
+        navidromeExportScheduler = mockk(relaxed = true),
     )
 
     @Test fun `onQbdlxEnabledChange persists via setQbdlxEnabled`() = runTest {

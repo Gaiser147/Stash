@@ -69,6 +69,8 @@ class DownloadManagerDeferTest {
         mockk(relaxed = true)
     private val losslessHealthGate: com.stash.data.download.lossless.LosslessSourceHealthGate =
         mockk(relaxed = true)
+    private val navidromeExportScheduler: com.stash.core.data.sync.NavidromeExportScheduler =
+        mockk(relaxed = true)
 
     private fun newSubject(): DownloadManager = DownloadManager(
         downloadExecutor = downloadExecutor,
@@ -93,6 +95,7 @@ class DownloadManagerDeferTest {
         lyricsFetchTrigger = lyricsFetchTrigger,
         audioDurationExtractor = audioDurationExtractor,
         losslessHealthGate = losslessHealthGate,
+        navidromeExportScheduler = navidromeExportScheduler,
     )
 
     private fun stubTrack(): Track = Track(

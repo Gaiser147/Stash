@@ -1,0 +1,158 @@
+name: Navidrome fork verification
+
+on:
+  push:
+    branches: [codex/navidrome-v0.9.75]
+  pull_request:
+  workflow_dispatch:
+  schedule:
+    - cron: "23 4 * * 1"
+
+permissions:
+  contents: read
+  issues: write
+
+concurrency:
+  group: navidrome-fork-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  verify:
+    if: github.event_name != 'schedule'
+    name: Test and build debug APK
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - uses: gradle/actions/setup-gradle@v4
+
+      - name: Prepare optional stable debug signer
+        id: debug_signing
+        env:
+          DEBUG_KEYSTORE_BASE64: ${{ secrets.STASH_DEBUG_KEYSTORE_BASE64 }}
+          DEBUG_KEYSTORE_PASSWORD: ${{ secrets.STASH_DEBUG_KEYSTORE_PASSWORD }}
+          DEBUG_KEY_ALIAS: ${{ secrets.STASH_DEBUG_KEY_ALIAS }}
+          DEBUG_KEY_PASSWORD: ${{ secrets.STASH_DEBUG_KEY_PASSWORD }}
+        shell: bash
+        run: |
+          configured=0
+          [ -n "$DEBUG_KEYSTORE_BASE64" ] && configured=$((configured + 1))
+          [ -n "$DEBUG_KEYSTORE_PASSWORD" ] && configured=$((configured + 1))
+          [ -n "$DEBUG_KEY_ALIAS" ] && configured=$((configured + 1))
+          [ -n "$DEBUG_KEY_PASSWORD" ] && configured=$((configured + 1))
+          if [ "$configured" -eq 0 ]; then
+            echo "configured=false" >> "$GITHUB_OUTPUT"
+            echo "::warning::Stable debug signing secrets are not configured; artifact is CI-only."
+          elif [ "$configured" -ne 4 ]; then
+            echo "::error::Stable debug signing is only partially configured. Set all four STASH_DEBUG_KEY* secrets."
+            exit 1
+          else
+            echo "$DEBUG_KEYSTORE_BASE64" | base64 --decode > "$RUNNER_TEMP/stash-debug.jks"
+            chmod 600 "$RUNNER_TEMP/stash-debug.jks"
+            keytool -list \
+              -keystore "$RUNNER_TEMP/stash-debug.jks" \
+              -storepass "$DEBUG_KEYSTORE_PASSWORD" \
+              -alias "$DEBUG_KEY_ALIAS" >/dev/null
+            echo "configured=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Test Navidrome integration and affected modules
+        run: >-
+          ./gradlew
+          :core:data:testDebugUnitTest
+          :data:download:testDebugUnitTest
+          :feature:settings:testDebugUnitTest
+          --no-daemon
+
+      - name: Assemble debug APK
+        env:
+          STASH_DEBUG_KEYSTORE_FILE: ${{ runner.temp }}/stash-debug.jks
+          STASH_DEBUG_KEYSTORE_PASSWORD: ${{ secrets.STASH_DEBUG_KEYSTORE_PASSWORD }}
+          STASH_DEBUG_KEY_ALIAS: ${{ secrets.STASH_DEBUG_KEY_ALIAS }}
+          STASH_DEBUG_KEY_PASSWORD: ${{ secrets.STASH_DEBUG_KEY_PASSWORD }}
+          LASTFM_API_KEY: ${{ secrets.LASTFM_API_KEY }}
+          LASTFM_API_SECRET: ${{ secrets.LASTFM_API_SECRET }}
+        run: ./gradlew :app:assembleDebug --no-daemon
+
+      - name: Locate APK
+        id: apk
+        shell: bash
+        run: |
+          apk="$(find app/build/outputs/apk/debug -name '*.apk' -print -quit)"
+          if [ -z "$apk" ]; then
+            echo "::error::No debug APK produced"
+            exit 1
+          fi
+          echo "path=$apk" >> "$GITHUB_OUTPUT"
+
+      - name: Upload debug artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: stash-navidrome-${{ steps.debug_signing.outputs.configured == 'true' && 'stable-signed' || 'ci-only' }}
+          path: ${{ steps.apk.outputs.path }}
+          retention-days: 14
+
+      - name: Remove temporary signer
+        if: always()
+        run: rm -f "$RUNNER_TEMP/stash-debug.jks"
+
+  upstream-check:
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    name: Check latest upstream release
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Compare latest release tag
+        id: upstream
+        shell: bash
+        run: |
+          git fetch https://github.com/rawnaldclark/Stash.git master --tags
+          latest="$(git tag --list 'v*' --sort=-v:refname | head -n1)"
+          echo "latest=$latest" >> "$GITHUB_OUTPUT"
+          if git merge-base --is-ancestor "$latest" HEAD; then
+            echo "update=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "update=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Create or refresh upstream update issue
+        if: steps.upstream.outputs.update == 'true'
+        uses: actions/github-script@v7
+        env:
+          LATEST_TAG: ${{ steps.upstream.outputs.latest }}
+        with:
+          script: |
+            const title = `[Upstream] Review ${process.env.LATEST_TAG}`;
+            const body = [
+              `Upstream released **${process.env.LATEST_TAG}**.`,
+              '',
+              'Rebase the Navidrome behavior onto that tag in a review branch, run this workflow, and perform the migration/signing checks before replacing the current branch.',
+              '',
+              'This notification deliberately does not auto-merge or publish an APK.',
+            ].join('\n');
+            const {data: issues} = await github.rest.issues.listForRepo({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              state: 'open',
+              per_page: 100,
+            });
+            const existing = issues.find(issue => issue.title.startsWith('[Upstream] Review '));
+            if (existing) {
+              await github.rest.issues.update({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: existing.number,
+                title,
+                body,
+              });
+            } else {
+              await github.rest.issues.create({owner: context.repo.owner, repo: context.repo.repo, title, body});
+            }

@@ -76,6 +76,8 @@ class DownloadManagerEmbedStampTest {
         mockk(relaxed = true)
     private val losslessHealthGate: com.stash.data.download.lossless.LosslessSourceHealthGate =
         mockk(relaxed = true)
+    private val navidromeExportScheduler: com.stash.core.data.sync.NavidromeExportScheduler =
+        mockk(relaxed = true)
 
     private fun newSubject(): DownloadManager = DownloadManager(
         downloadExecutor = downloadExecutor,
@@ -100,6 +102,7 @@ class DownloadManagerEmbedStampTest {
         lyricsFetchTrigger = lyricsFetchTrigger,
         audioDurationExtractor = audioDurationExtractor,
         losslessHealthGate = losslessHealthGate,
+        navidromeExportScheduler = navidromeExportScheduler,
     )
 
     private fun stubTrack(): Track = Track(
@@ -152,6 +155,18 @@ class DownloadManagerEmbedStampTest {
             "stamp ${tsSlot.captured} must be in [$before, $after]",
             tsSlot.captured in before..after,
         )
+        coVerify {
+            navidromeExportScheduler.enqueueTrack(
+                filePath = committed.filePath,
+                artist = track.artist,
+                album = track.album,
+                title = track.title,
+                albumArtist = track.albumArtist.takeIf(String::isNotBlank) ?: track.artist,
+                albumArtUrl = track.albumArtUrl,
+                albumArtPath = track.albumArtPath,
+                youtubeId = track.youtubeId,
+            )
+        }
     }
 
     @Test
@@ -177,6 +192,8 @@ class DownloadManagerEmbedStampTest {
             TrackFinalizer.FinalizeResult.Success(committed, meta = null)
         coEvery { trackDao.setMetadataEmbeddedAt(any(), any()) } throws
             RuntimeException("simulated DAO failure")
+        coEvery { navidromeExportScheduler.enqueueTrack(any(), any(), any(), any(), any(), any(), any(), any()) } throws
+            RuntimeException("simulated scheduling failure")
 
         val result = newSubject().tryLosslessDownload(track)
 

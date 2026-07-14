@@ -178,6 +178,15 @@ data class SettingsUiState(
     val databaseBackupState: DatabaseBackupState = DatabaseBackupState.Idle,
     /** Whether the import confirmation dialog is showing. */
     val showImportConfirmation: Boolean = false,
+    /** Optional, one-way Stash-to-Navidrome export state. */
+    val navidromeExportEnabled: Boolean = false,
+    val navidromeExportUrl: String = "",
+    val navidromeExportTokenConfigured: Boolean = false,
+    val navidromeExportWifiOnly: Boolean = true,
+    val navidromeExportChargingOnly: Boolean = true,
+    val navidromeExportLastSuccessAt: Long = 0L,
+    val navidromeExportLastResult: String = "",
+    val navidromeExportMessage: String? = null,
 )
 
 /**

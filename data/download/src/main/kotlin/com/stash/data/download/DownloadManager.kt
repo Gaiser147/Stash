@@ -6,6 +6,7 @@ import com.stash.core.data.db.dao.TrackDao
 import com.stash.core.data.lastfm.LastFmApiClient
 import com.stash.core.data.lastfm.LastFmCredentials
 import com.stash.core.data.mapper.toDomain
+import com.stash.core.data.sync.NavidromeExportScheduler
 import com.stash.core.model.MusicSource
 import com.stash.core.model.Track
 import com.stash.data.download.files.AlbumArtCache
@@ -126,6 +127,7 @@ class DownloadManager @Inject constructor(
      */
     private val audioDurationExtractor: AudioDurationExtractor,
     private val losslessHealthGate: LosslessSourceHealthGate,
+    private val navidromeExportScheduler: NavidromeExportScheduler,
 ) {
     /** Limits concurrent downloads. 8 parallel slots — with native opus (no FFmpeg
      *  transcode) downloads are almost entirely network-bound so more parallelism helps. */
@@ -330,6 +332,7 @@ class DownloadManager @Inject constructor(
         // on the same success boundary as the metadata stamp so any track
         // that survives to a stamped state also gets a lyrics-fetch attempt.
         lyricsFetchTrigger.enqueueFor(track.id)
+        enqueueNavidromeExport(effectiveTrack, committed.filePath)
         emitProgress(track.id, 1f, DownloadStatus.COMPLETED)
         return TrackDownloadResult.Success(committed.filePath)
     }
@@ -501,6 +504,7 @@ class DownloadManager @Inject constructor(
                 // executeDownload — enqueue lyrics on the same success
                 // boundary as the metadata stamp.
                 lyricsFetchTrigger.enqueueFor(track.id)
+                enqueueNavidromeExport(effectiveTrack, finalized.committed.filePath)
                 emitProgress(track.id, 1f, DownloadStatus.COMPLETED)
                 return TrackDownloadResult.Success(finalized.committed.filePath)
             }
@@ -521,6 +525,23 @@ class DownloadManager @Inject constructor(
             "lossless: exhausted failover attempts for '${track.artist} - ${track.title}'",
         )
         return null
+    }
+
+    private suspend fun enqueueNavidromeExport(track: Track, filePath: String) {
+        runCatching {
+            navidromeExportScheduler.enqueueTrack(
+                filePath = filePath,
+                artist = track.artist,
+                album = track.album.takeIf(String::isNotBlank),
+                title = track.title,
+                albumArtist = track.albumArtist.takeIf(String::isNotBlank) ?: track.artist,
+                albumArtUrl = track.albumArtUrl,
+                albumArtPath = track.albumArtPath,
+                youtubeId = track.youtubeId,
+            )
+        }.onFailure {
+            Log.w(TAG, "Could not enqueue Navidrome export code=internal_error")
+        }
     }
 
     /**

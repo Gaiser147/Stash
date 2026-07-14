@@ -87,6 +87,8 @@ class DownloadManagerDurationBackstopTest {
     private val lyricsFetchTrigger: LyricsFetchTrigger = mockk(relaxed = true)
     private val audioDurationExtractor: AudioDurationExtractor = mockk(relaxed = true)
     private val losslessHealthGate: LosslessSourceHealthGate = mockk(relaxed = true)
+    private val navidromeExportScheduler: com.stash.core.data.sync.NavidromeExportScheduler =
+        mockk(relaxed = true)
 
     private fun newSubject(): DownloadManager = DownloadManager(
         downloadExecutor = downloadExecutor,
@@ -111,6 +113,7 @@ class DownloadManagerDurationBackstopTest {
         lyricsFetchTrigger = lyricsFetchTrigger,
         audioDurationExtractor = audioDurationExtractor,
         losslessHealthGate = losslessHealthGate,
+        navidromeExportScheduler = navidromeExportScheduler,
     )
 
     private fun stubTrack(): Track = Track(

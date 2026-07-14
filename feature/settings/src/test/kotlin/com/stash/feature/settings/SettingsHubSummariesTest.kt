@@ -120,6 +120,19 @@ class SettingsHubSummariesTest {
         assertEquals("Not connected", s.accounts)
     }
 
+    @Test fun `accounts summary includes enabled Navidrome export`() {
+        val s = settingsHubSummaries(
+            state = SettingsUiState(
+                navidromeExportEnabled = true,
+                navidromeExportTokenConfigured = true,
+            ),
+            versionName = "0.9.75",
+            streamingEnabled = true,
+            streamOnCellular = false,
+        )
+        assertEquals("Navidrome", s.accounts)
+    }
+
     // --- libraryStorage ---------------------------------------------------
 
     @Test fun `libraryStorage default → 0 tracks 0 B`() {

@@ -39,9 +39,22 @@ The following are **out of scope** (but please still mention them in a regular i
 Stash is designed so that you never have to trust the project maintainers with your accounts. Here's how credentials are handled:
 
 - **Storage**: All tokens and cookies are encrypted at rest using Google's [Tink](https://developers.google.com/tink) library with AES-256-GCM. The encryption key is generated per-install and stored in Android's hardware-backed Keystore.
-- **Transport**: Credentials are only sent to `open.spotify.com`, `clienttoken.spotify.com`, and `music.youtube.com` (the same hosts your web browser uses). TLS 1.2 or higher is enforced.
-- **No server**: Stash has no backend. There is no Stash account. There is no telemetry. There is no "cloud sync." Your credentials never leave your phone except when authenticating with the actual music service.
+- **Transport**: Spotify and YouTube credentials are sent only to their respective service hosts. TLS 1.2 or higher is enforced. If the optional Navidrome export is enabled, its separate bearer token is sent only to the user-configured HTTPS ingest URL; Spotify and YouTube login cookies are never included in those requests.
+- **No required server**: Stash has no required account or Stash-operated backend, and there is no telemetry. The optional one-way Navidrome export talks only to an ingest service the user explicitly configures. Its exact data flow is documented in [docs/NAVIDROME_EXPORT.md](docs/NAVIDROME_EXPORT.md).
 - **Open source**: Every line of code that touches credentials is in this repo and can be audited. See `core/auth/` and `data/spotify/` and `data/ytmusic/`.
+
+## Fork Artifact Signing
+
+Debug APKs built without a persistent signing key are CI test artifacts, not an update channel. A newly generated debug key cannot update an already installed APK with the same application ID.
+
+The Navidrome fork workflow labels an artifact `stable-signed` only when all four repository secrets are configured and the keystore can be opened:
+
+- `STASH_DEBUG_KEYSTORE_BASE64`
+- `STASH_DEBUG_KEYSTORE_PASSWORD`
+- `STASH_DEBUG_KEY_ALIAS`
+- `STASH_DEBUG_KEY_PASSWORD`
+
+Keep the keystore and passwords outside the repository, restrict access to the Actions environment, and retain an offline backup. Losing or rotating this key requires uninstalling the previous debug app before installing a newly signed build, which can delete app-local data unless it was backed up first. Never describe an artifact labeled `ci-only` as upgrade-safe.
 
 ## Response Timeline
 

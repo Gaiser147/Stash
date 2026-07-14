@@ -22,6 +22,7 @@ import com.stash.core.data.youtube.YouTubeScrobblerHealth
 import com.stash.core.data.youtube.YouTubeScrobblerState
 import com.stash.core.data.sync.workers.StashDiscoveryWorker
 import com.stash.core.data.sync.workers.TagEnrichmentWorker
+import com.stash.core.data.sync.NavidromeExportScheduler
 import com.stash.core.model.DownloadNetworkMode
 import dagger.hilt.android.qualifiers.ApplicationContext
 import com.stash.core.data.lastfm.LastFmApiClient
@@ -43,6 +44,8 @@ import com.stash.data.download.lossless.qbdlx.QbdlxCredentialStore
 import com.stash.data.download.lossless.qbdlx.QbdlxTokenChoice
 import com.stash.data.download.lossless.qobuz.QobuzSource
 import com.stash.data.download.prefs.StreamingQualityPreferences
+import com.stash.data.download.export.NavidromeExportConfig
+import com.stash.data.download.export.NavidromeExportPreferences
 import com.stash.feature.settings.components.squidCaptchaStatus
 import com.stash.core.data.repository.MusicRepository
 import com.stash.core.model.QualityTier
@@ -107,6 +110,8 @@ class SettingsViewModel @Inject constructor(
     private val streamingPreference: com.stash.core.data.prefs.StreamingPreference,
     private val crossfadePreference: com.stash.core.data.prefs.CrossfadePreference,
     private val databaseBackupManager: DatabaseBackupManager,
+    private val navidromeExportPreferences: NavidromeExportPreferences,
+    private val navidromeExportScheduler: NavidromeExportScheduler,
 ) : ViewModel() {
 
     /**
@@ -345,6 +350,7 @@ class SettingsViewModel @Inject constructor(
         streamingQualityPrefs.wifiTier,
         streamingQualityPrefs.cellularTier,
         streamingQualityPrefs.saveData,
+        navidromeExportPreferences.config,
     ) { values ->
         @Suppress("UNCHECKED_CAST")
         val spotifyAuth = values[0] as AuthState
@@ -380,6 +386,7 @@ class SettingsViewModel @Inject constructor(
         val streamingWifiTier = values[30] as LosslessQualityTier
         val streamingCellularTier = values[31] as LosslessQualityTier
         val streamingSaveData = values[32] as Boolean
+        val navidromeExport = values[33] as NavidromeExportConfig
 
         val lastFmState: LastFmAuthState = local.lastFmAuthOverride
             ?: when {
@@ -438,6 +445,14 @@ class SettingsViewModel @Inject constructor(
             hasCrashReport = local.hasCrashReport,
             databaseBackupState = local.databaseBackupState,
             showImportConfirmation = local.showImportConfirmation,
+            navidromeExportEnabled = navidromeExport.enabled,
+            navidromeExportUrl = navidromeExport.serverUrl,
+            navidromeExportTokenConfigured = navidromeExport.tokenConfigured,
+            navidromeExportWifiOnly = navidromeExport.wifiOnly,
+            navidromeExportChargingOnly = navidromeExport.chargingOnly,
+            navidromeExportLastSuccessAt = navidromeExport.lastSuccessAt,
+            navidromeExportLastResult = navidromeExport.lastResult,
+            navidromeExportMessage = local.navidromeExportMessage,
         )
     }.stateIn(
         scope = viewModelScope,
@@ -1190,6 +1205,64 @@ class SettingsViewModel @Inject constructor(
         viewModelScope.launch { likePreferences.setHeartDefaultYtMusic(value) }
     }
 
+    // -- Navidrome export ---------------------------------------------------
+
+    fun onSaveNavidromeExportConnection(serverUrl: String, replacementToken: String) {
+        viewModelScope.launch {
+            runCatching { navidromeExportPreferences.saveConnection(serverUrl, replacementToken) }
+                .onSuccess {
+                    _localState.update { it.copy(navidromeExportMessage = "Navidrome connection saved.") }
+                }
+                .onFailure { error ->
+                    _localState.update {
+                        it.copy(navidromeExportMessage = error.message ?: "Could not save Navidrome connection.")
+                    }
+                }
+        }
+    }
+
+    fun onNavidromeExportEnabledChanged(enabled: Boolean) {
+        viewModelScope.launch {
+            runCatching { navidromeExportPreferences.setEnabled(enabled) }
+                .onFailure { error ->
+                    _localState.update {
+                        it.copy(navidromeExportMessage = error.message ?: "Configure Navidrome first.")
+                    }
+                }
+        }
+    }
+
+    fun onNavidromeExportWifiOnlyChanged(enabled: Boolean) {
+        viewModelScope.launch { navidromeExportPreferences.setWifiOnly(enabled) }
+    }
+
+    fun onNavidromeExportChargingOnlyChanged(enabled: Boolean) {
+        viewModelScope.launch { navidromeExportPreferences.setChargingOnly(enabled) }
+    }
+
+    fun onRunFullNavidromeExport() {
+        viewModelScope.launch {
+            runCatching { navidromeExportScheduler.enqueueFullExport() }
+                .onSuccess {
+                    _localState.update { it.copy(navidromeExportMessage = "Full Navidrome sync queued.") }
+                }
+                .onFailure {
+                    _localState.update { it.copy(navidromeExportMessage = "Could not queue Navidrome sync.") }
+                }
+        }
+    }
+
+    fun onClearNavidromeExportConnection() {
+        viewModelScope.launch {
+            navidromeExportPreferences.clearConnection()
+            _localState.update { it.copy(navidromeExportMessage = "Navidrome connection removed.") }
+        }
+    }
+
+    fun onClearNavidromeExportMessage() {
+        _localState.update { it.copy(navidromeExportMessage = null) }
+    }
+
     /**
      * v0.9.52 like-mirroring. Enabling a mirror requires the explicit
      * "I understand" ack — the pref is only written on confirm (see
@@ -1271,6 +1344,7 @@ class SettingsViewModel @Inject constructor(
          * on confirm, so dismissing leaves mirroring off.
          */
         val pendingMirrorWarning: Destination? = null,
+        val navidromeExportMessage: String? = null,
     )
 
     // -- Diagnostics ----------------------------------------------------------
