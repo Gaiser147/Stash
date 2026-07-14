@@ -182,6 +182,7 @@ data class SettingsUiState(
     val navidromeExportEnabled: Boolean = false,
     val navidromeExportUrl: String = "",
     val navidromeExportTokenConfigured: Boolean = false,
+    val navidromeExportTokenError: Boolean = false,
     val navidromeExportWifiOnly: Boolean = true,
     val navidromeExportChargingOnly: Boolean = true,
     val navidromeExportLastAttemptAt: Long = 0L,

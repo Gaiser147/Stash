@@ -123,8 +123,14 @@ jobs:
             exit 1
           fi
           "$apksigner" verify "$APK_PATH"
-          signer_sha256="$("$apksigner" verify --print-certs "$APK_PATH" \
-            | awk -F': ' '/Signer #1 certificate SHA-256 digest/ {print tolower($2); exit}')"
+          signer_output="$("$apksigner" verify --print-certs "$APK_PATH" 2>&1)"
+          printf '%s\n' "$signer_output"
+          signer_sha256="$(printf '%s\n' "$signer_output" \
+            | awk '/SHA-256/ {
+                for (i = 1; i <= NF; i++) {
+                  if ($i ~ /^[[:xdigit:]]{64}$/) { print tolower($i); exit }
+                }
+              }')"
           if [ -z "$signer_sha256" ]; then
             echo "::error::Could not read the APK signing certificate"
             exit 1
@@ -134,7 +140,13 @@ jobs:
               -keystore "$RUNNER_TEMP/stash-debug.jks" \
               -storepass "$DEBUG_KEYSTORE_PASSWORD" \
               -alias "$DEBUG_KEY_ALIAS" \
-              | awk -F': ' '/SHA256:/ {value=tolower($2); gsub(":", "", value); print value; exit}')"
+              | awk '/SHA256:/ {
+                  value = $0
+                  sub(/^.*SHA256:[[:space:]]*/, "", value)
+                  gsub(":", "", value)
+                  print tolower(value)
+                  exit
+                }')"
             if [ "$signer_sha256" != "$expected_signer" ]; then
               echo "::error::APK signer does not match the configured stable keystore"
               exit 1

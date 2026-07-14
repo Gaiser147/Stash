@@ -451,6 +451,7 @@ class SettingsViewModel @Inject constructor(
             navidromeExportEnabled = navidromeExport.enabled,
             navidromeExportUrl = navidromeExport.serverUrl,
             navidromeExportTokenConfigured = navidromeExport.tokenConfigured,
+            navidromeExportTokenError = navidromeExport.tokenDecryptionFailed,
             navidromeExportWifiOnly = navidromeExport.wifiOnly,
             navidromeExportChargingOnly = navidromeExport.chargingOnly,
             navidromeExportLastAttemptAt = navidromeExport.lastAttemptAt,

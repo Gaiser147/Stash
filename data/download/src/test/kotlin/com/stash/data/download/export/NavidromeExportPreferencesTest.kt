@@ -50,6 +50,18 @@ class NavidromeExportPreferencesTest {
     }
 
     @Test
+    fun `keystore failure is explicit and does not expose a token`() = runTest {
+        preferences.clearConnection()
+        preferences.saveConnection("https://music.example.test/stash-ingest", "private-token")
+        every { encryption.decrypt(any()) } throws IllegalStateException("keystore unavailable")
+
+        val config = preferences.current()
+        assertThat(config.token).isEmpty()
+        assertThat(config.tokenConfigured).isFalse()
+        assertThat(config.tokenDecryptionFailed).isTrue()
+    }
+
+    @Test
     fun `attempt and queued states are persisted without changing last success`() = runTest {
         preferences.clearConnection()
         preferences.recordResult("track_uploaded", successful = true, now = 100L)

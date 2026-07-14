@@ -22,9 +22,12 @@ class NavidromePlaylistExportWorker @AssistedInject constructor(
     private val ingestClient: NavidromeIngestClient,
     private val scheduler: NavidromeUploadScheduler,
     private val coverResolver: NavidromeCoverResolver,
+    private val runtimeConstraints: NavidromeRuntimeConstraints,
 ) : CoroutineWorker(appContext, params) {
     override suspend fun doWork(): Result {
-        if (!prefs.current().configured) return Result.success()
+        val config = prefs.current()
+        if (!config.configured) return Result.success()
+        if (!runtimeConstraints.areSatisfied(config)) return Result.retry()
         prefs.recordAttempt()
         val fullExport = inputData.getBoolean(KEY_FULL_EXPORT, false)
         val stats = ExportStats()

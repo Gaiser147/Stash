@@ -34,6 +34,7 @@ data class NavidromeExportConfig(
     val lastAttemptAt: Long,
     val lastSuccessAt: Long,
     val lastResult: String,
+    val tokenDecryptionFailed: Boolean = false,
 ) {
     val tokenConfigured: Boolean get() = token.isNotBlank()
     val configured: Boolean get() =
@@ -155,9 +156,12 @@ class NavidromeExportPreferences @Inject constructor(
 
     private fun decode(prefs: Preferences): NavidromeExportConfig {
         val encrypted = prefs[Keys.encryptedToken]
-        val token = when {
-            !encrypted.isNullOrBlank() -> decryptToken(encrypted)
-            else -> prefs[Keys.legacyPlaintextToken].orEmpty()
+        val decryptedToken = encrypted?.takeIf(String::isNotBlank)?.let(::decryptToken)
+        val tokenDecryptionFailed = !encrypted.isNullOrBlank() && decryptedToken == null
+        val token = if (encrypted.isNullOrBlank()) {
+            prefs[Keys.legacyPlaintextToken].orEmpty()
+        } else {
+            decryptedToken.orEmpty()
         }
         return NavidromeExportConfig(
             enabled = prefs[Keys.enabled] ?: false,
@@ -168,6 +172,7 @@ class NavidromeExportPreferences @Inject constructor(
             lastAttemptAt = prefs[Keys.lastAttemptAt] ?: 0L,
             lastSuccessAt = prefs[Keys.lastSuccessAt] ?: 0L,
             lastResult = prefs[Keys.lastResult].orEmpty(),
+            tokenDecryptionFailed = tokenDecryptionFailed,
         )
     }
 
@@ -176,10 +181,10 @@ class NavidromeExportPreferences @Inject constructor(
         Base64.NO_WRAP,
     )
 
-    private fun decryptToken(value: String): String = runCatching {
+    private fun decryptToken(value: String): String? = runCatching {
         val encrypted = Base64.decode(value, Base64.NO_WRAP)
         encryption.decrypt(encrypted).toString(Charsets.UTF_8)
-    }.getOrDefault("")
+    }.getOrNull()
 
     companion object {
         const val RESULT_EXPORT_IN_PROGRESS = "export_in_progress"

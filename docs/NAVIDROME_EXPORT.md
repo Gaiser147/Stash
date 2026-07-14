@@ -12,7 +12,7 @@ The Navidrome feature in this fork is a one-way, opt-in export of Stash's downlo
 6. Leave **Unmetered network only** and **Only while charging** enabled unless immediate delivery matters more than data and battery use.
 7. Use **Sync all now** once after setup, after restoring Stash data, or when reconciling an existing library.
 
-The bearer token is encrypted with the same Tink AES-256-GCM/Android Keystore mechanism used for other app secrets. The Settings UI never reads it back. Entering a blank token while editing a configured connection preserves the encrypted value.
+The bearer token is encrypted with the same Tink AES-256-GCM/Android Keystore mechanism used for other app secrets. The Settings UI never reads it back. Entering a blank token while editing a configured connection preserves the encrypted value. If a device or backup change invalidates the Keystore key, Settings reports that the encrypted token is unavailable and requires a replacement instead of silently presenting the connection as healthy.
 
 ## Data flow
 
@@ -26,6 +26,8 @@ Automatic export sends only:
 It does not send Spotify or YouTube cookies, passwords, OAuth tokens, listening history, or the Navidrome user's password. Disabling export makes pending work inert. Removing the connection also removes the local endpoint and encrypted bearer token; it deliberately does not delete local music or already exported server files.
 
 Work is handled by Android WorkManager with exponential retry. HTTP 408, 429, and server failures are retried; other 4xx responses are treated as permanent configuration or contract failures. Audio uploads use a longer write timeout than ordinary API calls so large lossless files can finish on slower Wi-Fi.
+
+WorkManager captures constraints when work is queued. Each worker therefore also rechecks the current unmetered-network and charging preferences immediately before an upload. Tightening either setting applies to already queued work; loosening a setting always applies to newly queued work, while older work may retain its original stricter WorkManager constraint until it runs or is reconciled.
 
 The settings screen keeps a non-secret status record for the most recent worker attempt and the last successful export. A manual full export is shown as queued before WorkManager starts it; running, completed, incomplete, audio-failure, and artwork-failure states use fixed user-facing labels rather than displaying arbitrary server responses.
 

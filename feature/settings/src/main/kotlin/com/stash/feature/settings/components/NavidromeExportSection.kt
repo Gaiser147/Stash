@@ -85,12 +85,17 @@ fun NavidromeExportSection(
         )
         Text(
             text = when {
+                state.navidromeExportTokenError -> "Encrypted token unavailable — enter a new token"
                 !configured -> "Not configured"
                 state.navidromeExportEnabled -> "Automatic export is on"
                 else -> "Configured, automatic export is off"
             },
             style = MaterialTheme.typography.bodyMedium,
-            color = if (configured) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant,
+            color = when {
+                state.navidromeExportTokenError -> MaterialTheme.colorScheme.error
+                configured -> MaterialTheme.colorScheme.primary
+                else -> MaterialTheme.colorScheme.onSurfaceVariant
+            },
         )
 
         SettingsToggleRow(

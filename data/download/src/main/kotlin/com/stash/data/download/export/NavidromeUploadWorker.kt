@@ -15,9 +15,12 @@ class NavidromeUploadWorker @AssistedInject constructor(
     private val ingestClient: NavidromeIngestClient,
     private val scheduler: NavidromeUploadScheduler,
     private val coverResolver: NavidromeCoverResolver,
+    private val runtimeConstraints: NavidromeRuntimeConstraints,
 ) : CoroutineWorker(appContext, params) {
     override suspend fun doWork(): Result {
-        if (!prefs.current().configured) return Result.success()
+        val config = prefs.current()
+        if (!config.configured) return Result.success()
+        if (!runtimeConstraints.areSatisfied(config)) return Result.retry()
         val filePath = inputData.getString(KEY_FILE_PATH) ?: return Result.failure()
         val relativePath = inputData.getString(KEY_RELATIVE_PATH) ?: return Result.failure()
         val title = inputData.getString(KEY_TITLE).orEmpty()
