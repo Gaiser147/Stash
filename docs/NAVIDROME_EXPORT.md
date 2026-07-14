@@ -64,7 +64,14 @@ The previous fork defaulted export on, embedded a private endpoint, and stored t
 
 Old GitHub-hosted debug APKs may have been signed with ephemeral runner keys. Android cannot install a differently signed APK over an existing app with the same ID. Back up Stash from its database backup UI before any required uninstall, configure a persistent fork signing key for future builds, and verify an actual in-place update before treating the new artifact as upgrade-safe.
 
-The retained local debug keystore and the locally archived May 2026 APK both use signing-certificate SHA-256 `3b89ee42d3535464d02d289427b71e3ffae4f9ea9e8b7628bcdabf44a55ae9be`. CI pins this public fingerprint and rejects a configured stable keystore that differs. The signer of the APK currently installed on the Android device is still a separate required check; matching only the archived APK is not sufficient evidence for an in-place update.
+The retained local debug keystore, the locally archived May 2026 APK, and the
+APK extracted from the installed Android package all use signing-certificate
+SHA-256
+`3b89ee42d3535464d02d289427b71e3ffae4f9ea9e8b7628bcdabf44a55ae9be`.
+CI pins this public fingerprint and rejects a configured stable keystore that
+differs. The installed-device signer gate is therefore satisfied; the remaining
+gate is installing and accepting the CI-built candidate without uninstalling or
+losing data.
 
 ### Side-by-side preview
 
@@ -80,8 +87,9 @@ ephemeral key and may require uninstalling only the preview package. Keep
 automatic Navidrome export off initially, use a test or dedicated ingest token
 when exercising export, and do not point both app installations at automatic
 full export simultaneously. A preview is not evidence that the primary debug
-app can be upgraded in place; that still requires the installed-device signer
-check described above.
+app can be upgraded in place; that still requires a stable-signed candidate and
+the device acceptance checks described in
+[the in-place upgrade runbook](IN_PLACE_UPGRADE.md).
 
 The first manually promoted preview is public as
 [v0.9.75-navidrome-preview.1](https://github.com/Gaiser147/Stash/releases/tag/v0.9.75-navidrome-preview.1).

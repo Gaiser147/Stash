@@ -46,6 +46,7 @@ fun settingsHubSummaries(
         if (state.youTubeAuthState is AuthState.Connected) add("YouTube")
         if (state.lastFmState is LastFmAuthState.Connected) add("Last.fm")
         if (state.navidromeExportEnabled && state.navidromeExportTokenConfigured) add("Navidrome")
+        if (state.museAcquisitionEnabled && state.museAcquisitionTokenConfigured) add("Muse inbox")
     }
     val accounts = if (connectedServices.isEmpty()) {
         "Not connected"

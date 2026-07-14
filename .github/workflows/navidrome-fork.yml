@@ -1,4 +1,4 @@
-name: Navidrome fork verification
+name: Stash fork verification
 
 on:
   push:
@@ -136,11 +136,18 @@ jobs:
             '{client_commit: $client_commit, server_commit: $server_commit, contract: $contract}' \
             > "$root/provenance.json"
 
-      - name: Test Navidrome integration and affected modules
+      - name: Test Stash integrations and affected modules
         run: >-
           ./gradlew
           :data:download:testDebugUnitTest
           :feature:settings:testDebugUnitTest
+          --no-daemon
+
+      - name: Test installed v0.9.32 schema upgrade
+        run: >-
+          ./gradlew
+          :core:data:testDebugUnitTest
+          --tests com.stash.core.data.db.MigrationV26V32UpgradeTest
           --no-daemon
 
       - name: Verify combined ingest evidence
@@ -188,6 +195,8 @@ jobs:
             data/download/build/reports/tests/testDebugUnitTest/
             feature/settings/build/test-results/testDebugUnitTest/
             feature/settings/build/reports/tests/testDebugUnitTest/
+            core/data/build/test-results/testDebugUnitTest/
+            core/data/build/reports/tests/testDebugUnitTest/
           if-no-files-found: ignore
           retention-days: 14
 
@@ -207,8 +216,8 @@ jobs:
             ./gradlew :app:assembleDebug --no-daemon
             echo "application_id=com.stash.app.debug" >> "$GITHUB_OUTPUT"
             echo "application_label=Stash Debug" >> "$GITHUB_OUTPUT"
-            echo "install_mode=upgrade-candidate" >> "$GITHUB_OUTPUT"
-            echo "artifact_name=stash-navidrome-stable-signed" >> "$GITHUB_OUTPUT"
+            echo "install_mode=in-place-upgrade" >> "$GITHUB_OUTPUT"
+            echo "artifact_name=stash-in-place-upgrade-candidate" >> "$GITHUB_OUTPUT"
           else
             ./gradlew :app:assembleDebug -Pstash.sideBySidePreview=true --no-daemon
             echo "application_id=com.stash.app.preview" >> "$GITHUB_OUTPUT"

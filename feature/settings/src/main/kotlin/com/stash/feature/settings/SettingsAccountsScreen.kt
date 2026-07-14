@@ -214,6 +214,22 @@ fun SettingsAccountsScreen(
             )
         }
 
+        SettingsSectionLabel("Muse requests", beta = true)
+
+        GlassCard {
+            com.stash.feature.settings.components.MuseAcquisitionSection(
+                state = uiState,
+                onSaveConnection = viewModel::onSaveMuseAcquisitionConnection,
+                onEnabledChanged = viewModel::onMuseAcquisitionEnabledChanged,
+                onWifiOnlyChanged = viewModel::onMuseAcquisitionWifiOnlyChanged,
+                onChargingOnlyChanged = viewModel::onMuseAcquisitionChargingOnlyChanged,
+                onTestConnection = viewModel::onTestMuseAcquisitionConnection,
+                onCheckNow = viewModel::onRunMuseAcquisitionNow,
+                onClearConnection = viewModel::onClearMuseAcquisitionConnection,
+                onClearMessage = viewModel::onClearMuseAcquisitionMessage,
+            )
+        }
+
         SettingsSectionLabel("Sync your likes", beta = true)
 
         GlassCard {

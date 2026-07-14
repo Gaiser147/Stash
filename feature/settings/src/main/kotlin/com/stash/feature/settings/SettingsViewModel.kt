@@ -48,6 +48,11 @@ import com.stash.data.download.export.NavidromeExportConfig
 import com.stash.data.download.export.NavidromeConnectionCheck
 import com.stash.data.download.export.NavidromeExportPreferences
 import com.stash.data.download.export.NavidromeIngestClient
+import com.stash.data.download.acquisition.MuseAcquisitionClient
+import com.stash.data.download.acquisition.MuseAcquisitionConfig
+import com.stash.data.download.acquisition.MuseAcquisitionConnectionCheck
+import com.stash.data.download.acquisition.MuseAcquisitionPreferences
+import com.stash.data.download.acquisition.MuseAcquisitionScheduler
 import com.stash.feature.settings.components.squidCaptchaStatus
 import com.stash.core.data.repository.MusicRepository
 import com.stash.core.model.QualityTier
@@ -115,6 +120,9 @@ class SettingsViewModel @Inject constructor(
     private val navidromeExportPreferences: NavidromeExportPreferences,
     private val navidromeExportScheduler: NavidromeExportScheduler,
     private val navidromeIngestClient: NavidromeIngestClient,
+    private val museAcquisitionPreferences: MuseAcquisitionPreferences,
+    private val museAcquisitionScheduler: MuseAcquisitionScheduler,
+    private val museAcquisitionClient: MuseAcquisitionClient,
 ) : ViewModel() {
 
     /**
@@ -354,6 +362,7 @@ class SettingsViewModel @Inject constructor(
         streamingQualityPrefs.cellularTier,
         streamingQualityPrefs.saveData,
         navidromeExportPreferences.config,
+        museAcquisitionPreferences.config,
     ) { values ->
         @Suppress("UNCHECKED_CAST")
         val spotifyAuth = values[0] as AuthState
@@ -390,6 +399,7 @@ class SettingsViewModel @Inject constructor(
         val streamingCellularTier = values[31] as LosslessQualityTier
         val streamingSaveData = values[32] as Boolean
         val navidromeExport = values[33] as NavidromeExportConfig
+        val museAcquisition = values[34] as MuseAcquisitionConfig
 
         val lastFmState: LastFmAuthState = local.lastFmAuthOverride
             ?: when {
@@ -459,6 +469,18 @@ class SettingsViewModel @Inject constructor(
             navidromeExportLastResult = navidromeExport.lastResult,
             navidromeExportConnectionChecking = local.navidromeExportConnectionChecking,
             navidromeExportMessage = local.navidromeExportMessage,
+            museAcquisitionEnabled = museAcquisition.enabled,
+            museAcquisitionUrl = museAcquisition.serverUrl,
+            museAcquisitionTokenConfigured = museAcquisition.tokenConfigured,
+            museAcquisitionTokenError = museAcquisition.tokenDecryptionFailed,
+            museAcquisitionWifiOnly = museAcquisition.wifiOnly,
+            museAcquisitionChargingOnly = museAcquisition.chargingOnly,
+            museAcquisitionLastAttemptAt = museAcquisition.lastAttemptAt,
+            museAcquisitionLastSuccessAt = museAcquisition.lastSuccessAt,
+            museAcquisitionLastResult = museAcquisition.lastResult,
+            museAcquisitionPendingCount = museAcquisition.pendingCount,
+            museAcquisitionConnectionChecking = local.museAcquisitionConnectionChecking,
+            museAcquisitionMessage = local.museAcquisitionMessage,
         )
     }.stateIn(
         scope = viewModelScope,
@@ -1299,6 +1321,97 @@ class SettingsViewModel @Inject constructor(
         _localState.update { it.copy(navidromeExportMessage = null) }
     }
 
+    // -- Muse acquisition inbox --------------------------------------------
+
+    fun onSaveMuseAcquisitionConnection(serverUrl: String, replacementToken: String) {
+        viewModelScope.launch {
+            runCatching { museAcquisitionPreferences.saveConnection(serverUrl, replacementToken) }
+                .onSuccess {
+                    museAcquisitionScheduler.refreshSchedule()
+                    _localState.update { it.copy(museAcquisitionMessage = "Muse inbox connection saved.") }
+                }
+                .onFailure { error ->
+                    _localState.update {
+                        it.copy(museAcquisitionMessage = error.message ?: "Could not save Muse inbox connection.")
+                    }
+                }
+        }
+    }
+
+    fun onMuseAcquisitionEnabledChanged(enabled: Boolean) {
+        viewModelScope.launch {
+            runCatching {
+                museAcquisitionPreferences.setEnabled(enabled)
+                museAcquisitionScheduler.refreshSchedule()
+            }.onFailure { error ->
+                _localState.update {
+                    it.copy(museAcquisitionMessage = error.message ?: "Configure the Muse inbox first.")
+                }
+            }
+        }
+    }
+
+    fun onMuseAcquisitionWifiOnlyChanged(enabled: Boolean) {
+        viewModelScope.launch {
+            museAcquisitionPreferences.setWifiOnly(enabled)
+            museAcquisitionScheduler.refreshSchedule()
+        }
+    }
+
+    fun onMuseAcquisitionChargingOnlyChanged(enabled: Boolean) {
+        viewModelScope.launch {
+            museAcquisitionPreferences.setChargingOnly(enabled)
+            museAcquisitionScheduler.refreshSchedule()
+        }
+    }
+
+    fun onRunMuseAcquisitionNow() {
+        viewModelScope.launch {
+            runCatching { museAcquisitionScheduler.enqueueNow() }
+                .onSuccess {
+                    _localState.update { it.copy(museAcquisitionMessage = "Muse inbox check queued.") }
+                }
+                .onFailure {
+                    _localState.update { it.copy(museAcquisitionMessage = "Could not queue Muse inbox check.") }
+                }
+        }
+    }
+
+    fun onTestMuseAcquisitionConnection() {
+        if (_localState.value.museAcquisitionConnectionChecking) return
+        _localState.update {
+            it.copy(museAcquisitionConnectionChecking = true, museAcquisitionMessage = null)
+        }
+        viewModelScope.launch {
+            val result = museAcquisitionClient.checkConnection()
+            val message = when (result) {
+                MuseAcquisitionConnectionCheck.Verified -> "Connection verified: token and contract accepted."
+                MuseAcquisitionConnectionCheck.AuthenticationFailed -> "Connection failed: token rejected."
+                MuseAcquisitionConnectionCheck.Incompatible -> "Connection failed: incompatible Muse endpoint."
+                MuseAcquisitionConnectionCheck.Unreachable -> "Connection failed: endpoint unreachable."
+                MuseAcquisitionConnectionCheck.NotConfigured -> "Configure the private HTTPS endpoint first."
+            }
+            _localState.update {
+                it.copy(
+                    museAcquisitionConnectionChecking = false,
+                    museAcquisitionMessage = message,
+                )
+            }
+        }
+    }
+
+    fun onClearMuseAcquisitionConnection() {
+        viewModelScope.launch {
+            museAcquisitionPreferences.clearConnection()
+            museAcquisitionScheduler.refreshSchedule()
+            _localState.update { it.copy(museAcquisitionMessage = "Muse inbox connection removed.") }
+        }
+    }
+
+    fun onClearMuseAcquisitionMessage() {
+        _localState.update { it.copy(museAcquisitionMessage = null) }
+    }
+
     /**
      * v0.9.52 like-mirroring. Enabling a mirror requires the explicit
      * "I understand" ack — the pref is only written on confirm (see
@@ -1382,6 +1495,8 @@ class SettingsViewModel @Inject constructor(
         val pendingMirrorWarning: Destination? = null,
         val navidromeExportConnectionChecking: Boolean = false,
         val navidromeExportMessage: String? = null,
+        val museAcquisitionConnectionChecking: Boolean = false,
+        val museAcquisitionMessage: String? = null,
     )
 
     // -- Diagnostics ----------------------------------------------------------

@@ -190,6 +190,19 @@ data class SettingsUiState(
     val navidromeExportLastResult: String = "",
     val navidromeExportConnectionChecking: Boolean = false,
     val navidromeExportMessage: String? = null,
+    /** Optional, private Muse-to-Stash acquisition inbox. Off by default. */
+    val museAcquisitionEnabled: Boolean = false,
+    val museAcquisitionUrl: String = "",
+    val museAcquisitionTokenConfigured: Boolean = false,
+    val museAcquisitionTokenError: Boolean = false,
+    val museAcquisitionWifiOnly: Boolean = true,
+    val museAcquisitionChargingOnly: Boolean = true,
+    val museAcquisitionLastAttemptAt: Long = 0L,
+    val museAcquisitionLastSuccessAt: Long = 0L,
+    val museAcquisitionLastResult: String = "",
+    val museAcquisitionPendingCount: Int = 0,
+    val museAcquisitionConnectionChecking: Boolean = false,
+    val museAcquisitionMessage: String? = null,
 )
 
 /**

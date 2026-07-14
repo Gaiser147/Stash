@@ -26,6 +26,7 @@ import com.stash.core.media.listening.ListeningRecorder
 import com.stash.core.data.repository.MusicRepositoryImpl
 import com.stash.core.data.sync.SyncNotificationManager
 import com.stash.data.download.backfill.MetadataBackfillScheduler
+import com.stash.data.download.acquisition.MuseAcquisitionScheduler
 import com.stash.data.download.ytdlp.YtDlpManager
 import com.stash.core.data.sync.workers.ArtBackfillWorker
 import com.stash.core.data.sync.workers.AutoSaveScrobbler
@@ -182,6 +183,10 @@ class StashApplication : Application(), Configuration.Provider {
      */
     @Inject
     lateinit var metadataBackfillScheduler: MetadataBackfillScheduler
+
+    /** Default-off Muse inbox polling; refreshSchedule cancels stale work when unconfigured. */
+    @Inject
+    lateinit var museAcquisitionScheduler: MuseAcquisitionScheduler
 
     /** Application-scoped coroutine scope for one-shot startup tasks. */
     private val applicationScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
@@ -397,6 +402,9 @@ class StashApplication : Application(), Configuration.Provider {
         // Idempotent (re-installing the same binary does not re-enqueue).
         applicationScope.launch {
             metadataBackfillScheduler.scheduleIfNeeded()
+        }
+        applicationScope.launch {
+            museAcquisitionScheduler.refreshSchedule()
         }
 
         // v0.9.30 Path A: AvailabilityCheckWorker + AvailabilityRecheckWorker

@@ -45,10 +45,16 @@ These are run by people doing it for the love of it — mostly solo, mostly free
 - **Wrong-match flag** — if Stash picked the wrong version, tap once from Now Playing and it queues a re-search
 - **Likes and History mirroring** — When enabled, each track you like & stream in Stash lands in your Spotify & YouTube accounts.
 - **Optional Navidrome export** — This fork can send downloaded audio, artwork, and playlist manifests to an authenticated HTTPS ingest service. It is off by default; see [Navidrome export](docs/NAVIDROME_EXPORT.md).
+- **Optional Muse request inbox** — manually confirmed missing-track searches
+  from Discord can be downloaded under Stash's Wi-Fi, charging, battery, and
+  storage rules. It is private, authenticated, conservative about ambiguous
+  matches, and off by default; see [Muse acquisition inbox](docs/MUSE_ACQUISITION.md).
 - **Safe fork preview** — without the retained debug-upgrade key, fork CI emits
   a separate `com.stash.app.preview` app that can be tested beside an existing
   debug installation without replacing its data. Download the verified
   [v0.9.75 Navidrome preview](https://github.com/Gaiser147/Stash/releases/tag/v0.9.75-navidrome-preview.1).
+  The normal debug package has a separate, signer-pinned
+  [in-place upgrade process](docs/IN_PLACE_UPGRADE.md).
 
 ### Playback
 

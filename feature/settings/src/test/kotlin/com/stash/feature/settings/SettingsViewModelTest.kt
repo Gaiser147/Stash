@@ -76,6 +76,9 @@ class SettingsViewModelTest {
         navidromeExportPreferences = mockk(relaxed = true),
         navidromeExportScheduler = mockk(relaxed = true),
         navidromeIngestClient = mockk(relaxed = true),
+        museAcquisitionPreferences = mockk(relaxed = true),
+        museAcquisitionScheduler = mockk(relaxed = true),
+        museAcquisitionClient = mockk(relaxed = true),
     )
 
     @Test fun `onQbdlxEnabledChange persists via setQbdlxEnabled`() = runTest {
