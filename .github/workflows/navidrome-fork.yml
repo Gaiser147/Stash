@@ -192,6 +192,7 @@ jobs:
           retention-days: 14
 
       - name: Assemble debug APK
+        id: build_mode
         env:
           STASH_DEBUG_KEYSTORE_FILE: ${{ runner.temp }}/stash-debug.jks
           STASH_DEBUG_KEYSTORE_PASSWORD: ${{ secrets.STASH_DEBUG_KEYSTORE_PASSWORD }}
@@ -199,7 +200,22 @@ jobs:
           STASH_DEBUG_KEY_PASSWORD: ${{ secrets.STASH_DEBUG_KEY_PASSWORD }}
           LASTFM_API_KEY: ${{ secrets.LASTFM_API_KEY }}
           LASTFM_API_SECRET: ${{ secrets.LASTFM_API_SECRET }}
-        run: ./gradlew :app:assembleDebug --no-daemon
+          STABLE_SIGNING: ${{ steps.debug_signing.outputs.configured }}
+        shell: bash
+        run: |
+          if [ "$STABLE_SIGNING" = "true" ]; then
+            ./gradlew :app:assembleDebug --no-daemon
+            echo "application_id=com.stash.app.debug" >> "$GITHUB_OUTPUT"
+            echo "application_label=Stash Debug" >> "$GITHUB_OUTPUT"
+            echo "install_mode=upgrade-candidate" >> "$GITHUB_OUTPUT"
+            echo "artifact_name=stash-navidrome-stable-signed" >> "$GITHUB_OUTPUT"
+          else
+            ./gradlew :app:assembleDebug -Pstash.sideBySidePreview=true --no-daemon
+            echo "application_id=com.stash.app.preview" >> "$GITHUB_OUTPUT"
+            echo "application_label=Stash Navidrome Preview" >> "$GITHUB_OUTPUT"
+            echo "install_mode=side-by-side-preview" >> "$GITHUB_OUTPUT"
+            echo "artifact_name=stash-navidrome-preview-ci-only" >> "$GITHUB_OUTPUT"
+          fi
 
       - name: Locate APK
         id: apk
@@ -217,6 +233,9 @@ jobs:
         env:
           APK_PATH: ${{ steps.apk.outputs.path }}
           SIGNING_MODE: ${{ steps.debug_signing.outputs.configured == 'true' && 'stable-signed' || 'ci-only' }}
+          EXPECTED_APPLICATION_ID: ${{ steps.build_mode.outputs.application_id }}
+          EXPECTED_APPLICATION_LABEL: ${{ steps.build_mode.outputs.application_label }}
+          INSTALL_MODE: ${{ steps.build_mode.outputs.install_mode }}
           DEBUG_KEYSTORE_PASSWORD: ${{ secrets.STASH_DEBUG_KEYSTORE_PASSWORD }}
           DEBUG_KEY_ALIAS: ${{ secrets.STASH_DEBUG_KEY_ALIAS }}
           EXPECTED_STABLE_SIGNER_SHA256: 3b89ee42d3535464d02d289427b71e3ffae4f9ea9e8b7628bcdabf44a55ae9be
@@ -230,6 +249,23 @@ jobs:
             exit 1
           fi
           "$apksigner" verify "$APK_PATH"
+          aapt="$(find "$ANDROID_HOME/build-tools" -type f -name aapt -print | sort -V | tail -n1)"
+          if [ -z "$aapt" ]; then
+            echo "::error::Android aapt was not found"
+            exit 1
+          fi
+          application_id="$("$aapt" dump badging "$APK_PATH" \
+            | sed -n "s/^package: name='\([^']*\)'.*/\1/p")"
+          if [ "$application_id" != "$EXPECTED_APPLICATION_ID" ]; then
+            echo "::error::APK application ID $application_id does not match $EXPECTED_APPLICATION_ID"
+            exit 1
+          fi
+          application_label="$("$aapt" dump badging "$APK_PATH" \
+            | sed -n "s/^application-label:'\(.*\)'$/\1/p")"
+          if [ "$application_label" != "$EXPECTED_APPLICATION_LABEL" ]; then
+            echo "::error::APK label $application_label does not match $EXPECTED_APPLICATION_LABEL"
+            exit 1
+          fi
           signer_output="$("$apksigner" verify --print-certs "$APK_PATH" 2>&1)"
           printf '%s\n' "$signer_output"
           signer_sha256="$(printf '%s\n' "$signer_output" \
@@ -270,6 +306,9 @@ jobs:
             --arg run_id "$GITHUB_RUN_ID" \
             --arg run_attempt "$GITHUB_RUN_ATTEMPT" \
             --arg signing "$SIGNING_MODE" \
+            --arg application_id "$application_id" \
+            --arg application_label "$application_label" \
+            --arg install_mode "$INSTALL_MODE" \
             --arg apk_file "$(basename "$APK_PATH")" \
             --arg apk_sha256 "$apk_sha256" \
             --arg apk_signer_sha256 "$signer_sha256" \
@@ -281,6 +320,9 @@ jobs:
               workflow_run: $run_id,
               workflow_attempt: $run_attempt,
               signing: $signing,
+              application_id: $application_id,
+              application_label: $application_label,
+              install_mode: $install_mode,
               apk_file: $apk_file,
               apk_sha256: $apk_sha256,
               apk_signer_sha256: $apk_signer_sha256,
@@ -289,12 +331,15 @@ jobs:
           echo "path=$provenance" >> "$GITHUB_OUTPUT"
           echo "APK SHA-256: $apk_sha256" >> "$GITHUB_STEP_SUMMARY"
           echo "APK signer SHA-256: $signer_sha256" >> "$GITHUB_STEP_SUMMARY"
+          echo "Application ID: $application_id" >> "$GITHUB_STEP_SUMMARY"
+          echo "Application label: $application_label" >> "$GITHUB_STEP_SUMMARY"
+          echo "Install mode: $INSTALL_MODE" >> "$GITHUB_STEP_SUMMARY"
           echo "Signing mode: $SIGNING_MODE" >> "$GITHUB_STEP_SUMMARY"
 
       - name: Upload debug artifact
         uses: actions/upload-artifact@v7
         with:
-          name: stash-navidrome-${{ steps.debug_signing.outputs.configured == 'true' && 'stable-signed' || 'ci-only' }}
+          name: ${{ steps.build_mode.outputs.artifact_name }}
           path: |
             ${{ steps.apk.outputs.path }}
             ${{ steps.provenance.outputs.path }}

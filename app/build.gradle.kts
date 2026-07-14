@@ -58,6 +58,12 @@ val hasStableDebugSigning = listOf(
     debugKeyPassword,
 ).all { !it.isNullOrBlank() }
 
+// A CI-only preview uses a distinct application ID so an ephemeral signer can
+// never collide with or require uninstalling the user's existing debug app.
+val isSideBySidePreview = providers.gradleProperty("stash.sideBySidePreview")
+    .orNull
+    ?.toBooleanStrictOrNull() == true
+
 // ── Last.fm API credentials ────────────────────────────────────────────────
 //
 // Read from `local.properties` (gitignored) or env vars (CI). Users who want
@@ -100,6 +106,7 @@ android {
         versionCode = 111
         versionName = "0.9.75"
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
+        manifestPlaceholders["appLabel"] = "Stash"
         // AppAuth redirect scheme removed -- Spotify now uses sp_dc cookie auth
         // Last.fm API credentials exposed via BuildConfig for the app-level
         // Hilt module to inject into LastFmApiClient. Empty strings are
@@ -172,7 +179,15 @@ android {
             }
         }
         debug {
-            applicationIdSuffix = ".debug"
+            applicationIdSuffix = if (isSideBySidePreview) ".preview" else ".debug"
+            if (isSideBySidePreview) {
+                versionNameSuffix = "-navidrome-preview"
+            }
+            manifestPlaceholders["appLabel"] = if (isSideBySidePreview) {
+                "Stash Navidrome Preview"
+            } else {
+                "Stash Debug"
+            }
             isDebuggable = true
             if (hasStableDebugSigning) {
                 signingConfig = signingConfigs.getByName("stableDebug")

@@ -66,9 +66,38 @@ Old GitHub-hosted debug APKs may have been signed with ephemeral runner keys. An
 
 The retained local debug keystore and the locally archived May 2026 APK both use signing-certificate SHA-256 `3b89ee42d3535464d02d289427b71e3ffae4f9ea9e8b7628bcdabf44a55ae9be`. CI pins this public fingerprint and rejects a configured stable keystore that differs. The signer of the APK currently installed on the Android device is still a separate required check; matching only the archived APK is not sufficient evidence for an in-place update.
 
+### Side-by-side preview
+
+When the fork workflow has no stable debug-signing secrets, it builds
+`com.stash.app.preview` as **Stash Navidrome Preview** instead of another APK
+that claims the installed debug package. Android can install this preview next
+to `com.stash.app.debug`; it has separate app data, settings, WorkManager jobs,
+and Keystore entries. Its ephemeral CI signer therefore cannot force an
+uninstall or put the existing Stash database at risk.
+
+Treat preview data as disposable because a later CI run can use a different
+ephemeral key and may require uninstalling only the preview package. Keep
+automatic Navidrome export off initially, use a test or dedicated ingest token
+when exercising export, and do not point both app installations at automatic
+full export simultaneously. A preview is not evidence that the primary debug
+app can be upgraded in place; that still requires the installed-device signer
+check described above.
+
 ## CI and release boundaries
 
-`.github/workflows/navidrome-fork.yml` runs affected unit tests and creates a debug APK. It does not publish a release, merge upstream, deploy the ingest service, or install an APK on a device. The verification job times out after 45 minutes instead of occupying a runner indefinitely. Artifacts contain the APK plus a JSON provenance record with repository, commit, workflow run, signing mode, APK SHA-256, and APK signing-certificate SHA-256. CI verifies the APK signature and, when stable-signing secrets are configured, fails unless the APK certificate matches that keystore. Builds without all stable-signing secrets are labeled `ci-only`. Weekly upstream checks create or refresh an issue instead of merging code automatically; scheduled workflows become active only after the workflow exists on the repository's default branch.
+`.github/workflows/navidrome-fork.yml` runs affected unit tests and creates a
+debug APK. It does not publish a release, merge upstream, deploy the ingest
+service, or install an APK on a device. The verification job times out after 45
+minutes instead of occupying a runner indefinitely. Artifacts contain the APK
+plus a JSON provenance record with repository, commit, workflow run, signing
+mode, application ID, visible app label, install mode, APK SHA-256, and APK
+signing-certificate SHA-256. CI extracts and verifies the actual package ID and
+label. With stable signing it builds the normal `com.stash.app.debug` upgrade
+candidate and requires the retained signer; without stable signing it builds
+the separately installable `com.stash.app.preview` CI-only artifact. Weekly
+upstream checks create or refresh an issue instead of merging code
+automatically; scheduled workflows become active only after the workflow exists
+on the repository's default branch.
 
 Canonical branch CI additionally checks out private `Gaiser147/stash-ingest` at
 the full commit SHA recorded in the workflow by using a dedicated read-only
