@@ -1,0 +1,137 @@
+name: Stash community build
+
+on:
+  workflow_dispatch:
+  push:
+    tags:
+      - "v*-community*"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: stash-community-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - uses: gradle/actions/setup-gradle@v6
+
+      - name: Restore Gradle wrapper executable bit
+        run: chmod +x gradlew
+
+      - name: Require stable community signer
+        env:
+          KEYSTORE_BASE64: ${{ secrets.STASH_RELEASE_KEYSTORE_BASE64 }}
+          KEYSTORE_PASSWORD: ${{ secrets.STASH_RELEASE_KEYSTORE_PASSWORD }}
+          KEY_ALIAS: ${{ secrets.STASH_RELEASE_KEY_ALIAS }}
+          KEY_PASSWORD: ${{ secrets.STASH_RELEASE_KEY_PASSWORD }}
+        shell: bash
+        run: |
+          configured=0
+          [ -n "$KEYSTORE_BASE64" ] && configured=$((configured + 1))
+          [ -n "$KEYSTORE_PASSWORD" ] && configured=$((configured + 1))
+          [ -n "$KEY_ALIAS" ] && configured=$((configured + 1))
+          [ -n "$KEY_PASSWORD" ] && configured=$((configured + 1))
+          if [ "$configured" -ne 4 ]; then
+            echo "::error::All four STASH_RELEASE_* signing secrets are required."
+            exit 1
+          fi
+          echo "$KEYSTORE_BASE64" | base64 --decode > "$RUNNER_TEMP/stash-community.jks"
+          chmod 600 "$RUNNER_TEMP/stash-community.jks"
+          keytool -list -keystore "$RUNNER_TEMP/stash-community.jks" \
+            -storepass "$KEYSTORE_PASSWORD" -alias "$KEY_ALIAS" >/dev/null
+
+      - name: Test affected modules
+        run: >-
+          ./gradlew
+          :core:data:testDebugUnitTest
+          :data:download:testDebugUnitTest
+          :feature:muse:testDebugUnitTest
+          :feature:settings:testDebugUnitTest
+          --no-daemon
+
+      - name: Assemble fail-closed community APK
+        env:
+          STASH_KEYSTORE_FILE: ${{ runner.temp }}/stash-community.jks
+          STASH_KEYSTORE_PASSWORD: ${{ secrets.STASH_RELEASE_KEYSTORE_PASSWORD }}
+          STASH_KEY_ALIAS: ${{ secrets.STASH_RELEASE_KEY_ALIAS }}
+          STASH_KEY_PASSWORD: ${{ secrets.STASH_RELEASE_KEY_PASSWORD }}
+          LASTFM_API_KEY: ${{ secrets.LASTFM_API_KEY }}
+          LASTFM_API_SECRET: ${{ secrets.LASTFM_API_SECRET }}
+        run: >-
+          ./gradlew :app:assembleRelease
+          -Pstash.communityBuild=true
+          -Pstash.distributable=true
+          --no-daemon
+
+      - name: Verify community feature boundary
+        shell: bash
+        run: |
+          app_config="$(find app/build/generated -type f -name BuildConfig.java -path '*release*' -print -quit)"
+          download_config="$(find data/download/build/generated -type f -name BuildConfig.java -path '*release*' -print -quit)"
+          test -n "$app_config"
+          test -n "$download_config"
+          grep -F 'EXPERIMENTAL_SPOTIFY_COOKIE_ENABLED = false' "$app_config"
+          grep -F 'ARCOD_STREAM_BASE = ""' "$download_config"
+          grep -F 'QBDLX_APP_ID = ""' "$download_config"
+          grep -F 'QBDLX_APP_SECRET = ""' "$download_config"
+          grep -F 'QBDLX_TOKEN_POOL = ""' "$download_config"
+
+      - name: Verify package, signer and provenance
+        id: verify
+        shell: bash
+        run: |
+          apk="$(find app/build/outputs/apk/release -name '*.apk' -print -quit)"
+          test -n "$apk"
+          apksigner="$(find "$ANDROID_HOME/build-tools" -type f -name apksigner -print | sort -V | tail -n1)"
+          aapt="$(find "$ANDROID_HOME/build-tools" -type f -name aapt -print | sort -V | tail -n1)"
+          "$apksigner" verify "$apk"
+          package_id="$("$aapt" dump badging "$apk" | sed -n "s/^package: name='\([^']*\)'.*/\1/p")"
+          if [ "$package_id" != "com.gaiser147.stash" ]; then
+            echo "::error::Unexpected application id: $package_id"
+            exit 1
+          fi
+          if "$aapt" dump xmltree "$apk" AndroidManifest.xml | grep -q 'android:debuggable.*0xffffffff'; then
+            echo "::error::Community APK is debuggable"
+            exit 1
+          fi
+          apk_sha256="$(sha256sum "$apk" | cut -d ' ' -f1)"
+          signer_output="$("$apksigner" verify --print-certs "$apk" 2>&1)"
+          signer_sha256="$(printf '%s\n' "$signer_output" | awk '/SHA-256/ {for(i=1;i<=NF;i++) if($i ~ /^[[:xdigit:]]{64}$/){print tolower($i); exit}}')"
+          provenance="$RUNNER_TEMP/stash-community-provenance.json"
+          jq -n \
+            --arg repository "$GITHUB_REPOSITORY" \
+            --arg commit "$GITHUB_SHA" \
+            --arg run_id "$GITHUB_RUN_ID" \
+            --arg application_id "$package_id" \
+            --arg apk_sha256 "$apk_sha256" \
+            --arg signer_sha256 "$signer_sha256" \
+            '{repository:$repository,commit:$commit,workflow_run:$run_id,application_id:$application_id,apk_sha256:$apk_sha256,apk_signer_sha256:$signer_sha256,channel:"community"}' \
+            > "$provenance"
+          echo "$apk_sha256  $(basename "$apk")" > "$RUNNER_TEMP/SHA256SUMS.txt"
+          echo "apk=$apk" >> "$GITHUB_OUTPUT"
+          echo "provenance=$provenance" >> "$GITHUB_OUTPUT"
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: stash-community-apk
+          path: |
+            ${{ steps.verify.outputs.apk }}
+            ${{ steps.verify.outputs.provenance }}
+            ${{ runner.temp }}/SHA256SUMS.txt
+          retention-days: 30
+
+      - name: Remove temporary signer
+        if: always()
+        run: rm -f "$RUNNER_TEMP/stash-community.jks"

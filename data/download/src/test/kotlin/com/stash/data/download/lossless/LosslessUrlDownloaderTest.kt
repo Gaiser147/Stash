@@ -6,7 +6,9 @@ import io.mockk.coEvery
 import io.mockk.coVerify
 import io.mockk.mockk
 import java.io.File
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.test.runTest
+import org.junit.Assert.assertThrows
 import okhttp3.OkHttpClient
 import okhttp3.mockwebserver.MockResponse
 import okhttp3.mockwebserver.MockWebServer
@@ -57,6 +59,23 @@ class LosslessUrlDownloaderTest {
         coVerify(exactly = 0) { decryptor.decryptToFlac(any(), any(), any()) }
     }
 
+    @Test fun `source-specific download headers reach the media request`() = runTest {
+        server.enqueue(MockResponse().setResponseCode(200).setBody("CLEAR_FLAC_BYTES"))
+        val dest = File(tmp.root, "headers.flac")
+        val source = source(server.url("/protected").toString()).copy(
+            downloadHeaders = mapOf(
+                "Authorization" to "Bearer source-scoped",
+                "Referer" to "https://catalog.example.test/",
+            ),
+        )
+
+        assertThat(downloader.download(source, dest).isSuccess).isTrue()
+
+        val request = server.takeRequest()
+        assertThat(request.getHeader("Authorization")).isEqualTo("Bearer source-scoped")
+        assertThat(request.getHeader("Referer")).isEqualTo("https://catalog.example.test/")
+    }
+
     @Test fun `encrypted path fetches to a temp then decrypts to destination and cleans up`() = runTest {
         server.enqueue(MockResponse().setResponseCode(200).setBody("ENCRYPTED_CMAF"))
         val dest = File(tmp.root, "track.flac")
@@ -87,5 +106,33 @@ class LosslessUrlDownloaderTest {
         assertThat(result.isFailure).isTrue()
         assertThat(dest.exists()).isFalse()
         assertThat(File("${dest.absolutePath}.enc").exists()).isFalse()
+    }
+
+    @Test fun `bounded acquisition rejects an oversized response`() = runTest {
+        server.enqueue(MockResponse().setResponseCode(200).setBody("0123456789"))
+        val dest = File(tmp.root, "oversized.flac")
+
+        val result = downloader.downloadBounded(
+            source(server.url("/large").toString()),
+            dest,
+            maxBytes = 5,
+        )
+
+        assertThat(result.isFailure).isTrue()
+        assertThat(dest.exists()).isFalse()
+    }
+
+    @Test fun `cancellation is rethrown and partial file is removed`() {
+        server.enqueue(MockResponse().setResponseCode(200).setBody("CLEAR_FLAC_BYTES"))
+        val dest = File(tmp.root, "cancelled.flac")
+
+        assertThrows(CancellationException::class.java) {
+            runTest {
+                downloader.download(source(server.url("/cancel").toString()), dest) { _, _ ->
+                    throw CancellationException("worker stopped")
+                }
+            }
+        }
+        assertThat(dest.exists()).isFalse()
     }
 }

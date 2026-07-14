@@ -14,6 +14,7 @@ import com.stash.data.download.lossless.searchTerms
 import com.stash.data.download.lossless.squid.CaptchaExpiredNotifier
 import javax.inject.Inject
 import javax.inject.Singleton
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -290,6 +291,8 @@ class QobuzSource @Inject constructor(
                 Log.w(TAG, "failed reason=network squid.wtf API call failed", e)
             }
             null
+        } catch (cancelled: CancellationException) {
+            throw cancelled
         } catch (e: Exception) {
             rateLimiter.reportFailure(id)
             Log.w(TAG, "failed reason=network squid.wtf call threw: ${e.javaClass.simpleName}: ${e.message}", e)

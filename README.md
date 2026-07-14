@@ -1,5 +1,9 @@
 # Stash
 
+Fork builds use separate, fail-closed update, community, and preview package
+boundaries. See [docs/RELEASE_CHANNELS.md](docs/RELEASE_CHANNELS.md) before
+installing or distributing an APK.
+
 > **Your Spotify + YouTube Music library, on your phone, in FLAC.**
 
 [![License: GPL v3](https://img.shields.io/badge/License-GPLv3-purple.svg)](LICENSE)

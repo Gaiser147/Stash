@@ -5,7 +5,11 @@ import java.io.File
 import java.util.concurrent.TimeUnit
 import javax.inject.Inject
 import javax.inject.Singleton
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.currentCoroutineContext
+import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.sync.Semaphore
 import kotlinx.coroutines.withContext
 import okhttp3.OkHttpClient
@@ -68,6 +72,24 @@ class LosslessUrlDownloader @Inject constructor(
         source: SourceResult,
         destination: File,
         onProgress: (bytesRead: Long, totalBytes: Long) -> Unit = { _, _ -> },
+    ): Result<File> = downloadInternal(source, destination, maxBytes = null, onProgress)
+
+    /**
+     * Acquisition-only bounded variant. Kept separate from [download] so the
+     * widely used original method retains its exact source/MockK signature.
+     */
+    suspend fun downloadBounded(
+        source: SourceResult,
+        destination: File,
+        maxBytes: Long,
+        onProgress: (bytesRead: Long, totalBytes: Long) -> Unit = { _, _ -> },
+    ): Result<File> = downloadInternal(source, destination, maxBytes, onProgress)
+
+    private suspend fun downloadInternal(
+        source: SourceResult,
+        destination: File,
+        maxBytes: Long?,
+        onProgress: (bytesRead: Long, totalBytes: Long) -> Unit,
     ): Result<File> = withContext(Dispatchers.IO) {
         val requestBuilder = Request.Builder().url(source.downloadUrl).get()
         for ((name, value) in source.downloadHeaders) {
@@ -85,8 +107,13 @@ class LosslessUrlDownloader @Inject constructor(
         // ungated as before. Released in the finally so a throw/return can't leak
         // a permit and wedge the source.
         if (key != null) amzFetchGate.acquire()
+        currentCoroutineContext().ensureActive()
+        val call = fetchClient.newCall(request)
+        val cancellationHandle = currentCoroutineContext()[Job]?.invokeOnCompletion { cause ->
+            if (cause is CancellationException) call.cancel()
+        }
         try {
-            fetchClient.newCall(request).execute().use { response ->
+            call.execute().use { response ->
                 if (!response.isSuccessful) {
                     return@withContext Result.failure(
                         IllegalStateException(
@@ -98,6 +125,11 @@ class LosslessUrlDownloader @Inject constructor(
                     IllegalStateException("fetch ${source.sourceId} failed: empty body"),
                 )
                 val totalBytes = body.contentLength().coerceAtLeast(0L)
+                if (maxBytes != null && totalBytes > maxBytes) {
+                    return@withContext Result.failure(
+                        IllegalStateException("fetch ${source.sourceId} exceeds maximum size"),
+                    )
+                }
 
                 // Stream body → file in 64 KB chunks. Okio's BufferedSink
                 // gives us flush guarantees without us managing a manual
@@ -112,6 +144,9 @@ class LosslessUrlDownloader @Inject constructor(
                         if (read == -1L) break
                         sink.write(buf, read)
                         bytesRead += read
+                        if (maxBytes != null && bytesRead > maxBytes) {
+                            throw IllegalStateException("fetch ${source.sourceId} exceeds maximum size")
+                        }
                         onProgress(bytesRead, totalBytes)
                     }
                     sink.flush()
@@ -142,7 +177,12 @@ class LosslessUrlDownloader @Inject constructor(
                     )
                 }
             }
+        } catch (cancelled: CancellationException) {
+            runCatching { if (fetchTarget.exists()) fetchTarget.delete() }
+            runCatching { if (destination.exists()) destination.delete() }
+            throw cancelled
         } catch (e: Exception) {
+            currentCoroutineContext().ensureActive()
             Log.w(TAG, "fetch ${source.sourceId} threw: ${e.javaClass.simpleName}: ${e.message}")
             // Best-effort cleanup of any partial files so the caller's
             // fallback path doesn't accidentally treat a 0-byte temp
@@ -151,6 +191,7 @@ class LosslessUrlDownloader @Inject constructor(
             runCatching { if (destination.exists()) destination.delete() }
             Result.failure(e)
         } finally {
+            cancellationHandle?.dispose()
             if (key != null) amzFetchGate.release()
         }
     }

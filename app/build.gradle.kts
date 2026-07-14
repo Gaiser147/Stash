@@ -20,10 +20,9 @@ plugins {
 //     base64-decodes a secret into a temporary .jks file and exports the
 //     passwords as env vars before running `assembleRelease`.
 //
-// If neither source is available, the release build falls back to the debug
-// keystore so the project still builds out-of-the-box for contributors. The
-// fallback APK is unusable for distribution but keeps `assembleRelease` working
-// during local testing.
+// If neither source is available, an ordinary local release build may remain
+// unsigned/debug-signed for contributor testing. A build explicitly marked as
+// distributable fails closed below; CI must never publish that fallback.
 val keystorePropertiesFile = rootProject.file("keystore.properties")
 val keystoreProperties = Properties().apply {
     if (keystorePropertiesFile.exists()) {
@@ -64,6 +63,32 @@ val isSideBySidePreview = providers.gradleProperty("stash.sideBySidePreview")
     .orNull
     ?.toBooleanStrictOrNull() == true
 
+// Distribution channels are explicit so the data-preserving upgrade package
+// can keep its historic application id while new installations receive a
+// stable, fork-owned namespace that cannot collide with upstream Stash.
+val isCommunityBuild = providers.gradleProperty("stash.communityBuild")
+    .orNull
+    ?.toBooleanStrictOrNull() == true
+val isDistributableBuild = providers.gradleProperty("stash.distributable")
+    .orNull
+    ?.toBooleanStrictOrNull() == true
+val requestedTasks = gradle.startParameter.taskNames.map(String::lowercase)
+val requestsCommunityRelease = isCommunityBuild && requestedTasks.any {
+    it.contains("assemble") || it.contains("bundle") || it.contains("publish")
+}
+val requestsLegacyProd = requestedTasks.any { it.contains("legacyprod") }
+
+if (isDistributableBuild && requestsCommunityRelease && !hasReleaseSigning) {
+    throw GradleException(
+        "A distributable community build requires all STASH_KEYSTORE_* release credentials.",
+    )
+}
+if (requestsLegacyProd && !hasStableDebugSigning) {
+    throw GradleException(
+        "A legacyProd build requires the retained STASH_DEBUG_KEYSTORE_* signer.",
+    )
+}
+
 // ── Last.fm API credentials ────────────────────────────────────────────────
 //
 // Read from `local.properties` (gitignored) or env vars (CI). Users who want
@@ -100,11 +125,11 @@ android {
     namespace = "com.stash.app"
     compileSdk = 35
     defaultConfig {
-        applicationId = "com.stash.app"
+        applicationId = if (isCommunityBuild) "com.gaiser147.stash" else "com.stash.app"
         minSdk = 26
         targetSdk = 35
-        versionCode = 111
-        versionName = "0.9.75"
+        versionCode = 112
+        versionName = "0.9.75-muse.1"
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
         manifestPlaceholders["appLabel"] = "Stash"
         // AppAuth redirect scheme removed -- Spotify now uses sp_dc cookie auth
@@ -132,6 +157,14 @@ android {
         // `com.stash.core.common.constants.StashConstants.STREAMING_ENGINE_ENABLED`
         // — keep both in sync (Task 23 flips both at once).
         buildConfigField("Boolean", "STREAMING_ENGINE_ENABLED", "true")
+        // The current sp_dc/Web Player connector is intentionally absent from
+        // the regular community channel. It remains available only to the
+        // private legacy/lab build until a separate policy/security gate passes.
+        buildConfigField(
+            "Boolean",
+            "EXPERIMENTAL_SPOTIFY_COOKIE_ENABLED",
+            (!isCommunityBuild).toString(),
+        )
     }
 
     signingConfigs {
@@ -193,6 +226,18 @@ android {
                 signingConfig = signingConfigs.getByName("stableDebug")
             }
         }
+        create("legacyProd") {
+            // Real in-place successor for the installed com.stash.app.debug
+            // package: same application id + signer, but no debug surface.
+            initWith(getByName("release"))
+            applicationIdSuffix = ".debug"
+            manifestPlaceholders["appLabel"] = "Stash"
+            isDebuggable = false
+            matchingFallbacks += listOf("release", "debug")
+            if (hasStableDebugSigning) {
+                signingConfig = signingConfigs.getByName("stableDebug")
+            }
+        }
     }
     compileOptions {
         sourceCompatibility = JavaVersion.VERSION_17
@@ -227,6 +272,7 @@ dependencies {
     implementation(project(":feature:sync"))
     implementation(project(":feature:settings"))
     implementation(project(":feature:search"))
+    implementation(project(":feature:muse"))
     implementation(project(":data:download"))
     // data:ytmusic provides AlbumSummary, used by SearchScreen/ArtistProfileScreen
     // callback signatures that StashNavHost wires up for Album Discovery.

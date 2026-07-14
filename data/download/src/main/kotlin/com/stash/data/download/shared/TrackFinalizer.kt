@@ -12,6 +12,7 @@ import com.stash.data.download.lossless.AudioFormat
 import java.io.File
 import javax.inject.Inject
 import javax.inject.Singleton
+import kotlinx.coroutines.CancellationException
 
 /**
  * Shared file-side finalisation for downloaded audio. Used by sync
@@ -58,11 +59,21 @@ class TrackFinalizer @Inject constructor(
         embedMetadata: Boolean = true,
     ): FinalizeResult = runCatching {
         if (embedMetadata) {
-            val art = runCatching { albumArtCache.resolveArt(track) }
-                .onFailure { e -> Log.w(TAG, "art resolve failed: ${e.message}") }
-                .getOrNull()
-            runCatching { metadataEmbedder.embedMetadata(sourceFile, track, art) }
-                .onFailure { e -> Log.w(TAG, "metadata embed failed: ${e.message}") }
+            val art = try {
+                albumArtCache.resolveArt(track)
+            } catch (cancelled: CancellationException) {
+                throw cancelled
+            } catch (error: Exception) {
+                Log.w(TAG, "art resolve failed: ${error.message}")
+                null
+            }
+            try {
+                metadataEmbedder.embedMetadata(sourceFile, track, art)
+            } catch (cancelled: CancellationException) {
+                throw cancelled
+            } catch (error: Exception) {
+                Log.w(TAG, "metadata embed failed: ${error.message}")
+            }
         }
         val committed: CommittedTrack = fileOrganizer.commitDownload(
             tempFile = sourceFile,
@@ -74,6 +85,7 @@ class TrackFinalizer @Inject constructor(
         val meta: AudioMetadata? = audioExtractor.extract(committed.filePath)
         FinalizeResult.Success(committed, meta)
     }.getOrElse { e ->
+        if (e is CancellationException) throw e
         FinalizeResult.Failed(e.message ?: "finalize failed")
     }
 

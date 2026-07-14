@@ -82,7 +82,7 @@ jobs:
         uses: actions/checkout@v7
         with:
           repository: Gaiser147/stash-ingest
-          ref: d78c69486fc3632c90bc4f9d44a69d3a33b91adf
+          ref: 4e3b49ebca77257cb7a5b5f19f2438997fc321df
           path: _e2e/stash-ingest
           ssh-key: ${{ secrets.STASH_INGEST_DEPLOY_KEY }}
           persist-credentials: false
@@ -90,7 +90,7 @@ jobs:
       - name: Start pinned stash-ingest TLS fixture
         if: steps.ingest_fixture.outputs.available == 'true'
         env:
-          INGEST_COMMIT: d78c69486fc3632c90bc4f9d44a69d3a33b91adf
+          INGEST_COMMIT: 4e3b49ebca77257cb7a5b5f19f2438997fc321df
         run: |
           sudo apt-get update -qq
           sudo apt-get install --yes --no-install-recommends ffmpeg
@@ -140,6 +140,7 @@ jobs:
         run: >-
           ./gradlew
           :data:download:testDebugUnitTest
+          :feature:muse:testDebugUnitTest
           :feature:settings:testDebugUnitTest
           --no-daemon
 
@@ -193,6 +194,8 @@ jobs:
           path: |
             data/download/build/test-results/testDebugUnitTest/
             data/download/build/reports/tests/testDebugUnitTest/
+            feature/muse/build/test-results/testDebugUnitTest/
+            feature/muse/build/reports/tests/testDebugUnitTest/
             feature/settings/build/test-results/testDebugUnitTest/
             feature/settings/build/reports/tests/testDebugUnitTest/
             core/data/build/test-results/testDebugUnitTest/
@@ -200,7 +203,7 @@ jobs:
           if-no-files-found: ignore
           retention-days: 14
 
-      - name: Assemble debug APK
+      - name: Assemble upgrade or preview APK
         id: build_mode
         env:
           STASH_DEBUG_KEYSTORE_FILE: ${{ runner.temp }}/stash-debug.jks
@@ -213,9 +216,9 @@ jobs:
         shell: bash
         run: |
           if [ "$STABLE_SIGNING" = "true" ]; then
-            ./gradlew :app:assembleDebug --no-daemon
+            ./gradlew :app:assembleLegacyProd --no-daemon
             echo "application_id=com.stash.app.debug" >> "$GITHUB_OUTPUT"
-            echo "application_label=Stash Debug" >> "$GITHUB_OUTPUT"
+            echo "application_label=Stash" >> "$GITHUB_OUTPUT"
             echo "install_mode=in-place-upgrade" >> "$GITHUB_OUTPUT"
             echo "artifact_name=stash-in-place-upgrade-candidate" >> "$GITHUB_OUTPUT"
           else
@@ -230,7 +233,7 @@ jobs:
         id: apk
         shell: bash
         run: |
-          apk="$(find app/build/outputs/apk/debug -name '*.apk' -print -quit)"
+          apk="$(find app/build/outputs/apk -name '*.apk' -print -quit)"
           if [ -z "$apk" ]; then
             echo "::error::No debug APK produced"
             exit 1

@@ -9,7 +9,9 @@ import com.stash.data.download.lossless.AudioFormat
 import io.mockk.coEvery
 import io.mockk.coVerify
 import io.mockk.mockk
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.test.runTest
+import org.junit.Assert.assertThrows
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertSame
 import org.junit.Assert.assertTrue
@@ -88,6 +90,21 @@ class TrackFinalizerTest {
         assertTrue("embedder must be invoked even when art is null", embedderCalled)
         assertNull(passedArt)
         assertTrue(result is TrackFinalizer.FinalizeResult.Success)
+    }
+
+    @Test fun `finalizeFile never swallows cancellation from art resolution`() {
+        coEvery { albumArtCache.resolveArt(any()) } throws CancellationException("worker stopped")
+
+        assertThrows(CancellationException::class.java) {
+            runTest {
+                subject.finalizeFile(
+                    sourceFile = File.createTempFile("src", ".flac"),
+                    track = stubTrack(),
+                    format = AudioFormat(codec = "flac", bitrateKbps = 0),
+                )
+            }
+        }
+        coVerify(exactly = 0) { fileOrganizer.commitDownload(any(), any(), any(), any(), any()) }
     }
 
     private fun stubTrack(): Track = Track(

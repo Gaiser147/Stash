@@ -35,6 +35,7 @@ import com.stash.feature.settings.components.SettingsSectionLabel
 @Composable
 fun SettingsAccountsScreen(
     onBack: () -> Unit,
+    experimentalSpotifyCookieEnabled: Boolean = true,
     modifier: Modifier = Modifier,
     viewModel: SettingsViewModel = hiltViewModel(),
 ) {
@@ -43,7 +44,7 @@ fun SettingsAccountsScreen(
 
     // Spotify WebView login (full-screen overlay). Replaces the screen content
     // while active — the connect flow on the Spotify card flips this flag.
-    if (uiState.showSpotifyWebLogin) {
+    if (experimentalSpotifyCookieEnabled && uiState.showSpotifyWebLogin) {
         com.stash.feature.settings.components.SpotifyLoginWebView(
             onCookieExtracted = viewModel::onSpotifyWebLoginCookieExtracted,
             onDismiss = viewModel::onDismissSpotifyWebLogin,
@@ -63,7 +64,7 @@ fun SettingsAccountsScreen(
     }
 
     // Spotify sp_dc cookie input dialog (manual fallback).
-    if (uiState.showSpotifyCookieDialog) {
+    if (experimentalSpotifyCookieEnabled && uiState.showSpotifyCookieDialog) {
         com.stash.feature.settings.components.SpotifyCookieDialog(
             isValidating = uiState.isSpotifyCookieValidating,
             errorMessage = uiState.spotifyCookieError,
@@ -124,25 +125,37 @@ fun SettingsAccountsScreen(
 
         SettingsSectionLabel("Connections")
 
-        AccountConnectionCard(
-            serviceName = "Spotify",
-            icon = Icons.Rounded.MusicNote,
-            accentColor = extendedColors.spotifyGreen,
-            authState = uiState.spotifyAuthState,
-            onConnect = viewModel::onConnectSpotify,
-            onDisconnect = viewModel::onDisconnectSpotify,
-            extraContent = {
-                com.stash.feature.settings.components.SpotifyAutoSaveSection(
-                    enabled = uiState.autoSaveEnabled,
-                    threshold = uiState.autoSaveThreshold,
-                    autoSavedCountLast7Days = uiState.autoSavedCountLast7Days,
-                    spotifyConnected = uiState.spotifyAuthState is com.stash.core.auth.model.AuthState.Connected,
-                    onToggle = viewModel::onAutoSaveEnabledChanged,
-                    onThresholdChanged = viewModel::onAutoSaveThresholdChanged,
-                    modifier = Modifier.padding(horizontal = 16.dp, vertical = 12.dp),
+        if (experimentalSpotifyCookieEnabled) {
+            AccountConnectionCard(
+                serviceName = "Spotify (experimental)",
+                icon = Icons.Rounded.MusicNote,
+                accentColor = extendedColors.spotifyGreen,
+                authState = uiState.spotifyAuthState,
+                onConnect = viewModel::onConnectSpotify,
+                onDisconnect = viewModel::onDisconnectSpotify,
+                extraContent = {
+                    com.stash.feature.settings.components.SpotifyAutoSaveSection(
+                        enabled = uiState.autoSaveEnabled,
+                        threshold = uiState.autoSaveThreshold,
+                        autoSavedCountLast7Days = uiState.autoSavedCountLast7Days,
+                        spotifyConnected = uiState.spotifyAuthState is com.stash.core.auth.model.AuthState.Connected,
+                        onToggle = viewModel::onAutoSaveEnabledChanged,
+                        onThresholdChanged = viewModel::onAutoSaveThresholdChanged,
+                        modifier = Modifier.padding(horizontal = 16.dp, vertical = 12.dp),
+                    )
+                },
+            )
+        } else {
+            GlassCard {
+                Text(
+                    text = "Spotify is connected through Muse OAuth or a private data import. " +
+                        "The experimental Web Player cookie login is not included in this build.",
+                    style = MaterialTheme.typography.bodyMedium,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    modifier = Modifier.padding(16.dp),
                 )
-            },
-        )
+            }
+        }
 
         AccountConnectionCard(
             serviceName = "YouTube Music",

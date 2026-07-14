@@ -1,5 +1,9 @@
 # In-place upgrade gate
 
+The continuing production build type for this package is `legacyProd`, which
+keeps `com.stash.app.debug` and the retained signer while setting
+`android:debuggable=false`. See [RELEASE_CHANNELS.md](RELEASE_CHANNELS.md).
+
 The supported target is a real Android update of the existing
 `com.stash.app.debug` installation without clearing application data. The
 separate `com.stash.app.preview` package is useful for exploratory testing but

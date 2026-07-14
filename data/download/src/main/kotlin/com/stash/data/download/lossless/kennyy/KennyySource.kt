@@ -18,6 +18,7 @@ import com.stash.data.download.lossless.qobuz.QobuzTrack
 import javax.inject.Inject
 import javax.inject.Singleton
 import kotlin.math.abs
+import kotlinx.coroutines.CancellationException
 
 /**
  * [LosslessSource] backed by the Qobuz catalog via the kennyy.com.br
@@ -229,6 +230,8 @@ class KennyySource @Inject constructor(
             lastResolveFailedNetwork = true
             Log.w(TAG, "failed reason=network kennyy.com.br API call failed", e)
             null
+        } catch (cancelled: CancellationException) {
+            throw cancelled
         } catch (e: Exception) {
             rateLimiter.reportFailure(id)
             lastResolveFailedNetwork = true

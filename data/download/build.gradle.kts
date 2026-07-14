@@ -25,8 +25,12 @@ val arcodLocalProperties = Properties().apply {
     val f = rootProject.file("local.properties")
     if (f.exists()) f.inputStream().use { load(it) }
 }
+val isCommunityBuild = providers.gradleProperty("stash.communityBuild")
+    .orNull
+    ?.toBooleanStrictOrNull() == true
 val arcodStreamBase: String =
-    arcodLocalProperties.getProperty("arcod.streamBase") ?: System.getenv("ARCOD_STREAM_BASE").orEmpty()
+    if (isCommunityBuild) "" else
+        arcodLocalProperties.getProperty("arcod.streamBase") ?: System.getenv("ARCOD_STREAM_BASE").orEmpty()
 
 // ── qbdlx (direct-Qobuz) credentials + token pool ──────────────────────────
 // Bundled at build time from local.properties / env. APP_ID + APP_SECRET are
@@ -39,9 +43,9 @@ val qbdlxProps = Properties().apply {
 }
 fun qbdlxProp(key: String, env: String) =
     qbdlxProps.getProperty(key) ?: System.getenv(env).orEmpty()
-val qbdlxAppId = qbdlxProp("qbdlx.appId", "QBDLX_APP_ID")
-val qbdlxAppSecret = qbdlxProp("qbdlx.appSecret", "QBDLX_APP_SECRET")
-val qbdlxTokenPool = qbdlxProp("qbdlx.tokenPool", "QBDLX_TOKEN_POOL")
+val qbdlxAppId = if (isCommunityBuild) "" else qbdlxProp("qbdlx.appId", "QBDLX_APP_ID")
+val qbdlxAppSecret = if (isCommunityBuild) "" else qbdlxProp("qbdlx.appSecret", "QBDLX_APP_SECRET")
+val qbdlxTokenPool = if (isCommunityBuild) "" else qbdlxProp("qbdlx.tokenPool", "QBDLX_TOKEN_POOL")
 
 // AES-256-GCM encrypt the pool at build time (mirrors the runtime
 // QbdlxPoolCipher — keep the two in sync). The fixture test guards the RUNTIME

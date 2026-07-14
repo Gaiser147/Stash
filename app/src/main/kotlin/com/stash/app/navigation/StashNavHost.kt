@@ -15,6 +15,7 @@ import com.stash.feature.library.LibraryScreen
 import com.stash.feature.library.LikedSongsDetailScreen
 import com.stash.feature.library.PlaylistDetailScreen
 import com.stash.feature.library.mixbuilder.MixBuilderScreen
+import com.stash.feature.muse.MuseScreen
 import com.stash.feature.nowplaying.NowPlayingScreen
 import com.stash.feature.search.AlbumDiscoveryScreen
 import com.stash.feature.search.ArtistProfileScreen
@@ -106,6 +107,9 @@ fun StashNavHost(
                 },
             )
         }
+        composable<MuseRoute> {
+            MuseScreen(onOpenSync = { navController.navigate(SyncRoute) })
+        }
         composable<SyncRoute> {
             SyncScreen(
                 onNavigateToFailedMatches = {
@@ -165,6 +169,7 @@ fun StashNavHost(
                 androidx.hilt.navigation.compose.hiltViewModel(settingsEntry)
             com.stash.feature.settings.SettingsAccountsScreen(
                 onBack = { navController.popBackStack() },
+                experimentalSpotifyCookieEnabled = com.stash.app.BuildConfig.EXPERIMENTAL_SPOTIFY_COOKIE_ENABLED,
                 viewModel = viewModel,
             )
         }

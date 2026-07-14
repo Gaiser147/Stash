@@ -5,7 +5,9 @@ import io.mockk.coEvery
 import io.mockk.coVerify
 import io.mockk.every
 import io.mockk.mockk
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.test.runTest
+import org.junit.Assert.assertThrows
 import org.junit.Test
 
 class LosslessSourceRegistryTest {
@@ -208,5 +210,17 @@ class LosslessSourceRegistryTest {
         coVerify(exactly = 1) { arcod.resolve(any()) }
         coVerify(exactly = 0) { squid.resolve(any()) }
         coVerify(exactly = 0) { kennyy.resolve(any()) }
+    }
+
+    @Test
+    fun `source cancellation is never converted into a miss`() {
+        acceptAnyQuality()
+        coEvery { healthGate.isDegraded("amz") } returns false
+        val amz = fakeSource("amz", null)
+        coEvery { amz.resolve(any()) } throws CancellationException("worker stopped")
+
+        assertThrows(CancellationException::class.java) {
+            runTest { registry(linkedSetOf(amz)).resolve(query) }
+        }
     }
 }

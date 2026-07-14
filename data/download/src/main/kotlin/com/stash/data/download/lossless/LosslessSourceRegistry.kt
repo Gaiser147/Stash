@@ -4,6 +4,7 @@ import android.util.Log
 import com.stash.core.data.prefs.StreamingPreference
 import javax.inject.Inject
 import javax.inject.Singleton
+import kotlinx.coroutines.CancellationException
 
 /**
  * Holds every Hilt-bound [LosslessSource] and resolves a [TrackQuery]
@@ -61,15 +62,17 @@ class LosslessSourceRegistry @Inject constructor(
                 continue
             }
             if (!source.isEnabled()) continue
-            val result = runCatching { source.resolve(query, bypassRateLimit) }
-                .onFailure { e ->
-                    // resolve() should never throw — it should catch and
-                    // return null. Defensive log so an unexpected throw
-                    // from one source doesn't break the chain for others.
-                    Log.w(TAG, "source ${source.id} threw on resolve", e)
-                }
-                .getOrNull()
-                ?: continue
+            val result = try {
+                source.resolve(query, bypassRateLimit)
+            } catch (cancelled: CancellationException) {
+                throw cancelled
+            } catch (error: Throwable) {
+                // resolve() should never throw — it should catch and return
+                // null. Cancellation is the one exception and must remain
+                // cooperative for WorkManager / acquisition lease shutdown.
+                Log.w(TAG, "source ${source.id} threw on resolve", error)
+                null
+            } ?: continue
 
             if (!minQuality.accepts(result.format)) {
                 Log.d(
