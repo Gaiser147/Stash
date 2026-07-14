@@ -82,7 +82,7 @@ jobs:
         uses: actions/checkout@v7
         with:
           repository: Gaiser147/stash-ingest
-          ref: 59f08c401f164ca6257fbe8e20a47ce03b974bc6
+          ref: ac12b3026a03c859b0f3b545df7b175ee7300750
           path: _e2e/stash-ingest
           ssh-key: ${{ secrets.STASH_INGEST_DEPLOY_KEY }}
           persist-credentials: false
@@ -90,7 +90,7 @@ jobs:
       - name: Start pinned stash-ingest TLS fixture
         if: steps.ingest_fixture.outputs.available == 'true'
         env:
-          INGEST_COMMIT: 59f08c401f164ca6257fbe8e20a47ce03b974bc6
+          INGEST_COMMIT: ac12b3026a03c859b0f3b545df7b175ee7300750
         run: |
           sudo apt-get update -qq
           sudo apt-get install --yes --no-install-recommends ffmpeg
