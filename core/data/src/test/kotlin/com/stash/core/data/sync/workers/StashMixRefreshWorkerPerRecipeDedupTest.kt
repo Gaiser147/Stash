@@ -16,6 +16,8 @@ import com.stash.core.data.lastfm.LastFmCredentials
 import com.stash.core.data.lastfm.LastFmSessionPreference
 import com.stash.core.data.mix.MixGenerator
 import com.stash.core.data.mix.MixSeedGenerator
+import com.stash.core.data.mix.TagPoolBuilder
+import com.stash.core.data.prefs.DownloadNetworkPreference
 import com.stash.core.data.sync.TrackMatcher
 import io.mockk.coEvery
 import io.mockk.coVerify
@@ -56,6 +58,8 @@ class StashMixRefreshWorkerPerRecipeDedupTest {
     }
     private val trackSkipEventDao: TrackSkipEventDao = mockk(relaxed = true)
     private val trackMatcher: TrackMatcher = mockk(relaxed = true)
+    private val downloadNetworkPreference: DownloadNetworkPreference = mockk(relaxed = true)
+    private val tagPoolBuilder = TagPoolBuilder(lastFmApiClient)
 
     private fun newWorker(recipeId: Long): StashMixRefreshWorker {
         val params: WorkerParameters = mockk(relaxed = true) {
@@ -68,7 +72,7 @@ class StashMixRefreshWorkerPerRecipeDedupTest {
             recipeDao, playlistDao, discoveryQueueDao, listeningEventDao,
             trackDao, mixGenerator, seedGenerator, lastFmApiClient,
             lastFmCredentials, sessionPreference, blocklistGuard,
-            trackSkipEventDao, trackMatcher,
+            trackSkipEventDao, tagPoolBuilder, trackMatcher, downloadNetworkPreference,
         )
     }
 
@@ -88,7 +92,7 @@ class StashMixRefreshWorkerPerRecipeDedupTest {
         val excludeCapture = slot<Set<Long>>()
         coEvery { mixGenerator.generate(targetRecipe, capture(excludeCapture)) } returns emptyList()
         coEvery {
-            discoveryQueueDao.getDoneTrackIdsForRecipe(any(), any())
+            playlistDao.getStreamableOrDoneTrackIdsForRecipe(any())
         } returns emptyList()
 
         newWorker(recipeId = 1L).doWork()
@@ -112,7 +116,7 @@ class StashMixRefreshWorkerPerRecipeDedupTest {
         val excludeCapture = slot<Set<Long>>()
         coEvery { mixGenerator.generate(targetRecipe, capture(excludeCapture)) } returns emptyList()
         coEvery {
-            discoveryQueueDao.getDoneTrackIdsForRecipe(any(), any())
+            playlistDao.getStreamableOrDoneTrackIdsForRecipe(any())
         } returns emptyList()
 
         newWorker(recipeId = 1L).doWork()

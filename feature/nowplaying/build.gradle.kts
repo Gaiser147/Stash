@@ -18,6 +18,14 @@ dependencies {
     implementation(project(":core:media"))
     implementation(project(":core:data"))
     implementation(project(":core:auth"))
+    // v0.9.36 — Now Playing lyrics sheet observes LyricsRepository and
+    // enqueues the priority on-open LyricsFetchWorker. work-runtime gives
+    // us WorkManager + OneTimeWorkRequestBuilder for the priority enqueue.
+    implementation(project(":data:lyrics"))
+    // Tap-to-artist: resolveArtist(name) → YT browseId for the Now Playing
+    // track → artist-profile navigation.
+    implementation(project(":data:ytmusic"))
+    implementation(libs.work.runtime.ktx)
     implementation(libs.palette.ktx)
     implementation(libs.coil.compose)
     implementation(libs.compose.material.icons.extended)

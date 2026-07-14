@@ -2,6 +2,9 @@ package com.stash.app
 
 import android.app.Application
 import androidx.hilt.work.HiltWorkerFactory
+import androidx.lifecycle.DefaultLifecycleObserver
+import androidx.lifecycle.LifecycleOwner
+import androidx.lifecycle.ProcessLifecycleOwner
 import androidx.work.Configuration
 import androidx.work.Constraints
 import androidx.work.OneTimeWorkRequestBuilder
@@ -10,6 +13,7 @@ import coil3.SingletonImageLoader
 import android.util.Log
 import com.stash.core.data.db.dao.ArtistProfileCacheDao
 import com.stash.core.data.db.dao.DiscoveryQueueDao
+import com.stash.core.data.db.dao.DownloadQueueDao
 import com.stash.core.data.diagnostics.CrashReporter
 import com.stash.core.data.db.dao.PlaylistDao
 import com.stash.core.data.db.dao.StashMixRecipeDao
@@ -21,6 +25,8 @@ import com.stash.core.data.prefs.DownloadNetworkPreference
 import com.stash.core.media.listening.ListeningRecorder
 import com.stash.core.data.repository.MusicRepositoryImpl
 import com.stash.core.data.sync.SyncNotificationManager
+import com.stash.data.download.backfill.MetadataBackfillScheduler
+import com.stash.data.download.acquisition.MuseAcquisitionScheduler
 import com.stash.data.download.ytdlp.YtDlpManager
 import com.stash.core.data.sync.workers.ArtBackfillWorker
 import com.stash.core.data.sync.workers.AutoSaveScrobbler
@@ -34,6 +40,8 @@ import com.stash.core.data.sync.workers.TrackInfoEnrichmentWorker
 import com.stash.core.data.sync.workers.UpdateCheckWorker
 import com.stash.core.data.sync.workers.constraintsForManualTrigger
 import com.stash.core.media.preview.LosslessUrlPrefetcher
+import com.stash.core.media.streaming.KennyyHealthProbe
+import com.stash.core.media.streaming.SquidCookieAutoRefresher
 import com.stash.data.download.lossless.LosslessRetryScheduler
 import com.stash.data.download.ytdlp.YtDlpUpdateWorker
 import dagger.hilt.android.HiltAndroidApp
@@ -97,6 +105,9 @@ class StashApplication : Application(), Configuration.Provider {
     lateinit var discoveryQueueDao: DiscoveryQueueDao
 
     @Inject
+    lateinit var downloadQueueDao: DownloadQueueDao
+
+    @Inject
     lateinit var trackDao: TrackDao
 
     @Inject
@@ -111,6 +122,15 @@ class StashApplication : Application(), Configuration.Provider {
     @Inject
     lateinit var losslessPrefetcher: LosslessUrlPrefetcher
 
+    @Inject
+    lateinit var losslessSourcePreferences: com.stash.data.download.lossless.LosslessSourcePreferences
+
+    @Inject
+    lateinit var streamingPreference: com.stash.core.data.prefs.StreamingPreference
+
+    @Inject
+    lateinit var streamingQualityPreferences: com.stash.data.download.prefs.StreamingQualityPreferences
+
     /**
      * v0.9.17: eager-bound observer that enqueues [LosslessRetryWorker]
      * on cookie change / lastKnownBadCookie clear / circuit-breaker
@@ -122,6 +142,24 @@ class StashApplication : Application(), Configuration.Provider {
     lateinit var losslessRetryScheduler: LosslessRetryScheduler
 
     /**
+     * Auto-refresher for the squid.wtf captcha cookie. Activated by
+     * the ProcessLifecycle observer registered in [onCreate] — only
+     * runs when (1) Kennyy is unhealthy AND (2) the app is in the
+     * foreground/STARTED window. Idle no-op otherwise.
+     */
+    @Inject
+    lateinit var squidCookieAutoRefresher: SquidCookieAutoRefresher
+
+    /**
+     * Cold-start Kennyy health probe. Started by the ProcessLifecycle
+     * observer registered in [onCreate] alongside [squidCookieAutoRefresher]
+     * so it runs an immediate ground-truth check on app STARTED, setting
+     * Kennyy health before the first play.
+     */
+    @Inject
+    lateinit var kennyyHealthProbe: KennyyHealthProbe
+
+    /**
      * Writes uncaught exceptions to `cacheDir/crashes/` so the user can
      * later share the latest report from Settings → Diagnostics. Installed
      * as the first thing after super.onCreate() so it catches errors from
@@ -129,6 +167,26 @@ class StashApplication : Application(), Configuration.Provider {
      */
     @Inject
     lateinit var crashReporter: CrashReporter
+
+    /**
+     * Captures a rolling tail of logcat to `cacheDir/diagnostics/` so the
+     * user can attach recent logs alongside a crash report when sharing
+     * from Settings → Diagnostics. Started immediately after the crash
+     * reporter so the tail begins as early as possible.
+     */
+    @Inject
+    lateinit var logcatCapture: com.stash.core.data.diagnostics.LogcatCapture
+
+    /**
+     * v0.9.35: once-per-version auto-enqueue gate for [MetadataBackfillWorker].
+     * Idempotent — re-installing the same binary doesn't re-fire the worker.
+     */
+    @Inject
+    lateinit var metadataBackfillScheduler: MetadataBackfillScheduler
+
+    /** Default-off Muse inbox polling; refreshSchedule cancels stale work when unconfigured. */
+    @Inject
+    lateinit var museAcquisitionScheduler: MuseAcquisitionScheduler
 
     /** Application-scoped coroutine scope for one-shot startup tasks. */
     private val applicationScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
@@ -151,16 +209,75 @@ class StashApplication : Application(), Configuration.Provider {
         // chains through to the platform default so the OS still records
         // the crash and the process exits cleanly.
         crashReporter.install()
+        // Begin capturing the logcat tail as early as possible so the most
+        // recent logs are available to attach when the user shares a report.
+        logcatCapture.start()
         // Install the app-wide Coil ImageLoader synchronously so it is ready
         // for the first Compose frame (and any AsyncImage composed before any
         // async startup work completes).
         SingletonImageLoader.setSafe { ctx -> CoilConfiguration.build(ctx, okHttpClient) }
         syncNotificationManager.createChannels()
+        // Squid cookie auto-refresher: start when the app moves to STARTED,
+        // stop when it moves to STOPPED. ProcessLifecycle is the right
+        // scope vs Activity-scoped because rotation/recreation shouldn't
+        // interrupt a refresh in progress. The refresher itself gates on
+        // KennyyHealthMonitor.isHealthy, so it stays idle when Kennyy is
+        // up. Registered here (before the applicationScope.launch blocks)
+        // so it's observing as early as possible; the first STARTED event
+        // doesn't fire until after onCreate completes anyway.
+        ProcessLifecycleOwner.get().lifecycle.addObserver(
+            object : DefaultLifecycleObserver {
+                override fun onStart(owner: LifecycleOwner) {
+                    // PARKED 2026-07-01: kennyy + squid are out of the lossless
+                    // chain (hosts down for us — see
+                    // LosslessSourceRegistry.PARKED_SOURCE_IDS), so their
+                    // background keep-alives are parked too: no point probing
+                    // kennyy health or refreshing the squid captcha cookie for
+                    // sources nothing consults. Uncomment on re-enable.
+                    // squidCookieAutoRefresher.start()
+                    // kennyyHealthProbe.start()
+                }
+
+                override fun onStop(owner: LifecycleOwner) {
+                    // squidCookieAutoRefresher.stop()
+                    // kennyyHealthProbe.stop()
+                }
+            },
+        )
         applicationScope.launch {
             musicRepository.runMigrations()
         }
+        // Reset stale IN_PROGRESS download_queue rows left over from an
+        // interrupted worker run / process death. The worker bulk-marks rows
+        // IN_PROGRESS and relies on the NEXT run's resetStaleInProgress() to
+        // flip leftovers back — but that next run may never come (e.g. in
+        // streaming mode the drain is skipped), so they linger forever showing
+        // "downloading". At a fresh process start no worker is running, so any
+        // IN_PROGRESS row is by definition stale and safe to reset.
+        applicationScope.launch {
+            runCatching {
+                val reset = downloadQueueDao.resetStaleInProgress()
+                if (reset > 0) Log.i("StashStartup", "reset $reset stale IN_PROGRESS download rows -> PENDING")
+            }.onFailure { Log.w("StashStartup", "stale IN_PROGRESS reset failed", it) }
+        }
         applicationScope.launch {
             musicRepository.ensureDownloadsMixSeeded()
+        }
+        // One-shot repair (2026-07-05): pre-v0.9.73 lyrics fetches stamped
+        // transient failures (timeouts/429s/DNS during bulk bursts) as
+        // permanent 0L misses — forensics showed ~72% of "No lyrics found"
+        // tracks have lyrics available. Reset those stamps to NULL once so
+        // each track re-fetches on its next sheet open. Post-fix 0L stamps
+        // are trustworthy, hence the never-again preference gate.
+        applicationScope.launch {
+            runCatching {
+                val prefs = getSharedPreferences("stash_migrations", MODE_PRIVATE)
+                if (!prefs.getBoolean(LYRICS_MISS_RESET_KEY, false)) {
+                    val reset = trackDao.resetMissedLyricsStamps()
+                    prefs.edit().putBoolean(LYRICS_MISS_RESET_KEY, true).apply()
+                    Log.i("StashStartup", "reset $reset poisoned lyrics miss-stamps -> NULL")
+                }
+            }.onFailure { Log.w("StashStartup", "lyrics miss-stamp reset failed", it) }
         }
         // Prune stale lossless prefetch entries every 60s. Bounded
         // memory growth across long browse sessions.
@@ -171,12 +288,14 @@ class StashApplication : Application(), Configuration.Provider {
             }
         }
         applicationScope.launch {
-            ytDlpManager.initialize()
-            // Kick a background warmup extraction right after init. Primes the
-            // player-JS + QuickJS caches so the first real user preview doesn't
-            // pay the ~14 s cold-start cost. Serial with initialize() because
-            // warmUp() requires [YtDlpManager.initialized].
-            ytDlpManager.warmUp()
+            // Best-effort prewarm: initialize, freshen yt-dlp to the latest
+            // nightly, and warm the player-JS + QuickJS + EJS caches so the
+            // first real user preview/download pays neither the ~14 s
+            // cold-start cost nor the nightly-update latency. This shares the
+            // once-per-session gate with the download path (DownloadExecutor),
+            // so whichever runs first does the work and the other returns
+            // immediately — downloads are still hard-gated on a fresh binary.
+            ytDlpManager.ensureFreshened()
         }
         // Warm up music.youtube.com TLS + DNS in the first 2s of launch so
         // the first search request doesn't pay the full handshake cost.
@@ -219,6 +338,7 @@ class StashApplication : Application(), Configuration.Provider {
             StashMixDefaults.seedIfNeeded(stashMixRecipeDao)
             maybeRetuneStashDiscover()
             maybeRetuneStashMixes()
+            maybeRemoveRetiredBuiltinMixes()
             maybeCleanupDiscoveryLibraryHits()
             // Fire a one-shot refresh on first launch so mixes populate
             // without waiting for the 24-hour periodic cycle. Subsequent
@@ -272,6 +392,20 @@ class StashApplication : Application(), Configuration.Provider {
         applicationScope.launch { maybeHideEmptyYouTubePlaylists() }
         applicationScope.launch { maybeBackfillCodecsFromExtension() }
         applicationScope.launch { maybeBackfillTrackAlbums() }
+        applicationScope.launch { maybePurgeAntraArtifacts() }
+        // One-shot: seed the streaming Wi-Fi quality tier from the user's
+        // current download tier on first run, so existing users' streaming
+        // quality inherits their download choice instead of silently changing.
+        // migrateIfNeeded() is internally idempotent (no-op after first run).
+        applicationScope.launch { streamingQualityPreferences.migrateIfNeeded() }
+        // Auto-enqueue the v0.9.35 metadata backfill once per version.
+        // Idempotent (re-installing the same binary does not re-enqueue).
+        applicationScope.launch {
+            metadataBackfillScheduler.scheduleIfNeeded()
+        }
+        applicationScope.launch {
+            museAcquisitionScheduler.refreshSchedule()
+        }
 
         // v0.9.30 Path A: AvailabilityCheckWorker + AvailabilityRecheckWorker
         // were removed when Library reverted to downloaded-only. They populated
@@ -309,6 +443,23 @@ class StashApplication : Application(), Configuration.Provider {
         if (stored < ARTIST_CACHE_VERSION) {
             artistProfileCacheDao.clearAll()
             prefs.edit().putInt("artist_cache_version", ARTIST_CACHE_VERSION).apply()
+        }
+    }
+
+    /**
+     * One-shot cleanup after the antra source was removed: deletes the
+     * harvested antra.hoshi.cfd session cookie / cf_clearance / username and
+     * the retired `force_antra_only` toggle from existing installs, so no
+     * stale third-party login session lingers on disk. Runs exactly once per
+     * install via a SharedPreferences version flag.
+     */
+    private suspend fun maybePurgeAntraArtifacts() {
+        val prefs = getSharedPreferences("stash_migrations", MODE_PRIVATE)
+        val stored = prefs.getInt("antra_purge_version", 0)
+        if (stored < ANTRA_PURGE_VERSION) {
+            losslessSourcePreferences.purgeAntraCredentials()
+            streamingPreference.purgeRetiredKeys()
+            prefs.edit().putInt("antra_purge_version", ANTRA_PURGE_VERSION).apply()
         }
     }
 
@@ -487,6 +638,8 @@ class StashApplication : Application(), Configuration.Provider {
                 targetLength = 50,
                 affinityBias = 0.0f,
                 seedStrategy = "TAG_GRAPH",
+                moodKeysCsv = "",
+                tagSampleDepth = 0,
             )
             if (updated > 0) {
                 Log.i(
@@ -501,12 +654,18 @@ class StashApplication : Application(), Configuration.Provider {
     }
 
     /**
-     * v0.9.20 pivot: Daily Discover + Deep Cuts move from library-substrate
-     * to recommendation-substrate (85% discovery, 15% library). Deep Cuts
-     * switches seed strategy from NONE to TRACK_SIMILAR. Gated by
-     * [STASH_MIX_RECIPE_TUNING_VERSION] so the migration runs exactly once
-     * per install. Fresh installs skip this because [StashMixDefaults]
-     * already seeds with the new values.
+     * One-shot builtin-recipe retune, gated by [STASH_MIX_RECIPE_TUNING_VERSION]
+     * so each tuning ships exactly once per install. Fresh installs skip it
+     * because [StashMixDefaults] already seeds the current values.
+     *
+     * - v1 (v0.9.20 pivot): Daily Discover + Deep Cuts moved to recommendation-
+     *   substrate (85% discovery / 15% library); Deep Cuts went NONE → TRACK_SIMILAR.
+     * - v2 (v0.9.40 tag engine): Deep Cuts re-pointed TRACK_SIMILAR → TAG_GRAPH with
+     *   tagSampleDepth=15 (fixes it surfacing only already-downloaded library tracks).
+     *   Since this iterates every builtin, First Listen (already TAG_GRAPH) is also
+     *   re-tuned and — like Deep Cuts — now seeds via the tag engine
+     *   (RecipeTagResolver → TagPoolBuilder), falling back to the user's top genres
+     *   for builtins with no explicit tags. Daily Discover stays ARTIST_SIMILAR.
      */
     private suspend fun maybeRetuneStashMixes() {
         val prefs = getSharedPreferences("stash_migrations", MODE_PRIVATE)
@@ -522,6 +681,8 @@ class StashApplication : Application(), Configuration.Provider {
                 targetLength = recipe.targetLength,
                 affinityBias = recipe.affinityBias,
                 seedStrategy = recipe.seedStrategy,
+                moodKeysCsv = recipe.moodKeysCsv,
+                tagSampleDepth = recipe.tagSampleDepth,
             )
             totalUpdated += updated
         }
@@ -531,6 +692,31 @@ class StashApplication : Application(), Configuration.Provider {
         )
         prefs.edit()
             .putInt("stash_mix_recipe_tuning_version", STASH_MIX_RECIPE_TUNING_VERSION)
+            .apply()
+    }
+
+    /**
+     * v0.9.40: retire the "Deep Cuts" and "First Listen" built-in mixes —
+     * Daily Discover is now the sole built-in; users build the rest via the
+     * Mix Builder. Deletes those recipes (CASCADE removes their discovery_queue
+     * rows) AND their materialized playlists, leaving Daily Discover and all
+     * user-created mixes untouched. Gated by [STASH_MIX_RETIRED_VERSION] so it
+     * runs once per install; fresh installs never seed them (see StashMixDefaults).
+     */
+    private suspend fun maybeRemoveRetiredBuiltinMixes() {
+        val prefs = getSharedPreferences("stash_migrations", MODE_PRIVATE)
+        if (prefs.getInt("stash_mix_retired_version", 0) >= STASH_MIX_RETIRED_VERSION) return
+
+        val retired = listOf("Deep Cuts", "First Listen")
+        val recipes = stashMixRecipeDao.getBuiltinsByName(retired)
+        recipes.mapNotNull { it.playlistId }.forEach { playlistDao.deleteById(it) }
+        val removed = stashMixRecipeDao.deleteBuiltinsByName(retired)
+        Log.i(
+            "StashMigration",
+            "Retired $removed builtin mix(es) + ${recipes.count { it.playlistId != null }} playlist(s)",
+        )
+        prefs.edit()
+            .putInt("stash_mix_retired_version", STASH_MIX_RETIRED_VERSION)
             .apply()
     }
 
@@ -655,11 +841,22 @@ class StashApplication : Application(), Configuration.Provider {
 
     companion object {
         /**
+         * Never-again gate for the one-shot lyrics miss-stamp repair. NOT
+         * version-keyed on purpose: post-fix 0L stamps are genuine misses
+         * and re-wiping them on every release would refetch known-absent
+         * tracks forever.
+         */
+        private const val LYRICS_MISS_RESET_KEY = "lyrics_miss_reset_done"
+
+        /**
          * Bump whenever a parser change makes existing cached rows produce
          * a worse UX than a fresh fetch. Current bump (v1) invalidates rows
          * written before the 2026-04-17 Popular-shelf title-matching fix.
          */
         private const val ARTIST_CACHE_VERSION = 1
+
+        /** Bump to re-run [maybePurgeAntraArtifacts] (one-shot antra cleanup). */
+        private const val ANTRA_PURGE_VERSION = 1
 
         /**
          * Bump when [maybeEnableYouTubePlaylistSync] needs to run again.
@@ -689,6 +886,13 @@ class StashApplication : Application(), Configuration.Provider {
         private const val STASH_MIX_RECIPE_VERSION = 2
 
         /**
+         * Bump to retire built-in mixes on upgrade without wiping the others.
+         *  - v1 = the 0.9.40 removal of "Deep Cuts" + "First Listen"
+         *    (Daily Discover and all custom mixes are preserved).
+         */
+        private const val STASH_MIX_RETIRED_VERSION = 1
+
+        /**
          * Bump when the built-in Stash Discover recipe's tunables change
          * and existing installs should adopt them.
          *  - v1 = 2026-04-21 bump of discovery_ratio from 0.25 → 0.6
@@ -709,7 +913,7 @@ class StashApplication : Application(), Configuration.Provider {
          *    (85% discovery, 15% library). Deep Cuts switches seed
          *    strategy from NONE to TRACK_SIMILAR.
          */
-        private const val STASH_MIX_RECIPE_TUNING_VERSION = 1
+        private const val STASH_MIX_RECIPE_TUNING_VERSION = 2
 
         /**
          * Bump when [maybeCleanupDiscoveryLibraryHits] should run again.

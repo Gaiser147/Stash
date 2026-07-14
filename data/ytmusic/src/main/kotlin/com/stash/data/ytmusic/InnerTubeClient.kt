@@ -43,6 +43,12 @@ enum class InnerTubeVariant(
     val clientVersion: String,
     val userAgent: String,
     val extraClientFields: Map<String, Any> = emptyMap(),
+    /** Host this client must POST against. Defaults to the YT-Music host. */
+    val apiBase: String = "https://music.youtube.com/youtubei/v1",
+    /** Numeric InnerTube client id for the `X-YouTube-Client-Name` header. */
+    val clientNameId: String = "",
+    /** Whether unauthenticated requests should append the YT-Music API key. */
+    val sendsApiKey: Boolean = false,
 ) {
     /** Oculus Quest 3 VR browser. Historically returns unciphered URLs. */
     ANDROID_VR(
@@ -60,19 +66,26 @@ enum class InnerTubeVariant(
         ),
     ),
 
-    /** iOS YouTube app. Also frequently returns unciphered URLs. */
+    /**
+     * iOS YouTube app. Returns direct, unciphered audio URLs in <1 s when hit
+     * on the `www.youtube.com` host, keyless, with the numeric client-name
+     * header (`5`) and a current app version. This is the fast lane; the
+     * config below was proven on-device against a no-rebuild spike.
+     */
     IOS(
         clientName = "IOS",
-        clientVersion = "19.45.4",
+        clientVersion = "21.02.3",
         userAgent =
-            "com.google.ios.youtube/19.45.4 " +
-                "(iPhone16,2; U; CPU iOS 17_7_1 like Mac OS X; en_US)",
+            "com.google.ios.youtube/21.02.3 (iPhone16,2; U; CPU iOS 18_3_2 like Mac OS X;)",
         extraClientFields = mapOf(
             "deviceMake" to "Apple",
             "deviceModel" to "iPhone16,2",
-            "osName" to "iOS",
-            "osVersion" to "17.7.1.21H216",
+            "osName" to "iPhone",
+            "osVersion" to "18.3.2.22D82",
         ),
+        apiBase = "https://www.youtube.com/youtubei/v1",
+        clientNameId = "5",
+        sendsApiKey = false,
     ),
 
     /** Standard web YouTube Music client. URLs are typically ciphered. */
@@ -86,6 +99,8 @@ enum class InnerTubeVariant(
         userAgent =
             "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 " +
                 "(KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+        clientNameId = "67",
+        sendsApiKey = true,
     );
 
     /** Resolves the reported client version, computing it fresh for [WEB_REMIX]. */
@@ -111,6 +126,12 @@ enum class InnerTubeVariant(
  * This client handles the raw HTTP layer; higher-level parsing is done by
  * [YTMusicApiClient].
  */
+/**
+ * A canonical song match: the resolved [videoId] plus, when present, the
+ * song's square YT Music album-art thumbnail (high-res lh3).
+ */
+data class CanonicalMatch(val videoId: String, val thumbnailUrl: String?)
+
 @Singleton
 class InnerTubeClient @Inject constructor(
     private val okHttpClient: OkHttpClient,
@@ -128,14 +149,14 @@ class InnerTubeClient @Inject constructor(
         private const val API_KEY = "AIzaSyC9XL3ZjWddXya6X74dJoCTL-WEYFDNX30"
 
         /**
-         * Ordered attempt list for audio URL extraction. Unciphered-friendly
-         * variants first so [playerForAudio] exits on the earliest response
-         * that carries a direct URL.
+         * Ordered attempt list for audio URL extraction. Only the IOS client
+         * reliably returns direct (unciphered) URLs on the fast lane, so it is
+         * the sole entry; ANDROID_VR / WEB_REMIX no longer serve the unciphered
+         * shape and only added latency. `internal` so variant tests can assert
+         * the order without widening to the public API.
          */
-        private val AUDIO_VARIANT_ORDER = listOf(
-            InnerTubeVariant.ANDROID_VR,
+        internal val AUDIO_VARIANT_ORDER = listOf(
             InnerTubeVariant.IOS,
-            InnerTubeVariant.WEB_REMIX,
         )
     }
 
@@ -201,13 +222,38 @@ class InnerTubeClient @Inject constructor(
      * @param browseId The InnerTube browse ID.
      * @return The parsed JSON response, or null on failure.
      */
-    suspend fun browse(browseId: String): JsonObject? = withContext(Dispatchers.IO) {
+    suspend fun browse(browseId: String, params: String? = null): JsonObject? = withContext(Dispatchers.IO) {
         val variant = InnerTubeVariant.WEB_REMIX
         val body = buildJsonObject {
             put("context", buildContext(variant))
             put("browseId", browseId)
+            // params scopes a browse (e.g. an artist-discography "View all" grid
+            // to albums-only vs singles-only). Omitted → unfiltered/default view.
+            if (!params.isNullOrBlank()) put("params", params)
         }
         executeRequest("$BASE_URL/browse", body, null, variant)
+    }
+
+    /**
+     * Calls the InnerTube `next` action.
+     *
+     * `next` is the "watch next" endpoint — given a videoId it returns the
+     * surfaces that flank the current playback (up-next queue, related,
+     * lyrics tab, etc.). For lyrics discovery, the response carries a
+     * `singleColumnMusicWatchNextResultsRenderer.tabbedRenderer.tabs[]`
+     * array; the tab whose endpoint points at `MPLY...` is the lyrics page,
+     * which can then be fetched via [browse].
+     *
+     * @param videoId The YouTube video ID.
+     * @return The parsed JSON response, or null on failure.
+     */
+    suspend fun next(videoId: String): JsonObject? = withContext(Dispatchers.IO) {
+        val variant = InnerTubeVariant.WEB_REMIX
+        val body = buildJsonObject {
+            put("context", buildContext(variant))
+            put("videoId", videoId)
+        }
+        executeRequest("$BASE_URL/next", body, null, variant)
     }
 
     /**
@@ -259,15 +305,21 @@ class InnerTubeClient @Inject constructor(
      * @param query The search query string.
      * @return The parsed JSON response, or null on failure.
      */
-    suspend fun search(query: String): JsonObject? = withContext(Dispatchers.IO) {
+    suspend fun search(query: String, params: String? = null): JsonObject? = withContext(Dispatchers.IO) {
         val cookie = tokenManager.getYouTubeCookie()
         val variant = InnerTubeVariant.WEB_REMIX
         val body = buildJsonObject {
             put("context", buildContext(variant))
             put("query", query)
+            if (params != null) put("params", params)
         }
         executeRequest("$BASE_URL/search", body, cookie, variant)
     }
+
+    /** ytmusicapi-derived filter selector that constrains search results to the
+     *  "Songs" shelf only. With this set, the response reverts to the legacy
+     *  `musicShelfRenderer` shape that downstream parsers expect. */
+    private val songsFilterParams = "EgWKAQIIAWoKEAoQAxAJEAQQBQ%3D%3D"
 
     /**
      * Calls the InnerTube `player` action to get actual video metadata.
@@ -287,8 +339,10 @@ class InnerTubeClient @Inject constructor(
         val body = buildJsonObject {
             put("context", buildContext(variant))
             put("videoId", videoId)
+            put("contentCheckOk", true)
+            put("racyCheckOk", true)
         }
-        executeRequest("$BASE_URL/player", body, cookie, variant)
+        executeRequest("${variant.apiBase}/player", body, cookie, variant)
     }
 
     /**
@@ -301,35 +355,52 @@ class InnerTubeClient @Inject constructor(
      * (signed-out, network down, endpoint blocked) — caller treats
      * non-success as "skip this destination, surface snackbar."
      */
-    suspend fun likeVideo(videoId: String): Boolean = runCatching {
+    suspend fun likeVideo(videoId: String): Boolean =
+        sendLikeAction("$BASE_URL/like/like", videoId)
+
+    /**
+     * v0.9.52: symmetric un-like — sets likeStatus back to INDIFFERENT
+     * and removes the track from Liked Music. Same payload/auth shape
+     * as [likeVideo]; same boolean soft-failure contract.
+     */
+    suspend fun removeLike(videoId: String): Boolean =
+        sendLikeAction("$BASE_URL/like/removelike", videoId)
+
+    private suspend fun sendLikeAction(url: String, videoId: String): Boolean = runCatching {
         val variant = InnerTubeVariant.WEB_REMIX
         val payload = buildJsonObject {
             put("context", buildContext(variant))
             put("target", buildJsonObject { put("videoId", videoId) })
         }
         val outcome = executeRequestWithStatus(
-            url = "$BASE_URL/like/like",
+            url = url,
             body = payload,
             cookie = null,
             variant = variant,
         )
         outcome.body != null && outcome.statusCode in 200..299
     }.getOrElse { e ->
-        Log.w(TAG, "likeVideo failed for $videoId: ${e.message}")
+        Log.w(TAG, "like action failed for $videoId at $url: ${e.message}")
         false
     }
 
+    /** Test-only seam mirroring [executeRequestWithStatusForTest] — lets a test
+     * point the like action at a MockWebServer URL. */
+    internal suspend fun sendLikeActionForTest(url: String, videoId: String): Boolean =
+        sendLikeAction(url, videoId)
+
     /**
      * Audio-focused player lookup. Tries each variant in [AUDIO_VARIANT_ORDER]
-     * until one returns `streamingData.adaptiveFormats` with at least one
-     * entry carrying a direct `url` (i.e. unciphered). Returns the first
-     * such response, or the last-tried response if none were unciphered
-     * so downstream code still has *something* to parse.
+     * — currently IOS only — until one returns `streamingData.adaptiveFormats`
+     * with at least one entry carrying a direct `url` (i.e. unciphered).
+     * Returns that response, or the last-tried response if none were
+     * unciphered so downstream code still has *something* to parse.
      *
-     * Rationale: YouTube serves different response shapes per client.
-     * WEB_REMIX wraps URLs in `signatureCipher`, which forces our yt-dlp
-     * fallback (~14 s with QuickJS). ANDROID_VR / IOS frequently return
-     * direct URLs that play natively, cutting extraction to ~200 ms.
+     * Rationale: YouTube serves different response shapes per client. The IOS
+     * client (queried against www.youtube.com) frequently returns direct,
+     * unciphered URLs that play natively, cutting extraction to ~200 ms. On a
+     * miss the last response is returned, which downstream maps to the yt-dlp
+     * fallback (~14 s with QuickJS) for the `signatureCipher` case.
      */
     suspend fun playerForAudio(videoId: String): JsonObject? {
         var lastResponse: JsonObject? = null
@@ -384,16 +455,30 @@ class InnerTubeClient @Inject constructor(
         withContext(Dispatchers.IO) {
             val cookie = tokenManager.getYouTubeCookie()
             val variant = InnerTubeVariant.WEB_REMIX
+            // YT's anti-bot challenge for /player rejects requests missing
+            // playbackContext.contentPlaybackContext.signatureTimestamp with
+            // a RELOAD_PAGE error. signatureTimestamp is the day number
+            // (days since epoch) and tells YouTube which JS player build the
+            // client is on; sending today's value passes the freshness check.
+            val signatureTimestamp = (System.currentTimeMillis() / 86_400_000L).toInt() - 1
             val body = buildJsonObject {
                 put("context", buildContext(variant))
                 put("videoId", videoId)
+                putJsonObject("playbackContext") {
+                    putJsonObject("contentPlaybackContext") {
+                        put("signatureTimestamp", signatureTimestamp)
+                    }
+                }
             }
             val response = executeRequest("$BASE_URL/player", body, cookie, variant)
                 ?: return@withContext null
             PlaybackTrackingParser().extract(response)
                 .also { url ->
                     if (url == null) {
-                        Log.w(TAG, "getPlaybackTracking: no playbackTracking block for $videoId")
+                        val playStatus = response["playabilityStatus"]?.jsonObject
+                            ?.get("status")?.jsonPrimitive?.content
+                        Log.w(TAG, "getPlaybackTracking: no playbackTracking block for " +
+                            "$videoId (playabilityStatus=$playStatus)")
                     }
                 }
         }
@@ -420,9 +505,19 @@ class InnerTubeClient @Inject constructor(
      * @return The video id of the best ATV or OMV match, or null if none found.
      */
     suspend fun searchCanonical(artist: String, title: String): String? =
+        searchCanonicalMatch(artist, title)?.videoId
+
+    /**
+     * Like [searchCanonical] but also returns the matched song's square YT
+     * Music album-art thumbnail (lh3, upgraded to high-res) from the same
+     * search response — no extra request. Radio tracks resolved this way
+     * (song radio, Last.fm neighbours) otherwise fall back to the low-res
+     * `mqdefault` video frame; this gives them a crisp, no-bars cover.
+     */
+    suspend fun searchCanonicalMatch(artist: String, title: String): CanonicalMatch? =
         withContext(Dispatchers.IO) {
             val query = "$artist $title"
-            val response = search(query) ?: return@withContext null
+            val response = search(query, params = songsFilterParams) ?: return@withContext null
 
             // Walk the Songs shelf(ves) inside the search response. Each row is a
             // musicResponsiveListItemRenderer; we extract videoId and musicVideoType
@@ -437,8 +532,8 @@ class InnerTubeClient @Inject constructor(
                 ?.jsonObject?.get("contents")
                 ?.jsonArray ?: return@withContext null
 
-            // Collect (videoId, musicVideoType) pairs from Songs shelves only.
-            data class Candidate(val videoId: String, val type: MusicVideoType?)
+            // Collect (videoId, musicVideoType, thumbnail) from Songs shelves only.
+            data class Candidate(val videoId: String, val type: MusicVideoType?, val thumbnailUrl: String?)
             val candidates = mutableListOf<Candidate>()
 
             for (shelf in shelves) {
@@ -477,7 +572,17 @@ class InnerTubeClient @Inject constructor(
                         ?.get("watchEndpointMusicConfig")?.jsonObject
                         ?.get("musicVideoType")?.jsonPrimitive?.content
 
-                    candidates.add(Candidate(videoId, MusicVideoType.fromInnerTube(rawType)))
+                    // Square album-art thumbnail (lh3) — largest of the set,
+                    // upgraded to high-res. Absent for some rows; that's fine.
+                    val thumbnailUrl = row["thumbnail"]?.jsonObject
+                        ?.get("musicThumbnailRenderer")?.jsonObject
+                        ?.get("thumbnail")?.jsonObject
+                        ?.get("thumbnails")?.jsonArray
+                        ?.lastOrNull()?.jsonObject
+                        ?.get("url")?.jsonPrimitive?.content
+                        ?.let { com.stash.core.common.ArtUrlUpgrader.upgrade(it) }
+
+                    candidates.add(Candidate(videoId, MusicVideoType.fromInnerTube(rawType), thumbnailUrl))
                 }
             }
 
@@ -495,7 +600,7 @@ class InnerTubeClient @Inject constructor(
             } else {
                 Log.d(TAG, "searchCanonical('$query'): resolved → ${best.videoId} (${best.type})")
             }
-            best?.videoId
+            best?.let { CanonicalMatch(it.videoId, it.thumbnailUrl) }
         }
 
     /**
@@ -541,10 +646,10 @@ class InnerTubeClient @Inject constructor(
         val (effectiveCookie, sapiSid, authHeader) = resolveAuth(cookie, variant)
 
         val separator = if (url.contains('?')) '&' else '?'
-        val fullUrl = if (sapiSid != null) {
-            "${url}${separator}prettyPrint=false"
-        } else {
-            "${url}${separator}key=$API_KEY&prettyPrint=false"
+        val fullUrl = when {
+            sapiSid != null -> "${url}${separator}prettyPrint=false"
+            variant.sendsApiKey -> "${url}${separator}key=$API_KEY&prettyPrint=false"
+            else -> "${url}${separator}prettyPrint=false" // keyless (IOS etc.)
         }
 
         Log.d(TAG, "executeRequest: POST $fullUrl (authenticated=${sapiSid != null}, variant=$variant)")
@@ -554,7 +659,7 @@ class InnerTubeClient @Inject constructor(
             .post(body.toString().toRequestBody(jsonMediaType))
             .header("Content-Type", "application/json")
             .header("User-Agent", variant.userAgent)
-            .header("X-YouTube-Client-Name", variant.clientName)
+            .header("X-YouTube-Client-Name", variant.clientNameId.ifBlank { variant.clientName })
             .header("X-YouTube-Client-Version", variant.currentVersion())
 
         // Cookies + SAPISIDHASH auth only make sense against the WEB family;

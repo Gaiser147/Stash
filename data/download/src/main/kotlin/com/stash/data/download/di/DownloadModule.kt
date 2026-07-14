@@ -1,8 +1,10 @@
 package com.stash.data.download.di
 
 import com.stash.core.data.prefs.QualityPreference
+import com.stash.core.data.sync.NavidromeExportScheduler
 import com.stash.core.data.sync.TrackDownloader
 import com.stash.data.download.TrackDownloaderImpl
+import com.stash.data.download.export.NavidromeUploadScheduler
 import com.stash.data.download.prefs.QualityPreferencesManager
 import dagger.Binds
 import dagger.Module
@@ -34,4 +36,8 @@ abstract class DownloadModule {
     @Binds
     @Singleton
     abstract fun bindQualityPreference(impl: QualityPreferencesManager): QualityPreference
+
+    @Binds
+    @Singleton
+    abstract fun bindNavidromeExportScheduler(impl: NavidromeUploadScheduler): NavidromeExportScheduler
 }

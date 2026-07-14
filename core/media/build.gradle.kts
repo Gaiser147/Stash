@@ -34,11 +34,15 @@ dependencies {
     implementation(project(":core:data"))
     implementation(project(":core:auth"))
     implementation(project(":data:download"))
+    // YT Music client for the streaming-fallback search-by-metadata path
+    // (YouTubeStreamResolver.searchYouTubeForVideoId).
+    implementation(project(":data:ytmusic"))
 
     // Media3
     implementation(libs.media3.exoplayer)
     implementation(libs.media3.session)
     implementation(libs.media3.datasource)
+    implementation(libs.media3.datasource.okhttp)
     implementation(libs.media3.database)
 
     // Hilt

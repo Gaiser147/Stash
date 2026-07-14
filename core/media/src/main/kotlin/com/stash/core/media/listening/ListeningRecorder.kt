@@ -3,10 +3,12 @@ package com.stash.core.media.listening
 import android.util.Log
 import androidx.annotation.VisibleForTesting
 import com.stash.core.data.db.dao.ListeningEventDao
+import com.stash.core.data.lastfm.LastFmScrobbler
 import com.stash.core.data.db.dao.TrackSkipEventDao
 import com.stash.core.data.db.entity.ListeningEventEntity
 import com.stash.core.data.db.entity.TrackSkipEventEntity
 import com.stash.core.media.PlayerRepository
+import com.stash.core.model.RepeatMode
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -37,12 +39,16 @@ import javax.inject.Singleton
  *     play" convention. v0.9.16: a [TrackSkipEventEntity] IS recorded
  *     instead, feeding the skip-rate penalty in
  *     [com.stash.core.data.mix.MixGenerator].
+ *   - When repeat-one is active, a position reset back to near zero
+ *     on the same track is treated as a new play session so each loop
+ *     counts as a separate scrobble.
  */
 @Singleton
 class ListeningRecorder @VisibleForTesting internal constructor(
     private val playerRepository: PlayerRepository,
     private val listeningEventDao: ListeningEventDao,
     private val trackSkipEventDao: TrackSkipEventDao,
+    private val scrobbler: LastFmScrobbler,
     private val scope: CoroutineScope,
 ) {
 
@@ -51,10 +57,12 @@ class ListeningRecorder @VisibleForTesting internal constructor(
         playerRepository: PlayerRepository,
         listeningEventDao: ListeningEventDao,
         trackSkipEventDao: TrackSkipEventDao,
+        scrobbler: LastFmScrobbler,
     ) : this(
         playerRepository = playerRepository,
         listeningEventDao = listeningEventDao,
         trackSkipEventDao = trackSkipEventDao,
+        scrobbler = scrobbler,
         scope = CoroutineScope(SupervisorJob() + Dispatchers.IO),
     )
 
@@ -78,6 +86,7 @@ class ListeningRecorder @VisibleForTesting internal constructor(
 
     /** Must be called exactly once from Application.onCreate. */
     fun start() {
+        // ── Collector 1: track-change transitions ─────────────────────
         scope.launch {
             // Drop repeats on the SAME track id so we only react to track
             // transitions. Pause/resume mid-track re-emits the same state
@@ -118,39 +127,103 @@ class ListeningRecorder @VisibleForTesting internal constructor(
 
                     // 2. Schedule the new track's threshold-fire.
                     val track = state.currentTrack ?: return@collect
-                    val sessionStart = System.currentTimeMillis()
-                    val threshold = thresholdFor(track.durationMs)
-                    val firedFlag = AtomicBoolean(false)
-                    val job = scope.launch {
-                        delay(threshold)
-                        val nowPlaying = playerRepository.playerState.value.currentTrack?.id
-                        if (nowPlaying == track.id) {
-                            // Mark fired BEFORE the insert so a race with
-                            // the next track-change collector observes
-                            // the correct state when it reads .get().
-                            firedFlag.set(true)
-                            runCatching {
-                                listeningEventDao.insert(
-                                    ListeningEventEntity(
-                                        trackId = track.id,
-                                        startedAt = sessionStart,
-                                        scrobbled = false,
-                                        // v0.9.13: insert IS the completion event — recorder only fires
-                                        // after threshold delay. AutoSaveScrobbler reads completed_at.
-                                        completedAt = sessionStart,
-                                    ),
-                                )
-                            }.onFailure { Log.w(TAG, "Failed to insert listening event", it) }
-                        }
-                    }
-                    pending = PendingFire(
-                        trackId = track.id,
-                        sessionStart = sessionStart,
-                        job = job,
-                        firedFlag = firedFlag,
-                        positionAtScheduleMs = playerRepository.playerState.value.positionMs,
-                    )
+                    schedulePendingFire(track.id, track.artist, track.title, track.album, track.durationMs)
                 }
+        }
+
+        // ── Collector 2: repeat-one loop detection ────────────────────
+        scope.launch {
+            var lastPositionMs = 0L
+            var lastTrackId = -1L
+            playerRepository.currentPosition
+                .collect { positionMs ->
+                    val state = playerRepository.playerState.value
+                    val track = state.currentTrack ?: run {
+                        lastPositionMs = 0L
+                        lastTrackId = -1L
+                        return@collect
+                    }
+
+                    // Reset position tracking on track change so a manual
+                    // switch from a far-into track A to track B doesn't
+                    // misfire as a repeat-one loop.
+                    if (track.id != lastTrackId) {
+                        lastPositionMs = 0L
+                        lastTrackId = track.id
+                        return@collect
+                    }
+
+                    val isRepeatOne = state.repeatMode == RepeatMode.ONE
+                    // Require near-zero landing position (< 5s) to distinguish
+                    // a genuine loop restart from a user scrubbing backwards.
+                    val positionJumpedBack = lastPositionMs > 10_000L
+                        && positionMs < 5_000L
+
+                    if (isRepeatOne && positionJumpedBack) {
+                        Log.d(TAG, "repeat detected for track ${track.id} — scheduling new fire")
+                        pending?.job?.cancel()
+                        pending = null
+                        schedulePendingFire(
+                            track.id, track.artist, track.title,
+                            track.album, track.durationMs,
+                        )
+                    }
+
+                    lastPositionMs = positionMs
+                }
+        }
+    }
+
+    /**
+     * Schedules a threshold-fire for the given track. Shared by both the
+     * track-change collector and the repeat-one loop detector so the
+     * insert + now-playing logic stays in one place.
+     */
+    private fun schedulePendingFire(
+        trackId: Long,
+        artist: String,
+        title: String,
+        album: String,
+        durationMs: Long,
+    ) {
+        val sessionStart = System.currentTimeMillis()
+        val threshold = thresholdFor(durationMs)
+        val firedFlag = AtomicBoolean(false)
+        val job = scope.launch {
+            delay(threshold)
+            val nowPlaying = playerRepository.playerState.value.currentTrack?.id
+            // Mark fired BEFORE the insert so a race with
+            // the next track-change collector observes
+            // the correct state when it reads .get().
+            if (nowPlaying == trackId) {
+                firedFlag.set(true)
+                runCatching {
+                    listeningEventDao.insert(
+                        ListeningEventEntity(
+                            trackId = trackId,
+                            startedAt = sessionStart,
+                            scrobbled = false,
+                            // v0.9.13: insert IS the completion event — recorder only fires
+                            // after threshold delay. AutoSaveScrobbler reads completed_at.
+                            completedAt = sessionStart,
+                        ),
+                    )
+                }.onFailure { Log.w(TAG, "Failed to insert listening event", it) }
+            }
+        }
+        pending = PendingFire(
+            trackId = trackId,
+            sessionStart = sessionStart,
+            job = job,
+            firedFlag = firedFlag,
+            positionAtScheduleMs = playerRepository.playerState.value.positionMs,
+        )
+        scope.launch {
+            scrobbler.notifyNowPlaying(
+                artist = artist,
+                track = title,
+                album = album.takeIf { it.isNotBlank() },
+            )
         }
     }
 

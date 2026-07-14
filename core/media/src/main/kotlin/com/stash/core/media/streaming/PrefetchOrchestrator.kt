@@ -95,7 +95,13 @@ class PrefetchOrchestrator @Inject constructor(
 
                 val track = trackDao.getById(nextTrackId) ?: return@launch
                 if (track.isDownloaded) return@launch
-                if (!track.isStreamable) return@launch
+                // Skip only rows CONFIRMED unstreamable (checked and false).
+                // Synced-library rows sit at isStreamable=false with
+                // isStreamableCheckedAt=null ("never checked" — the
+                // AvailabilityCheckWorker that set the flag is gone);
+                // gating on the bare flag silently disabled next-track
+                // prefetch for the whole synced library.
+                if (!track.isStreamable && track.isStreamableCheckedAt != null) return@launch
 
                 val resolved = streamResolver.resolve(track)
                 if (resolved != null) {

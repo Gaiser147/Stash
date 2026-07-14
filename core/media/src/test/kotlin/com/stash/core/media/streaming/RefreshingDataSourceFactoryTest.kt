@@ -31,7 +31,7 @@ import org.robolectric.RobolectricTestRunner
 class RefreshingDataSourceFactoryTest {
 
     private val fakeInner: HttpDataSource = mockk(relaxed = true)
-    private val fakeResolver: KennyyStreamResolver = mockk()
+    private val fakeResolver: StreamSourceRegistry = mockk()
     private val fakeCache: StreamUrlCache = mockk(relaxed = true)
     private val fakeTrackDao: TrackDao = mockk()
 

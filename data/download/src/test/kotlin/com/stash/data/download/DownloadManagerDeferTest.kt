@@ -4,8 +4,13 @@ import com.stash.core.data.db.dao.PlaylistDao
 import com.stash.core.data.db.dao.TrackDao
 import com.stash.core.data.lastfm.LastFmApiClient
 import com.stash.core.data.lastfm.LastFmCredentials
+import com.stash.core.model.MusicSource
+import com.stash.core.model.QualityTier
 import com.stash.core.model.Track
+import com.stash.data.download.files.AlbumArtCache
 import com.stash.data.download.files.FileOrganizer
+import com.stash.data.download.files.MetadataEmbedder
+import com.stash.data.download.lyrics.LyricsFetchTrigger
 import com.stash.data.download.lossless.LosslessSourcePreferences
 import com.stash.data.download.lossless.LosslessSourceRegistry
 import com.stash.data.download.lossless.LosslessUrlDownloader
@@ -17,7 +22,9 @@ import com.stash.data.download.matching.YtLibraryCanonicalizer
 import com.stash.data.download.prefs.QualityPreferencesManager
 import com.stash.data.download.shared.TrackFinalizer
 import io.mockk.coEvery
+import io.mockk.every
 import io.mockk.mockk
+import kotlinx.coroutines.flow.flowOf
 import kotlinx.coroutines.test.runTest
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
@@ -55,6 +62,15 @@ class DownloadManagerDeferTest {
     private val losslessPrefs: LosslessSourcePreferences = mockk(relaxed = true)
     private val trackFinalizer: TrackFinalizer = mockk(relaxed = true)
     private val loudnessMeasurer: com.stash.core.data.audio.LoudnessMeasurer = mockk(relaxed = true)
+    private val metadataEmbedder: MetadataEmbedder = mockk(relaxed = true)
+    private val albumArtCache: AlbumArtCache = mockk(relaxed = true)
+    private val lyricsFetchTrigger: LyricsFetchTrigger = mockk(relaxed = true)
+    private val audioDurationExtractor: com.stash.core.data.audio.AudioDurationExtractor =
+        mockk(relaxed = true)
+    private val losslessHealthGate: com.stash.data.download.lossless.LosslessSourceHealthGate =
+        mockk(relaxed = true)
+    private val navidromeExportScheduler: com.stash.core.data.sync.NavidromeExportScheduler =
+        mockk(relaxed = true)
 
     private fun newSubject(): DownloadManager = DownloadManager(
         downloadExecutor = downloadExecutor,
@@ -74,6 +90,12 @@ class DownloadManagerDeferTest {
         losslessPrefs = losslessPrefs,
         trackFinalizer = trackFinalizer,
         loudnessMeasurer = loudnessMeasurer,
+        metadataEmbedder = metadataEmbedder,
+        albumArtCache = albumArtCache,
+        lyricsFetchTrigger = lyricsFetchTrigger,
+        audioDurationExtractor = audioDurationExtractor,
+        losslessHealthGate = losslessHealthGate,
+        navidromeExportScheduler = navidromeExportScheduler,
     )
 
     private fun stubTrack(): Track = Track(
@@ -114,6 +136,59 @@ class DownloadManagerDeferTest {
         val result = newSubject().downloadTrack(track = stubTrack(), preResolvedUrl = null)
 
         assertFalse("did not defer, got $result", result is TrackDownloadResult.Deferred)
+    }
+
+    @Test
+    fun `fallback-off + Spotify track WITH preResolvedUrl defers (does not download lossy)`() = runTest {
+        // THE LEAK: a Spotify track acquires a youtube_id from match-for-
+        // playback, which the queue turns into a youtubeUrl → preResolvedUrl.
+        // Pre-fix, the preResolvedUrl carve-out skipped the defer and the
+        // track downloaded as lossy mp4 even with fallback OFF (671 such
+        // tracks observed on-device). A SPOTIFY-source track's youtube_id is
+        // a match, NOT a user opt-in to YouTube, so it must defer.
+        coEvery { losslessPrefs.enabledNow() } returns true
+        coEvery { losslessPrefs.youtubeFallbackEnabledNow() } returns false
+        coEvery { losslessRegistry.resolve(any()) } returns null
+        coEvery { playlistDao.isTrackInStashMix(any()) } returns false
+        // Stub the fall-through path so that, PRE-fix, the test fails on the
+        // assertion (returns a non-Deferred result) rather than throwing
+        // inside the yt-dlp branch.
+        every { qualityPrefs.qualityTier } returns flowOf(QualityTier.MAX)
+        coEvery { downloadExecutor.download(any(), any(), any(), any(), any()) } returns
+            DownloadResult.Error("test-stop")
+
+        val result = newSubject().downloadTrack(
+            track = stubTrack(), // source defaults to SPOTIFY
+            preResolvedUrl = "https://music.youtube.com/watch?v=abc",
+        )
+
+        assertTrue(
+            "Spotify track with a youtube_id match must defer when fallback off, got $result",
+            result is TrackDownloadResult.Deferred,
+        )
+    }
+
+    @Test
+    fun `fallback-off + YouTube-source track WITH preResolvedUrl now defers (no lossy YouTube download)`() = runTest {
+        // Fallback off means NO opus/m4a from the YouTube path — period. A
+        // genuinely YouTube-sourced track (source = YOUTUBE) used to fall
+        // through to yt-dlp here via the youtubeOptIn carve-out; that carve-out
+        // is removed so it defers like every other non-Stash-Mix track,
+        // matching SearchDownloadCoordinator's unconditional gate.
+        coEvery { losslessPrefs.enabledNow() } returns true
+        coEvery { losslessPrefs.youtubeFallbackEnabledNow() } returns false
+        coEvery { losslessRegistry.resolve(any()) } returns null
+        coEvery { playlistDao.isTrackInStashMix(any()) } returns false
+
+        val result = newSubject().downloadTrack(
+            track = stubTrack().copy(source = MusicSource.YOUTUBE),
+            preResolvedUrl = "https://music.youtube.com/watch?v=abc",
+        )
+
+        assertTrue(
+            "YouTube-source track must defer when fallback off, got $result",
+            result is TrackDownloadResult.Deferred,
+        )
     }
 
     @Test

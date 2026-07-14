@@ -2,23 +2,49 @@
 <manifest xmlns:android="http://schemas.android.com/apk/res/android"
     xmlns:tools="http://schemas.android.com/tools">
     <uses-permission android:name="android.permission.INTERNET" />
+    <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MEDIA_PLAYBACK" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_DATA_SYNC" />
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
     <uses-permission android:name="android.permission.WAKE_LOCK" />
     <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED" />
+    <!--
+        largeHeap: MITIGATION for the v0.9.73 OOM reports (#238/#239) — users
+        exhaust the default 256MB Java heap ("<1% free after GC"). Doubles the
+        headroom while the crash-report memory diagnostics identify what fills
+        it. Remove once the root cause is fixed.
+    -->
     <application
         android:name=".StashApplication"
         android:allowBackup="false"
         android:fullBackupContent="false"
         android:extractNativeLibs="true"
         android:icon="@mipmap/ic_launcher"
-        android:label="@string/app_name"
+        android:label="${appLabel}"
+        android:largeHeap="true"
         android:networkSecurityConfig="@xml/network_security_config"
         android:roundIcon="@mipmap/ic_launcher_round"
         android:supportsRtl="true"
         android:theme="@style/Theme.Stash">
+        <!--
+            No-UI trampoline launched by the "Resume playback" app shortcut
+            (and Samsung Bixby Routines). Resumes the last queue and finishes
+            immediately, so it uses Theme.NoDisplay and is kept out of the
+            recents/back stack. exported=true so Routines can launch it.
+        -->
+        <!--
+            Launched explicitly (by class) from the "Resume playback" static
+            shortcut, so it needs no intent-filter — only exported=true so the
+            launcher / Bixby Routines can start it from another process.
+        -->
+        <activity
+            android:name=".ResumePlaybackActivity"
+            android:exported="true"
+            android:excludeFromRecents="true"
+            android:noHistory="true"
+            android:taskAffinity=""
+            android:theme="@android:style/Theme.NoDisplay" />
         <activity android:name=".MainActivity" android:exported="true" android:theme="@style/Theme.Stash">
             <intent-filter>
                 <action android:name="android.intent.action.MAIN" />
@@ -41,6 +67,11 @@
                 <category android:name="android.intent.category.DEFAULT" />
                 <data android:mimeType="audio/*" />
             </intent-filter>
+            <!-- Static app shortcuts (e.g. "Resume playback"). Must live on
+                 the launcher activity. -->
+            <meta-data
+                android:name="android.app.shortcuts"
+                android:resource="@xml/shortcuts" />
         </activity>
         <receiver
             android:name="com.stash.core.data.sync.BootReceiver"

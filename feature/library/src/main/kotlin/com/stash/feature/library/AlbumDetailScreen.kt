@@ -1,5 +1,6 @@
 package com.stash.feature.library
 
+import androidx.activity.compose.BackHandler
 import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
@@ -23,7 +24,12 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.filled.Album
+import androidx.compose.material.icons.filled.Download
+import androidx.compose.material.icons.filled.DownloadDone
 import androidx.compose.material.icons.filled.PlayArrow
+import androidx.compose.material.icons.filled.PlaylistAdd
+import androidx.compose.material.icons.filled.PlaylistAddCheck
+import androidx.compose.material.icons.filled.PlaylistPlay
 import androidx.compose.material.icons.filled.Search
 import androidx.compose.material.icons.filled.Shuffle
 import androidx.compose.material3.Button
@@ -35,9 +41,13 @@ import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.ModalBottomSheet
 import androidx.compose.material3.OutlinedButton
+import androidx.compose.material3.Snackbar
+import androidx.compose.material3.SnackbarHost
+import androidx.compose.material3.SnackbarHostState
 import androidx.compose.material3.Text
 import androidx.compose.material3.rememberModalBottomSheetState
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -54,10 +64,14 @@ import androidx.compose.ui.unit.dp
 import androidx.hilt.navigation.compose.hiltViewModel
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import coil3.compose.AsyncImage
+import com.stash.core.media.BulkPlayAction
 import com.stash.core.model.Track
 import com.stash.core.ui.components.DetailTrackRow
 import com.stash.core.ui.components.SearchFilterBar
 import com.stash.core.ui.components.TrackOptionsSheet
+import com.stash.core.ui.selection.SelectionAction
+import com.stash.core.ui.selection.SelectionScaffoldOverlay
+import com.stash.core.ui.selection.rememberSelectionState
 import com.stash.core.ui.theme.StashTheme
 import com.stash.core.ui.util.formatTotalDuration
 
@@ -76,9 +90,12 @@ import com.stash.core.ui.util.formatTotalDuration
 @Composable
 fun AlbumDetailScreen(
     onBack: () -> Unit,
+    onSelectionModeChanged: (Boolean) -> Unit = {},
     viewModel: AlbumDetailViewModel = hiltViewModel(),
 ) {
     val state by viewModel.uiState.collectAsStateWithLifecycle()
+    val tappedTrackId by viewModel.tappedTrackId.collectAsStateWithLifecycle()
+    val bulkPlayInFlight by viewModel.bulkPlayInFlight.collectAsStateWithLifecycle()
     val extendedColors = StashTheme.extendedColors
 
     // Bottom sheet state for the long-press track menu.
@@ -86,6 +103,22 @@ fun AlbumDetailScreen(
     var trackToSave by remember { mutableStateOf<Track?>(null) }
     val sheetState = rememberModalBottomSheetState()
     val userPlaylists by viewModel.userPlaylists.collectAsStateWithLifecycle(initialValue = emptyList())
+
+    // Multi-select state. `isActive` (non-empty selection) drives the contextual
+    // chrome and is signalled out so the host can hide the mini-player (Task 7).
+    val selection = rememberSelectionState()
+    LaunchedEffect(selection.isActive) { onSelectionModeChanged(selection.isActive) }
+    BackHandler(enabled = selection.isActive) { selection.clear() }
+
+    // Batch Save sheet flag: distinguishes the batch Save surface from the
+    // single-track path that shares the same SaveToPlaylistSheet composable.
+    var showBatchSave by remember { mutableStateOf(false) }
+
+    // Snackbar for the batch download roll-up summaries.
+    val snackbarHostState = remember { SnackbarHostState() }
+    LaunchedEffect(Unit) {
+        viewModel.userMessages.collect { snackbarHostState.showSnackbar(it) }
+    }
 
     Box(
         modifier = Modifier
@@ -100,12 +133,13 @@ fun AlbumDetailScreen(
         } else {
             LazyColumn(
                 modifier = Modifier.fillMaxSize(),
-                contentPadding = PaddingValues(bottom = 120.dp),
+                contentPadding = PaddingValues(bottom = if (selection.isActive) 140.dp else 120.dp),
             ) {
                 // -- Header section --
                 item(key = "header") {
                     AlbumDetailHeader(
                         state = state,
+                        bulkPlayInFlight = bulkPlayInFlight,
                         onBack = onBack,
                         onPlayAll = {
                             val firstTrack = state.tracks.firstOrNull { it.filePath != null }
@@ -154,9 +188,16 @@ fun AlbumDetailScreen(
                         track = track,
                         trackNumber = index + 1,
                         isPlaying = track.id == state.currentlyPlayingTrackId,
-                        onClick = { viewModel.playTrack(track.id) },
-                        onLongPress = { selectedTrack = track },
+                        onClick = {
+                            if (selection.isActive) selection.toggle(track.id)
+                            else viewModel.playTrack(track.id)
+                        },
+                        onLongPress = { if (!selection.isActive) selection.enter(track.id) },
                         showArtist = false,
+                        isResolving = track.id == tappedTrackId,
+                        selectionActive = selection.isActive,
+                        selected = selection.isSelected(track.id),
+                        onMoreClick = { selectedTrack = track },
                     )
 
                     if (index < state.tracks.lastIndex) {
@@ -169,6 +210,43 @@ fun AlbumDetailScreen(
                 }
             }
         }
+
+        // ── Selection chrome (overlaid contextual top + bottom bars) ────────
+        val selectedTracks = state.tracks.filter { it.id in selection.selectedIds }
+        val selectedIds = selection.selectedIds.toList()
+
+        // Aggregate download state: if every selected track is already on disk,
+        // offer Remove download; otherwise offer Download.
+        val allDownloaded = selectedTracks.isNotEmpty() && selectedTracks.all { it.isDownloaded }
+
+        // Album detail has exactly four actions (no Delete) — all fit inline,
+        // so none collapse into the ⋮ overflow.
+        val selectionActions = listOf(
+            SelectionAction("add_queue", "Add to queue", Icons.Default.PlaylistAdd) {
+                viewModel.addSelectedToQueue(selectedTracks); selection.clear()
+            },
+            SelectionAction("add_playlist", "Add to playlist", Icons.Default.PlaylistAddCheck) {
+                showBatchSave = true
+            },
+            if (allDownloaded) {
+                SelectionAction("remove_download", "Remove download", Icons.Default.DownloadDone) {
+                    viewModel.removeDownloadsForSelected(selectedIds); selection.clear()
+                }
+            } else {
+                SelectionAction("download", "Download", Icons.Default.Download) {
+                    viewModel.downloadSelected(selectedIds); selection.clear()
+                }
+            },
+            SelectionAction("play_next", "Play next", Icons.Default.PlaylistPlay) {
+                viewModel.playSelectedNext(selectedTracks); selection.clear()
+            },
+        )
+
+        SelectionScaffoldOverlay(
+            selection = selection,
+            allIds = state.tracks.map { it.id },
+            actions = selectionActions,
+        )
     }
 
     // -- Track options bottom sheet --
@@ -217,6 +295,36 @@ fun AlbumDetailScreen(
             onDismiss = { trackToSave = null },
         )
     }
+
+    // ── Batch Save to Playlist sheet ───────────────────────────────────────
+    // Reuses the same composable as the single-track path; the batch flag picks
+    // the multi-id callbacks and clears the selection once the save dispatches.
+    if (showBatchSave) {
+        val batchIds = selection.selectedIds.toList()
+        com.stash.core.ui.components.SaveToPlaylistSheet(
+            playlists = userPlaylists.map {
+                com.stash.core.ui.components.PlaylistInfo(it.id, it.name, it.trackCount)
+            },
+            onSaveToPlaylist = { playlistId ->
+                viewModel.saveSelectedToPlaylist(batchIds, playlistId)
+                showBatchSave = false
+                selection.clear()
+            },
+            onCreatePlaylist = { name ->
+                viewModel.createPlaylistAndAddTracks(name, batchIds)
+                showBatchSave = false
+                selection.clear()
+            },
+            onDismiss = { showBatchSave = false },
+        )
+    }
+
+    SnackbarHost(
+        hostState = snackbarHostState,
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(bottom = 16.dp),
+    ) { data -> Snackbar(snackbarData = data) }
 }
 
 // -- Header composable --
@@ -228,6 +336,7 @@ fun AlbumDetailScreen(
 @Composable
 private fun AlbumDetailHeader(
     state: AlbumDetailUiState,
+    bulkPlayInFlight: BulkPlayAction?,
     onBack: () -> Unit,
     onPlayAll: () -> Unit,
     onShuffle: () -> Unit,
@@ -391,19 +500,24 @@ private fun AlbumDetailHeader(
                     Text(text = "Play All", style = MaterialTheme.typography.labelLarge)
                 }
 
-                OutlinedButton(
-                    onClick = onShuffle,
+                BulkPlayButtonBox(
                     modifier = Modifier.weight(1f),
-                    contentPadding = PaddingValues(vertical = 12.dp),
-                    shape = RoundedCornerShape(12.dp),
+                    showProgress = bulkPlayInFlight == BulkPlayAction.SHUFFLE_ALL,
                 ) {
-                    Icon(
-                        imageVector = Icons.Default.Shuffle,
-                        contentDescription = null,
-                        modifier = Modifier.size(20.dp),
-                    )
-                    Spacer(modifier = Modifier.width(8.dp))
-                    Text(text = "Shuffle", style = MaterialTheme.typography.labelLarge)
+                    OutlinedButton(
+                        onClick = onShuffle,
+                        modifier = Modifier.fillMaxWidth(),
+                        contentPadding = PaddingValues(vertical = 12.dp),
+                        shape = RoundedCornerShape(12.dp),
+                    ) {
+                        Icon(
+                            imageVector = Icons.Default.Shuffle,
+                            contentDescription = null,
+                            modifier = Modifier.size(20.dp),
+                        )
+                        Spacer(modifier = Modifier.width(8.dp))
+                        Text(text = "Shuffle", style = MaterialTheme.typography.labelLarge)
+                    }
                 }
 
                 Spacer(modifier = Modifier.width(8.dp))

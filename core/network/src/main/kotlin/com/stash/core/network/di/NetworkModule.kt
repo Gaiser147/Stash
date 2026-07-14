@@ -4,7 +4,9 @@ import dagger.Module
 import dagger.Provides
 import dagger.hilt.InstallIn
 import dagger.hilt.components.SingletonComponent
+import dagger.multibindings.Multibinds
 import okhttp3.ConnectionSpec
+import okhttp3.Interceptor
 import okhttp3.OkHttpClient
 import okhttp3.logging.HttpLoggingInterceptor
 import java.util.concurrent.TimeUnit
@@ -31,7 +33,9 @@ object NetworkModule {
 
     @Provides
     @Singleton
-    fun provideOkHttpClient(): OkHttpClient {
+    fun provideOkHttpClient(
+        appInterceptors: Set<@JvmSuppressWildcards Interceptor>,
+    ): OkHttpClient {
         val loggingInterceptor = HttpLoggingInterceptor().apply {
             level = if (com.stash.core.network.BuildConfig.DEBUG) {
                 HttpLoggingInterceptor.Level.BASIC
@@ -44,10 +48,33 @@ object NetworkModule {
 
         return OkHttpClient.Builder()
             .connectionSpecs(listOf(ConnectionSpec.MODERN_TLS))
+            // Survive the device resolver failing under the sync's 8-way download
+            // burst (UnknownHostException for several simultaneous lookups of the
+            // same host, while single requests resolve fine — the reason downloads
+            // "fell flat" while streaming worked). Caches + coalesces + retries.
+            .dns(com.stash.core.network.dns.ResilientDns())
             .connectTimeout(TIMEOUT_SECONDS, TimeUnit.SECONDS)
             .readTimeout(TIMEOUT_SECONDS, TimeUnit.SECONDS)
             .writeTimeout(TIMEOUT_SECONDS, TimeUnit.SECONDS)
             .addInterceptor(loggingInterceptor)
+            .apply { appInterceptors.forEach { addInterceptor(it) } }
             .build()
     }
+}
+
+/**
+ * Declares the multibinding consumed by [NetworkModule.provideOkHttpClient].
+ *
+ * Lives in a separate interface module because [NetworkModule] is an `object`
+ * and cannot host the abstract `@Multibinds` method.
+ */
+@Module
+@InstallIn(SingletonComponent::class)
+interface NetworkInterceptorsModule {
+    /**
+     * App-contributed OkHttp interceptors installed on the shared client.
+     * Resolves to an empty set when nothing contributes.
+     */
+    @Multibinds
+    fun appInterceptors(): Set<@JvmSuppressWildcards Interceptor>
 }

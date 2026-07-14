@@ -4,8 +4,8 @@ import com.google.common.truth.Truth.assertThat
 import com.stash.core.data.db.dao.TrackDao
 import com.stash.core.data.db.entity.TrackEntity
 import com.stash.core.data.prefs.StreamingPreference
-import com.stash.core.media.streaming.KennyyStreamResolver
 import com.stash.core.media.streaming.PrefetchOrchestrator
+import com.stash.core.media.streaming.StreamSourceRegistry
 import com.stash.core.media.streaming.StreamUrl
 import com.stash.core.media.streaming.StreamUrlCache
 import io.mockk.coEvery
@@ -42,7 +42,7 @@ import org.junit.Test
 class StreamingPrefetchTest {
 
     private val streamingPreference: StreamingPreference = mockk()
-    private val streamResolver: KennyyStreamResolver = mockk()
+    private val streamResolver: StreamSourceRegistry = mockk()
     private val streamUrlCache: StreamUrlCache = mockk(relaxUnitFun = true)
     private val trackDao: TrackDao = mockk()
 
@@ -158,9 +158,16 @@ class StreamingPrefetchTest {
 
     @Test
     fun progress_above60Percent_butNotStreamable_doesNotResolve() = runTest {
-        // Defense-in-depth — a row marked isStreamable=false should
-        // never be sent to Kennyy.
-        val nextTrack = streamableTrack(id = 99L).copy(isStreamable = false)
+        // Defense-in-depth — a row CONFIRMED unstreamable (checked and
+        // false) is never sent to a resolver. Unchecked rows
+        // (isStreamableCheckedAt = null) DO resolve: the synced library
+        // sits entirely unchecked since AvailabilityCheckWorker was
+        // removed, and gating on the bare flag silently killed
+        // next-track prefetch for all of it.
+        val nextTrack = streamableTrack(id = 99L).copy(
+            isStreamable = false,
+            isStreamableCheckedAt = 1_700_000_000_000L,
+        )
         coEvery { streamingPreference.current() } returns true
         coEvery { streamUrlCache.get(99L) } returns null
         coEvery { trackDao.getById(99L) } returns nextTrack

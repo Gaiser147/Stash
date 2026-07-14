@@ -65,6 +65,26 @@ data class SettingsUiState(
      */
     val losslessQualityTier: LosslessQualityTier = LosslessQualityTier.HI_RES,
     /**
+     * Streaming lossless tier requested while on Wi-Fi. Distinct from the
+     * download tier ([losslessQualityTier]); backed by
+     * [com.stash.data.download.prefs.StreamingQualityPreferences.wifiTier].
+     * Defaults to HI_RES (full quality on unmetered transport).
+     */
+    val streamingWifiTier: LosslessQualityTier = LosslessQualityTier.HI_RES,
+    /**
+     * Streaming lossless tier requested while on cellular. Defaults to CD —
+     * the data-saving floor — so metered streaming stays light unless the
+     * user opts up. Backed by
+     * [com.stash.data.download.prefs.StreamingQualityPreferences.cellularTier].
+     */
+    val streamingCellularTier: LosslessQualityTier = LosslessQualityTier.CD,
+    /**
+     * Master "Save Data" override for streaming. When true, callers force
+     * CD on every network regardless of the per-transport tiers. Backed by
+     * [com.stash.data.download.prefs.StreamingQualityPreferences.saveData].
+     */
+    val streamingSaveData: Boolean = false,
+    /**
      * Manually-pasted `captcha_verified_at` cookie value from
      * `qobuz.squid.wtf`. Bridges the captcha gate when the user
      * prefers manual paste over the in-app WebView solver — they
@@ -86,6 +106,12 @@ data class SettingsUiState(
      * solver from the user. See `squidCaptchaStatus` mapping fn.
      */
     val squidCaptchaStatus: SquidCaptchaStatus = SquidCaptchaStatus.NotConfigured,
+    /**
+     * True when an ARCOD (arcod.xyz) Supabase session is stored — i.e. the
+     * user has connected ARCOD as a third independent lossless source.
+     * Drives the "Connect ARCOD" row's label.
+     */
+    val arcodConnected: Boolean = false,
     val totalStorageBytes: Long = 0,
     val totalTracks: Int = 0,
     val showYouTubeCookieDialog: Boolean = false,
@@ -127,6 +153,11 @@ data class SettingsUiState(
     val heartDefaultYtMusic: Boolean = false,
     /** v0.9.13: count of tracks auto-saved in the last 7 days, for the diagnostics line. */
     val autoSavedCountLast7Days: Int = 0,
+    /** v0.9.52 like-mirroring: per-service opt-in (default off), gated behind the warning dialog. */
+    val mirrorLikesSpotify: Boolean = false,
+    val mirrorLikesYtMusic: Boolean = false,
+    /** Non-null while the "I understand" warning dialog is showing for that destination. */
+    val pendingMirrorWarning: com.stash.core.data.social.Destination? = null,
     /**
      * v0.9.17: when lossless is on, controls whether yt-dlp is allowed
      * to take over a track that no lossless source could resolve. When
@@ -147,6 +178,31 @@ data class SettingsUiState(
     val databaseBackupState: DatabaseBackupState = DatabaseBackupState.Idle,
     /** Whether the import confirmation dialog is showing. */
     val showImportConfirmation: Boolean = false,
+    /** Optional, one-way Stash-to-Navidrome export state. */
+    val navidromeExportEnabled: Boolean = false,
+    val navidromeExportUrl: String = "",
+    val navidromeExportTokenConfigured: Boolean = false,
+    val navidromeExportTokenError: Boolean = false,
+    val navidromeExportWifiOnly: Boolean = true,
+    val navidromeExportChargingOnly: Boolean = true,
+    val navidromeExportLastAttemptAt: Long = 0L,
+    val navidromeExportLastSuccessAt: Long = 0L,
+    val navidromeExportLastResult: String = "",
+    val navidromeExportConnectionChecking: Boolean = false,
+    val navidromeExportMessage: String? = null,
+    /** Optional, private Muse-to-Stash acquisition inbox. Off by default. */
+    val museAcquisitionEnabled: Boolean = false,
+    val museAcquisitionUrl: String = "",
+    val museAcquisitionTokenConfigured: Boolean = false,
+    val museAcquisitionTokenError: Boolean = false,
+    val museAcquisitionWifiOnly: Boolean = true,
+    val museAcquisitionChargingOnly: Boolean = true,
+    val museAcquisitionLastAttemptAt: Long = 0L,
+    val museAcquisitionLastSuccessAt: Long = 0L,
+    val museAcquisitionLastResult: String = "",
+    val museAcquisitionPendingCount: Int = 0,
+    val museAcquisitionConnectionChecking: Boolean = false,
+    val museAcquisitionMessage: String? = null,
 )
 
 /**

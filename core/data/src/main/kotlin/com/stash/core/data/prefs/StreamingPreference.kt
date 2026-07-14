@@ -47,6 +47,13 @@ class StreamingPreference @Inject constructor(
     private val enabledKey = booleanPreferencesKey("streaming_enabled")
     private val cellularKey = booleanPreferencesKey("streaming_on_cellular")
     private val qualityKey = stringPreferencesKey("streaming_quality_tier")
+    private val forceYouTubeFallbackKey = booleanPreferencesKey("force_youtube_fallback")
+    private val forceArcodOnlyKey = booleanPreferencesKey("force_arcod_only")
+    private val forceAmzOnlyKey = booleanPreferencesKey("force_amz_only")
+    private val forceQbdlxOnlyKey = booleanPreferencesKey("force_qbdlx_only")
+    // Retained only so [purgeRetiredKeys] can delete it from existing
+    // installs; the antra source was removed (see fix/remove-antra).
+    private val forceAntraOnlyKey = booleanPreferencesKey("force_antra_only")
 
     val enabled: Flow<Boolean> = context.streamingDataStore.data.map { prefs ->
         prefs[enabledKey] ?: false
@@ -61,7 +68,61 @@ class StreamingPreference @Inject constructor(
             .getOrDefault(StreamQualityTier.LOSSLESS)
     }
 
+    /**
+     * Test-only toggle. When `true`, [StreamSourceRegistry] skips Kennyy
+     * and Squid and resolves every streaming track via the YouTube
+     * fallback resolver only — used to reproduce the lossless-down path
+     * on demand. Default `false` (normal use).
+     */
+    val forceYouTubeFallback: Flow<Boolean> = context.streamingDataStore.data.map { prefs ->
+        prefs[forceYouTubeFallbackKey] ?: false
+    }
+
+    /**
+     * Test-only toggle. When `true`, both the streaming and download
+     * registries route through ARCOD ONLY (skip kennyy/squid/YouTube) — so
+     * the ARCOD source can be exercised on demand even when the Qobuz proxies
+     * are healthy. Default `false` (normal use). Takes precedence over
+     * [forceAmzOnly] and [forceYouTubeFallback].
+     */
+    val forceArcodOnly: Flow<Boolean> = context.streamingDataStore.data.map { prefs ->
+        prefs[forceArcodOnlyKey] ?: false
+    }
+
+    /**
+     * Test-only toggle. When `true`, BOTH the streaming registry
+     * ([StreamSourceRegistry]) and the lossless-download registry
+     * ([LosslessSourceRegistry]) route through the amz (Amazon Music)
+     * source ONLY — Kennyy, Squid, and YouTube are removed from play so a
+     * track either resolves via amz or fails visibly. Used to exercise the
+     * amz source on demand (it normally ranks last and is hard to trigger).
+     * Default `false` (normal use).
+     */
+    val forceAmzOnly: Flow<Boolean> = context.streamingDataStore.data.map { prefs ->
+        prefs[forceAmzOnlyKey] ?: false
+    }
+
+    /**
+     * Test-only toggle. When `true`, BOTH the streaming ([StreamSourceRegistry])
+     * and lossless-download ([LosslessSourceRegistry]) registries route through
+     * the qbdlx (direct-Qobuz) source ONLY — kennyy/squid/arcod/amz/YouTube are
+     * removed from play so a track either resolves via qbdlx or fails visibly.
+     * Used to exercise qbdlx on demand (it normally ranks last and is hard to
+     * trigger). Default `false` (normal use).
+     */
+    val forceQbdlxOnly: Flow<Boolean> = context.streamingDataStore.data.map { prefs ->
+        prefs[forceQbdlxOnlyKey] ?: false
+    }
+
     suspend fun current(): Boolean = enabled.first()
+
+    suspend fun isForceYouTubeFallback(): Boolean = forceYouTubeFallback.first()
+
+    suspend fun isForceArcodOnly(): Boolean = forceArcodOnly.first()
+
+    suspend fun isForceAmzOnly(): Boolean = forceAmzOnly.first()
+
+    suspend fun isForceQbdlxOnly(): Boolean = forceQbdlxOnly.first()
 
     suspend fun setEnabled(value: Boolean) {
         context.streamingDataStore.edit { it[enabledKey] = value }
@@ -71,7 +132,32 @@ class StreamingPreference @Inject constructor(
         context.streamingDataStore.edit { it[cellularKey] = value }
     }
 
+    suspend fun setForceYouTubeFallback(value: Boolean) {
+        context.streamingDataStore.edit { it[forceYouTubeFallbackKey] = value }
+    }
+
+    suspend fun setForceArcodOnly(value: Boolean) {
+        context.streamingDataStore.edit { it[forceArcodOnlyKey] = value }
+    }
+
+    suspend fun setForceAmzOnly(value: Boolean) {
+        context.streamingDataStore.edit { it[forceAmzOnlyKey] = value }
+    }
+
+    suspend fun setForceQbdlxOnly(value: Boolean) {
+        context.streamingDataStore.edit { it[forceQbdlxOnlyKey] = value }
+    }
+
     suspend fun setStreamQuality(tier: StreamQualityTier) {
         context.streamingDataStore.edit { it[qualityKey] = tier.name }
+    }
+
+    /**
+     * One-shot cleanup for the removed antra source: deletes the retired
+     * `force_antra_only` toggle from existing installs. Called once at
+     * startup (see StashApplication). No-op when the key is already absent.
+     */
+    suspend fun purgeRetiredKeys() {
+        context.streamingDataStore.edit { it.remove(forceAntraOnlyKey) }
     }
 }

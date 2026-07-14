@@ -72,6 +72,14 @@ class YTMusicApiClient @Inject constructor(
 
         /** Backoff delays (ms) between retries on transient failures. */
         private val RETRY_BACKOFFS_MS = listOf(500L, 1500L)
+
+        /**
+         * ytmusicapi-derived filter selector constraining search to the "Artists"
+         * shelf. Forces the clean `musicShelfRenderer` shape (vs. the flat
+         * `itemSectionRenderer` variant ambiguous queries otherwise return, where
+         * no artist shelf parses). Verified live: top row = Official Artist Channel.
+         */
+        private const val ARTISTS_FILTER = "EgWKAQIgAWoKEAkQChAFEAMQBA%3D%3D"
     }
 
     /**
@@ -243,6 +251,21 @@ class YTMusicApiClient @Inject constructor(
      * @param query The search query string as typed by the user.
      * @return An ordered list of sections; empty if nothing matched.
      */
+    /**
+     * Resolve a single best YouTube **videoId** for [artist]/[title] via the
+     * songs-FILTERED canonical matcher (the same path the download flow trusts).
+     * Title-agnostic and prefers Topic/official audio (ATV/OMV). Far more robust
+     * than [searchAll] for streaming fallback — `searchAll` gates on a literal
+     * "Songs" shelf title and returns nothing for tracks YouTube labels
+     * differently (older / compilation catalog), which silently broke playback.
+     */
+    suspend fun searchCanonicalVideoId(artist: String, title: String): String? =
+        innerTubeClient.searchCanonical(artist, title)
+
+    /** [searchCanonicalVideoId] plus the matched song's square album art. */
+    suspend fun searchCanonicalMatch(artist: String, title: String): CanonicalMatch? =
+        innerTubeClient.searchCanonicalMatch(artist, title)
+
     suspend fun searchAll(query: String): SearchAllResults {
         val response = innerTubeClient.search(query)
             ?: return SearchAllResults(emptyList())
@@ -282,6 +305,34 @@ class YTMusicApiClient @Inject constructor(
 
         Log.d(TAG, "searchAll('$query'): ${sections.size} sections")
         return SearchAllResults(sections)
+    }
+
+    /**
+     * Resolve an artist name to its YouTube Music browse identity. Runs an
+     * artists-filtered search and returns the top [ArtistSummary] (browseId,
+     * name, avatar), or null when the name is blank / there is no artist result
+     * / on failure.
+     *
+     * Used by the Now Playing "tap track → artist profile" flow, where the
+     * playing [com.stash.core.model.Track] carries only an artist NAME, not a
+     * browseId. The name is passed raw (YT search handles multi-artist and
+     * band-name credits); parsing reuses [parseArtistsShelf].
+     */
+    suspend fun resolveArtist(name: String): ArtistSummary? {
+        if (name.isBlank()) return null
+        val response = innerTubeClient.search(name, params = ARTISTS_FILTER) ?: return null
+        val shelves = response.navigatePath(
+            "contents", "tabbedSearchResultsRenderer", "tabs",
+        )?.firstArray()?.firstOrNull()?.asObject()
+            ?.navigatePath("tabRenderer", "content", "sectionListRenderer", "contents")
+            ?.asArray()
+            ?: return null
+        for (shelf in shelves) {
+            val renderer = shelf.asObject()?.get("musicShelfRenderer")?.asObject() ?: continue
+            val artists = parseArtistsShelf(renderer)
+            if (artists.isNotEmpty()) return artists.first()
+        }
+        return null
     }
 
     /**
@@ -348,8 +399,8 @@ class YTMusicApiClient @Inject constructor(
         // those ids during the carousel walk and follow them in a
         // second pass (post-loop) to replace truncated carousels with
         // the full discography.
-        var albumsMoreBrowseId: String? = null
-        var singlesMoreBrowseId: String? = null
+        var albumsMore: CarouselMore? = null
+        var singlesMore: CarouselMore? = null
 
         // Parsers live in ArtistResponseParser.kt as top-level internal funcs.
         for (section in sections) {
@@ -373,7 +424,7 @@ class YTMusicApiClient @Inject constructor(
                 when {
                     title.equals("Albums", ignoreCase = true) -> {
                         albums = parseAlbumsCarousel(carousel)
-                        albumsMoreBrowseId = parseCarouselMoreBrowseId(carousel)
+                        albumsMore = parseCarouselMore(carousel)
                     }
                     // `contains("Singles")` subsumes both the stand-alone
                     // "Singles" shelf and the combined "Singles and EPs"
@@ -384,8 +435,8 @@ class YTMusicApiClient @Inject constructor(
                     title.contains("Singles", ignoreCase = true) ||
                         title.contains("EPs", ignoreCase = true) -> {
                         singles = singles + parseAlbumsCarousel(carousel)
-                        if (singlesMoreBrowseId == null) {
-                            singlesMoreBrowseId = parseCarouselMoreBrowseId(carousel)
+                        if (singlesMore == null) {
+                            singlesMore = parseCarouselMore(carousel)
                         }
                     }
                     title.contains("Fans also like", ignoreCase = true) ->
@@ -405,23 +456,23 @@ class YTMusicApiClient @Inject constructor(
         // each take their own browse call (~50KB each), so the cost is
         // ~2 extra HTTP requests per artist page load. Worth it: this is
         // the only way to surface artists with > 10 albums (Drake, etc).
-        albumsMoreBrowseId?.let { moreId ->
+        albumsMore?.let { more ->
             runCatching {
-                innerTubeClient.browse(moreId)?.let { gridResponse ->
+                innerTubeClient.browse(more.browseId, more.params)?.let { gridResponse ->
                     val full = parseAlbumsGridResponse(gridResponse)
                     if (full.isNotEmpty()) {
-                        Log.d(TAG, "getArtist: albums grid expanded ${albums.size} -> ${full.size}")
+                        Log.d(TAG, "getArtist: albums grid expanded ${albums.size} -> ${full.size} (params=${more.params != null})")
                         albums = full
                     }
                 }
             }.onFailure { Log.w(TAG, "getArtist: albums-more fetch failed: ${it.message}") }
         }
-        singlesMoreBrowseId?.let { moreId ->
+        singlesMore?.let { more ->
             runCatching {
-                innerTubeClient.browse(moreId)?.let { gridResponse ->
+                innerTubeClient.browse(more.browseId, more.params)?.let { gridResponse ->
                     val full = parseAlbumsGridResponse(gridResponse)
                     if (full.isNotEmpty()) {
-                        Log.d(TAG, "getArtist: singles grid expanded ${singles.size} -> ${full.size}")
+                        Log.d(TAG, "getArtist: singles grid expanded ${singles.size} -> ${full.size} (params=${more.params != null})")
                         singles = full
                     }
                 }

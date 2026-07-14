@@ -1,8 +1,10 @@
 package com.stash.data.download.lossless
 
 import android.util.Log
+import com.stash.core.data.prefs.StreamingPreference
 import javax.inject.Inject
 import javax.inject.Singleton
+import kotlinx.coroutines.CancellationException
 
 /**
  * Holds every Hilt-bound [LosslessSource] and resolves a [TrackQuery]
@@ -24,6 +26,8 @@ import javax.inject.Singleton
 class LosslessSourceRegistry @Inject constructor(
     private val sources: Set<@JvmSuppressWildcards LosslessSource>,
     private val prefs: LosslessSourcePreferences,
+    private val healthGate: LosslessSourceHealthGate,
+    private val streamingPreference: StreamingPreference,
 ) {
 
     /**
@@ -33,21 +37,42 @@ class LosslessSourceRegistry @Inject constructor(
      * pipeline as a last resort (the strict-superset behavior we want for
      * Path ii of the source-priority model).
      */
-    suspend fun resolve(query: TrackQuery): SourceResult? {
-        val ordered = orderedSources()
+    suspend fun resolve(query: TrackQuery, bypassRateLimit: Boolean = false): SourceResult? {
+        // Test toggles (outage drills). ARCOD-only takes precedence over
+        // amz-only: filter the chain to a single source so a forced download
+        // exercises that source even when the Qobuz proxies are healthy. A
+        // miss falls through to a normal null return (no quota to protect).
+        val ordered = if (streamingPreference.isForceQbdlxOnly()) {
+            orderedSources().filter { it.id == "qbdlx_qobuz" }
+        } else if (streamingPreference.isForceArcodOnly()) {
+            orderedSources().filter { it.id == "arcod" }
+        } else if (streamingPreference.isForceAmzOnly()) {
+            orderedSources().filter { it.id == "amz" }
+        } else {
+            // Normal chain skips the parked (host-down) sources. Only the
+            // normal path filters — force-X toggles above still reach a parked
+            // source on demand, and orderedSources()/Settings still list them.
+            orderedSources().filterNot { it.id in PARKED_SOURCE_IDS }
+        }
         val minQuality = prefs.minQualityNow()
 
         for (source in ordered) {
+            if (healthGate.isDegraded(source.id)) {
+                Log.d(TAG, "skipping ${source.id}: degraded (content-health cooldown)")
+                continue
+            }
             if (!source.isEnabled()) continue
-            val result = runCatching { source.resolve(query) }
-                .onFailure { e ->
-                    // resolve() should never throw — it should catch and
-                    // return null. Defensive log so an unexpected throw
-                    // from one source doesn't break the chain for others.
-                    Log.w(TAG, "source ${source.id} threw on resolve", e)
-                }
-                .getOrNull()
-                ?: continue
+            val result = try {
+                source.resolve(query, bypassRateLimit)
+            } catch (cancelled: CancellationException) {
+                throw cancelled
+            } catch (error: Throwable) {
+                // resolve() should never throw — it should catch and return
+                // null. Cancellation is the one exception and must remain
+                // cooperative for WorkManager / acquisition lease shutdown.
+                Log.w(TAG, "source ${source.id} threw on resolve", error)
+                null
+            } ?: continue
 
             if (!minQuality.accepts(result.format)) {
                 Log.d(
@@ -106,5 +131,17 @@ class LosslessSourceRegistry @Inject constructor(
 
     companion object {
         private const val TAG = "LosslessRegistry"
+
+        /**
+         * Lossless sources parked out of the NORMAL resolve chain because their
+         * upstreams are down for us (2026-07-01): qobuz.squid.wtf needs a
+         * captcha we can't solve headless, kennyy.com.br is health-down, and
+         * arcod.xyz returns Cloudflare 403. Their code + Hilt bindings stay
+         * intact — re-enabling a source is just removing its id here (and
+         * uncommenting the matching line in
+         * [com.stash.core.media.streaming.StreamSourceRegistry] for streaming).
+         * Force-X test toggles and the Settings source list still reach them.
+         */
+        val PARKED_SOURCE_IDS = setOf("squid_qobuz", "kennyy_qobuz", "arcod")
     }
 }

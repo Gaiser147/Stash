@@ -2,9 +2,15 @@ package com.stash.data.download.lossless
 
 import android.util.Log
 import java.io.File
+import java.util.concurrent.TimeUnit
 import javax.inject.Inject
 import javax.inject.Singleton
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.currentCoroutineContext
+import kotlinx.coroutines.ensureActive
+import kotlinx.coroutines.sync.Semaphore
 import kotlinx.coroutines.withContext
 import okhttp3.OkHttpClient
 import okhttp3.Request
@@ -29,8 +35,27 @@ import okio.sink
  */
 @Singleton
 class LosslessUrlDownloader @Inject constructor(
-    private val httpClient: OkHttpClient,
+    httpClient: OkHttpClient,
+    private val decryptor: com.stash.data.download.lossless.amz.AmzDecryptor,
 ) {
+    // Whole-file lossless fetches are large (amz ultrahd CMAF runs 100-150 MB and
+    // must be downloaded in full before decrypt/play). The shared client's 30 s
+    // read timeout is an inter-byte stall limit — fine for small JSON, too tight
+    // when a congested/shared network pauses mid-stream on a big FLAC. Derive a
+    // client with a roomier read/write stall window (no callTimeout, so total
+    // duration stays uncapped for big files). Shares the pool/dispatcher/TLS.
+    private val fetchClient: OkHttpClient = httpClient.newBuilder()
+        .readTimeout(FETCH_STALL_TIMEOUT_SECONDS, TimeUnit.SECONDS)
+        .writeTimeout(FETCH_STALL_TIMEOUT_SECONDS, TimeUnit.SECONDS)
+        .build()
+
+    // Caps concurrent ENCRYPTED (amz) whole-file fetches. The DownloadManager
+    // ceiling is 8, but 8 parallel 20-150 MB amz pulls starve each other's
+    // bandwidth (~0.86 MB/s measured vs ~2.3 MB/s at low concurrency) and widen
+    // the token-expiry 403 herd. Gating amz fetches to a few in-flight gives each
+    // real bandwidth (so tracks land sooner) and keeps the herd narrow. @Singleton,
+    // so this is a process-wide amz-fetch limit. Non-amz (Qobuz) fetches: ungated.
+    private val amzFetchGate = Semaphore(AMZ_MAX_CONCURRENT_FETCHES)
     /**
      * Fetch [source] to [destination]. Returns the file on success, or
      * a failure with the reason to log at the call site.
@@ -47,6 +72,24 @@ class LosslessUrlDownloader @Inject constructor(
         source: SourceResult,
         destination: File,
         onProgress: (bytesRead: Long, totalBytes: Long) -> Unit = { _, _ -> },
+    ): Result<File> = downloadInternal(source, destination, maxBytes = null, onProgress)
+
+    /**
+     * Acquisition-only bounded variant. Kept separate from [download] so the
+     * widely used original method retains its exact source/MockK signature.
+     */
+    suspend fun downloadBounded(
+        source: SourceResult,
+        destination: File,
+        maxBytes: Long,
+        onProgress: (bytesRead: Long, totalBytes: Long) -> Unit = { _, _ -> },
+    ): Result<File> = downloadInternal(source, destination, maxBytes, onProgress)
+
+    private suspend fun downloadInternal(
+        source: SourceResult,
+        destination: File,
+        maxBytes: Long?,
+        onProgress: (bytesRead: Long, totalBytes: Long) -> Unit,
     ): Result<File> = withContext(Dispatchers.IO) {
         val requestBuilder = Request.Builder().url(source.downloadUrl).get()
         for ((name, value) in source.downloadHeaders) {
@@ -54,8 +97,23 @@ class LosslessUrlDownloader @Inject constructor(
         }
         val request = requestBuilder.build()
 
+        // Encrypted sources (amz CMAF): fetch the encrypted bytes into a
+        // sibling `.enc` temp, then ffmpeg-decrypt into [destination]. ffmpeg
+        // can't read and write the same path, hence the separate fetch target.
+        val key = source.decryptionKey?.takeIf { it.isNotBlank() }
+        val fetchTarget = if (key != null) File("${destination.absolutePath}.enc") else destination
+
+        // Gate amz (encrypted) fetches to bound concurrency; non-amz fetches run
+        // ungated as before. Released in the finally so a throw/return can't leak
+        // a permit and wedge the source.
+        if (key != null) amzFetchGate.acquire()
+        currentCoroutineContext().ensureActive()
+        val call = fetchClient.newCall(request)
+        val cancellationHandle = currentCoroutineContext()[Job]?.invokeOnCompletion { cause ->
+            if (cause is CancellationException) call.cancel()
+        }
         try {
-            httpClient.newCall(request).execute().use { response ->
+            call.execute().use { response ->
                 if (!response.isSuccessful) {
                     return@withContext Result.failure(
                         IllegalStateException(
@@ -67,12 +125,17 @@ class LosslessUrlDownloader @Inject constructor(
                     IllegalStateException("fetch ${source.sourceId} failed: empty body"),
                 )
                 val totalBytes = body.contentLength().coerceAtLeast(0L)
+                if (maxBytes != null && totalBytes > maxBytes) {
+                    return@withContext Result.failure(
+                        IllegalStateException("fetch ${source.sourceId} exceeds maximum size"),
+                    )
+                }
 
                 // Stream body → file in 64 KB chunks. Okio's BufferedSink
                 // gives us flush guarantees without us managing a manual
                 // buffer; the per-chunk callback drives the progress UI.
-                destination.parentFile?.mkdirs()
-                destination.sink().buffer().use { sink ->
+                fetchTarget.parentFile?.mkdirs()
+                fetchTarget.sink().buffer().use { sink ->
                     val bodySource = body.source()
                     var bytesRead = 0L
                     val buf = okio.Buffer()
@@ -81,29 +144,68 @@ class LosslessUrlDownloader @Inject constructor(
                         if (read == -1L) break
                         sink.write(buf, read)
                         bytesRead += read
+                        if (maxBytes != null && bytesRead > maxBytes) {
+                            throw IllegalStateException("fetch ${source.sourceId} exceeds maximum size")
+                        }
                         onProgress(bytesRead, totalBytes)
                     }
                     sink.flush()
                 }
 
-                if (destination.length() == 0L) {
+                if (fetchTarget.length() == 0L) {
+                    runCatching { if (fetchTarget.exists()) fetchTarget.delete() }
                     return@withContext Result.failure(
                         IllegalStateException("fetch ${source.sourceId} produced empty file"),
                     )
                 }
-                Result.success(destination)
+
+                if (key == null) {
+                    return@use Result.success(fetchTarget)
+                }
+
+                // amz: decrypt the encrypted CMAF temp → clear FLAC at
+                // [destination], then drop the encrypted temp. A decrypt
+                // failure is a source failure (fall through to the next).
+                val decrypted = decryptor.decryptToFlac(fetchTarget, key, destination)
+                runCatching { if (fetchTarget.exists()) fetchTarget.delete() }
+                if (decrypted && destination.length() > 0) {
+                    Result.success(destination)
+                } else {
+                    runCatching { if (destination.exists()) destination.delete() }
+                    Result.failure(
+                        IllegalStateException("decrypt ${source.sourceId} failed for ${destination.name}"),
+                    )
+                }
             }
+        } catch (cancelled: CancellationException) {
+            runCatching { if (fetchTarget.exists()) fetchTarget.delete() }
+            runCatching { if (destination.exists()) destination.delete() }
+            throw cancelled
         } catch (e: Exception) {
+            currentCoroutineContext().ensureActive()
             Log.w(TAG, "fetch ${source.sourceId} threw: ${e.javaClass.simpleName}: ${e.message}")
-            // Best-effort cleanup of any partial file so the caller's
+            // Best-effort cleanup of any partial files so the caller's
             // fallback path doesn't accidentally treat a 0-byte temp
             // file as a successful download.
+            runCatching { if (fetchTarget.exists()) fetchTarget.delete() }
             runCatching { if (destination.exists()) destination.delete() }
             Result.failure(e)
+        } finally {
+            cancellationHandle?.dispose()
+            if (key != null) amzFetchGate.release()
         }
     }
 
     private companion object {
         const val TAG = "LosslessUrlDownloader"
+
+        // Max concurrent amz whole-file fetches (see [amzFetchGate]). 3 balances
+        // per-file bandwidth against aggregate throughput; also caps the 403 herd.
+        const val AMZ_MAX_CONCURRENT_FETCHES = 3
+
+        // Inter-byte stall timeout for the big-file fetch (was 30 s on the shared
+        // client). amz ultrahd whole-file pulls stalled past 30 s on a congested
+        // hotspot; 90 s tolerates the pause without masking a truly dead socket.
+        const val FETCH_STALL_TIMEOUT_SECONDS = 90L
     }
 }

@@ -9,10 +9,13 @@ import com.stash.core.data.db.converter.Converters
 import com.stash.core.data.db.dao.ArtistProfileCacheDao
 import com.stash.core.data.db.dao.DiscoveryQueueDao
 import com.stash.core.data.db.dao.DownloadQueueDao
+import com.stash.core.data.db.dao.LastFmCacheDao
 import com.stash.core.data.db.dao.ListeningEventDao
+import com.stash.core.data.db.dao.LyricsDao
 import com.stash.core.data.db.dao.PlaylistDao
 import com.stash.core.data.db.dao.RemoteSnapshotDao
 import com.stash.core.data.db.dao.SourceAccountDao
+import com.stash.core.data.db.dao.SpotifyResolutionDao
 import com.stash.core.data.db.dao.StashMixRecipeDao
 import com.stash.core.data.db.dao.SyncHistoryDao
 import com.stash.core.data.db.dao.TrackBlocklistDao
@@ -22,12 +25,15 @@ import com.stash.core.data.db.dao.TrackTagDao
 import com.stash.core.data.db.entity.ArtistProfileCacheEntity
 import com.stash.core.data.db.entity.DiscoveryQueueEntity
 import com.stash.core.data.db.entity.DownloadQueueEntity
+import com.stash.core.data.db.entity.LastFmCacheEntity
 import com.stash.core.data.db.entity.ListeningEventEntity
+import com.stash.core.data.db.entity.LyricsEntity
 import com.stash.core.data.db.entity.PlaylistEntity
 import com.stash.core.data.db.entity.PlaylistTrackCrossRef
 import com.stash.core.data.db.entity.RemotePlaylistSnapshotEntity
 import com.stash.core.data.db.entity.RemoteTrackSnapshotEntity
 import com.stash.core.data.db.entity.SourceAccountEntity
+import com.stash.core.data.db.entity.SpotifyResolutionEntity
 import com.stash.core.data.db.entity.StashMixRecipeEntity
 import com.stash.core.data.db.entity.SyncHistoryEntity
 import com.stash.core.data.db.entity.TrackBlocklistEntity
@@ -69,8 +75,11 @@ import com.stash.core.data.db.entity.TrackTagEntity
         DiscoveryQueueEntity::class,
         TrackBlocklistEntity::class,
         TrackSkipEventEntity::class,
+        LyricsEntity::class,
+        LastFmCacheEntity::class,
+        SpotifyResolutionEntity::class,
     ],
-    version = 26,
+    version = 32,
     exportSchema = true,
 )
 @TypeConverters(Converters::class)
@@ -101,6 +110,12 @@ abstract class StashDatabase : RoomDatabase() {
     abstract fun trackBlocklistDao(): TrackBlocklistDao
 
     abstract fun trackSkipEventDao(): TrackSkipEventDao
+
+    abstract fun lyricsDao(): LyricsDao
+
+    abstract fun lastFmCacheDao(): LastFmCacheDao
+
+    abstract fun spotifyResolutionDao(): SpotifyResolutionDao
 
 
     companion object {
@@ -714,6 +729,130 @@ abstract class StashDatabase : RoomDatabase() {
             override fun migrate(db: SupportSQLiteDatabase) {
                 db.execSQL("ALTER TABLE tracks ADD COLUMN is_streamable INTEGER NOT NULL DEFAULT 0")
                 db.execSQL("ALTER TABLE tracks ADD COLUMN is_streamable_checked_at INTEGER")
+            }
+        }
+
+        /**
+         * v26 → v27 (v0.9.35): per-track `metadata_embedded_at` for the
+         * tag + art embedding backfill. Nullable INTEGER, no default —
+         * NULL is the "needs tagging" sentinel; a non-null non-zero
+         * value is the success stamp; 0L is the irrecoverable-failure
+         * stamp (file missing, ffmpeg error, SAF row). The
+         * MetadataBackfillWorker queries `metadata_embedded_at IS NULL`
+         * so both success and failure stamps terminate the work item.
+         */
+        val MIGRATION_26_27 = object : Migration(26, 27) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL("ALTER TABLE tracks ADD COLUMN metadata_embedded_at INTEGER")
+            }
+        }
+
+        /**
+         * v27 → v28 (v0.9.36): per-track `lyrics_fetched_at` for the
+         * lyrics-fetch backfill (mirror of v0.9.35's
+         * `metadata_embedded_at` sentinel semantics) plus the new
+         * `lyrics` table that stores the fetched payload keyed by
+         * track id with FK cascade on delete.
+         *
+         * Sentinel semantics on `tracks.lyrics_fetched_at`: NULL =
+         * never tried; 0L = a fetch tried and produced no hit (LRCLIB
+         * miss + YT-Music fallback miss); non-null non-zero = success
+         * epoch-millis (a `lyrics` row exists for this track). NULL means
+         * the on-open priority fetch (or a re-download) may still retry.
+         */
+        val MIGRATION_27_28 = object : Migration(27, 28) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL("ALTER TABLE tracks ADD COLUMN lyrics_fetched_at INTEGER")
+                db.execSQL("""
+                    CREATE TABLE IF NOT EXISTS lyrics (
+                      track_id INTEGER NOT NULL PRIMARY KEY,
+                      plain_text TEXT,
+                      synced_lrc TEXT,
+                      instrumental INTEGER NOT NULL DEFAULT 0,
+                      language TEXT,
+                      source TEXT NOT NULL,
+                      source_lyrics_id TEXT,
+                      fetched_at INTEGER NOT NULL,
+                      FOREIGN KEY(track_id) REFERENCES tracks(id) ON DELETE CASCADE
+                    )
+                """.trimIndent())
+                db.execSQL("CREATE INDEX IF NOT EXISTS index_lyrics_track_id ON lyrics(track_id)")
+            }
+        }
+
+        /**
+         * v28 → v29 (v0.9.38 / library-health-phase1): rewrite every
+         * legacy `download_queue.failure_type = 'DOWNLOAD_ERROR'` row
+         * to `'UNKNOWN'`.
+         *
+         * Phase 1 of the library-health epic deletes the `DOWNLOAD_ERROR`
+         * constant from [com.stash.core.model.download.DownloadFailureType]
+         * in favour of a richer failure-type vocabulary
+         * (UNKNOWN + classifier-emitted variants). Without this migration
+         * the converter's `valueOf(it)` call in
+         * [com.stash.core.data.db.converter.Converters.fromFailureType]
+         * would crash with `IllegalArgumentException` the first time Room
+         * read a legacy `'DOWNLOAD_ERROR'` row. Room guarantees migrations
+         * run before any DAO read on the upgraded schema, so once this
+         * migration ships the converter only ever sees valid enum names.
+         *
+         * UPDATE-in-place is safe because `failure_type` is a TEXT column
+         * (storing the enum `.name`), so swapping one literal for another
+         * needs no DDL.
+         */
+        val MIGRATION_28_29 = object : Migration(28, 29) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL(
+                    "UPDATE download_queue SET failure_type = 'UNKNOWN' WHERE failure_type = 'DOWNLOAD_ERROR'"
+                )
+            }
+        }
+
+        val MIGRATION_29_30 = object : Migration(29, 30) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL("ALTER TABLE stash_mix_recipes ADD COLUMN mood_keys_csv TEXT NOT NULL DEFAULT ''")
+                db.execSQL("ALTER TABLE stash_mix_recipes ADD COLUMN tag_sample_depth INTEGER NOT NULL DEFAULT 0")
+            }
+        }
+
+        /** v30 → v31: add lastfm_response_cache for generic Last.fm lookups. */
+        val MIGRATION_30_31 = object : Migration(30, 31) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL(
+                    """
+                    CREATE TABLE IF NOT EXISTS lastfm_response_cache (
+                        cache_key TEXT NOT NULL PRIMARY KEY,
+                        json TEXT NOT NULL,
+                        fetched_at INTEGER NOT NULL
+                    )
+                    """.trimIndent()
+                )
+            }
+        }
+
+        /**
+         * v31 → v32: add the `spotify_resolution` side-table that caches the
+         * outcome of resolving a local track to a Spotify URI (positive /
+         * negative / transient), so the antra Spotify-URI resolver doesn't
+         * re-search Spotify on every play. Purely additive — keyed by trackId.
+         */
+        val MIGRATION_31_32 = object : Migration(31, 32) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL(
+                    """
+                    CREATE TABLE IF NOT EXISTS spotify_resolution (
+                        trackId INTEGER NOT NULL PRIMARY KEY,
+                        status TEXT NOT NULL,
+                        spotifyUri TEXT,
+                        matchedIsrc TEXT,
+                        titleSim REAL,
+                        durDeltaSec INTEGER,
+                        resolvedAtMs INTEGER NOT NULL,
+                        expiresAtMs INTEGER NOT NULL,
+                        attempts INTEGER NOT NULL DEFAULT 1
+                    )
+                    """.trimIndent()
+                )
             }
         }
     }

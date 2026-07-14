@@ -5,13 +5,15 @@ import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.lazy.LazyColumn
-import androidx.compose.foundation.clickable
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.itemsIndexed
+import androidx.compose.material.icons.Icons
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.CircularProgressIndicator
+import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.SnackbarHost
@@ -21,9 +23,11 @@ import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.setValue
 import androidx.compose.runtime.remember
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.hilt.navigation.compose.hiltViewModel
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
@@ -65,6 +69,7 @@ import kotlinx.coroutines.flow.merge
  * (matching [ArtistProfileScreen]) — the screen does not hold its own
  * copies.
  */
+@OptIn(androidx.compose.material3.ExperimentalMaterial3Api::class)
 @Composable
 fun AlbumDiscoveryScreen(
     onBack: () -> Unit,
@@ -76,6 +81,12 @@ fun AlbumDiscoveryScreen(
     val downloadedIds by vm.delegate.downloadedIds.collectAsStateWithLifecycle()
     val previewLoadingId by vm.delegate.previewLoadingId.collectAsStateWithLifecycle()
     val previewState by vm.delegate.previewState.collectAsStateWithLifecycle()
+    val currentPlayingYoutubeId by vm.currentPlayingYoutubeId.collectAsStateWithLifecycle()
+    val streamingEnabled by vm.streamingEnabled.collectAsStateWithLifecycle()
+    var showStreamingSheet by androidx.compose.runtime.saveable.rememberSaveable { androidx.compose.runtime.mutableStateOf(false) }
+    val streamingSheetState = androidx.compose.material3.rememberModalBottomSheetState()
+    val playlistSheetItem by vm.playlistSheetItem.collectAsStateWithLifecycle()
+    val userPlaylists by vm.userPlaylists.collectAsStateWithLifecycle()
     val snackbar = remember { SnackbarHostState() }
 
     LaunchedEffect(vm) {
@@ -106,6 +117,10 @@ fun AlbumDiscoveryScreen(
                     onShuffle = vm::shuffleDownloaded,
                     onDownloadAll = vm::onDownloadAllClicked,
                     onPlayAlbum = { vm.playAlbum(startIndex = 0) },
+                    onAddToQueue = vm::addAlbumToQueue,
+                    streamingEnabled = streamingEnabled,
+                    onStreamingClick = { showStreamingSheet = true },
+                    downloadSupported = vm.downloadSupported,
                 )
             }
 
@@ -146,7 +161,11 @@ fun AlbumDiscoveryScreen(
                     } else {
                         itemsIndexed(
                             items = state.tracks,
-                            key = { _, t -> "album_track_" + t.videoId },
+                            // Include the index: Qobuz tracks all carry a blank
+                            // videoId, so keying on videoId alone collides (Compose
+                            // requires unique keys). The album tracklist is static
+                            // (never reordered), so the index is a stable key.
+                            key = { index, t -> "album_track_${index}_${t.videoId}" },
                         ) { index, track ->
                             val currentPreviewState = previewState
                             val isPreviewPlaying = currentPreviewState is PreviewState.Playing &&
@@ -160,40 +179,31 @@ fun AlbumDiscoveryScreen(
                                 album = state.hero.title,
                                 albumArtist = state.hero.artist,
                             )
-                            // Warm the lossless URL cache as each album track row
-                            // enters composition. Idempotent — dedupes by videoId.
+                            // Warm the lossless URL cache as each YT album track row
+                            // enters composition (blank-videoId Qobuz rows dedupe to
+                            // a no-op). Idempotent.
                             LaunchedEffect(track.videoId) {
                                 vm.losslessPrefetcher.warmUp(trackItem)
                             }
-                            // Row body is clickable to play the album from this
-                            // track's position. The inline preview/download
-                            // buttons inside PreviewDownloadRow have their own
-                            // click handlers that consume the event, so the
-                            // outer clickable only fires on the metadata area.
-                            PreviewDownloadRow(
+                            // One row for every album track. Tapping plays the album
+                            // from this position (album context — not a loose preview).
+                            // Download is hidden for Qobuz-native tracks (no videoId).
+                            SongRow(
                                 item = track.toSearchResultItem(),
                                 isDownloading = track.videoId in downloadingIds,
                                 isDownloaded = track.videoId in downloadedIds,
                                 isPreviewLoading = previewLoadingId == track.videoId,
                                 isPreviewPlaying = isPreviewPlaying,
-                                onPreview = { vm.delegate.previewTrack(trackItem) },
+                                isPlaying = isRowPlaying(track.videoId, currentPlayingYoutubeId),
+                                downloadSupported = vm.downloadSupported,
+                                onPlay = { vm.playAlbum(startIndex = index) },
                                 onStopPreview = { vm.delegate.stopPreview() },
-                                onDownload = {
-                                    vm.delegate.downloadTrack(
-                                        TrackItem(
-                                            videoId = track.videoId,
-                                            title = track.title,
-                                            artist = track.artist,
-                                            durationSeconds = track.durationSeconds,
-                                            thumbnailUrl = track.thumbnailUrl,
-                                            album = state.hero.title,
-                                            albumArtist = state.hero.artist,
-                                        ),
-                                    )
-                                },
-                                modifier = Modifier
-                                    .padding(horizontal = 16.dp, vertical = 4.dp)
-                                    .clickable { vm.playAlbum(startIndex = index) },
+                                onDownload = { vm.delegate.downloadTrack(trackItem) },
+                                onPlayNext = { vm.onPlayNext(trackItem) },
+                                onAddToQueue = { vm.onAddToQueue(trackItem) },
+                                onStartRadio = { vm.onStartRadio(trackItem) },
+                                onAddToPlaylist = { vm.onRequestAddToPlaylist(trackItem) },
+                                modifier = Modifier.padding(horizontal = 16.dp, vertical = 4.dp),
                             )
                         }
                         if (state.moreByArtist.isNotEmpty()) {
@@ -238,5 +248,29 @@ fun AlbumDiscoveryScreen(
                 },
             )
         }
+
+        if (showStreamingSheet) {
+            com.stash.core.ui.components.streaming.StreamingModeSheet(
+                streamingEnabled = streamingEnabled,
+                onSelect = { requested ->
+                    vm.applyStreamingMode(requested)
+                    showStreamingSheet = false
+                },
+                onDismiss = { showStreamingSheet = false },
+                sheetState = streamingSheetState,
+            )
+        }
+
+        if (playlistSheetItem != null) {
+            com.stash.core.ui.components.SaveToPlaylistSheet(
+                playlists = userPlaylists.map {
+                    com.stash.core.ui.components.PlaylistInfo(it.id, it.name, it.trackCount)
+                },
+                onSaveToPlaylist = vm::onSaveToPlaylist,
+                onCreatePlaylist = vm::onCreatePlaylistAndAdd,
+                onDismiss = vm::onDismissPlaylistSheet,
+            )
+        }
     }
 }
+

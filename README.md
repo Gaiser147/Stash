@@ -1,71 +1,115 @@
 # Stash
 
-> **Your Spotify + YouTube Music library, offline in FLAC for free.**
+Fork builds use separate, fail-closed update, community, and preview package
+boundaries. See [docs/RELEASE_CHANNELS.md](docs/RELEASE_CHANNELS.md) before
+installing or distributing an APK.
+
+> **Your Spotify + YouTube Music library, on your phone, in FLAC.**
 
 [![License: GPL v3](https://img.shields.io/badge/License-GPLv3-purple.svg)](LICENSE)
 [![Platform](https://img.shields.io/badge/platform-Android%208.0%2B-purple)](#requirements)
 [![Release](https://img.shields.io/github/v/release/rawnaldclark/Stash?color=purple&include_prereleases)](https://github.com/rawnaldclark/Stash/releases)
+[![Discord](https://img.shields.io/badge/Discord-Join-5865F2?logo=discord&logoColor=white)](https://discord.gg/vcbjEby5PC)
 
-Stash is an offline-first Android music player that syncs your liked songs, playlists, daily mixes, and discover mixes from both **Spotify** and **YouTube Music** into a single unified local library. Tracks are downloaded as high-quality FLAC audio.
+Stash mirrors your Spotify and YouTube Music libraries to your Android phone. You connect each service, pick the playlists and mixes you want, and Stash either downloads them as real FLAC files for offline playback or surfaces them as a streaming index so you can stream tracks without filling up your storage. Same library, two modes, one tap to switch.
 
-**Stash is not an online streaming service.** It's a personal-library tool for people who already have Spotify or YouTube Music accounts and want their library available offline on their terms. Studio quality tracks, they're yours to keep. 
-
----
-
-## Features
-
-- **Offline everything** — tracks download as high-quality lossless audio
-- **Bulletproof matching** — finds the right version of tracks 99% of the time
-- **Custom playlists** — create your own playlists and save tracks to them from anywhere.
-- **Spotify & YT sync preferences** — choose exactly which playlists, liked songs, daily mixes, and discovery mixes to sync. Individual toggles for each. Don't want Daily Mix 3? Turn it off.
-- **Expanded Spotify mix detection** — Release Radar, Discover Weekly, On Repeat, Daylist, Repeat Rewind, Time Capsule, and Daily Mixes 1-6 are all automatically detected when available. Each gets its own toggle.
-- **Refresh vs Accumulate sync modes** — mixes can either replace their contents each sync (Refresh) or stack new tracks on top of what's already there (Accumulate). Your call.
-- **Parallel downloads** — 8 simultaneous tracks. Background sync runs as a foreground service so it actually finishes with the phone locked.
-- **High-res album art**
-- **Automatic update notifications** — checks GitHub for new releases daily and notifies you when one is available.
-- **Full equalizer** — 5-band EQ with presets, bass boost, and virtualizer
-- **Spotify sign-in built in** — just log into Spotify inside the app
-- **Private by design** — credentials encrypted with AES-256-GCM, no servers, no telemetry, nothing leaves your phone
-- **Free and open source** — no subscriptions, no ads, GPL-3.0
-
-## Screenshots
+There's no required Stash account or Stash-operated backend. No subscription. No ads. No analytics. Music-service credentials live on your phone, encrypted. Optional integrations, including Last.fm and the fork's one-way Navidrome export, make only the connections you explicitly configure.
 
 <p align="center">
-  <img src="docs/screenshots/home.png" width="280" alt="Home screen with tip jar, sync stats, and Daily Mixes">
-  <img src="docs/screenshots/now-playing.png" width="280" alt="Now playing — FLAC 24/44 lossless playback">
+  <img src="docs/screenshots/home.png" width="280" alt="Home screen — Daily Mixes, sync stats, supporter pill">
+  <img src="docs/screenshots/now-playing.png" width="280" alt="Now Playing — FLAC 24/44 lossless">
 </p>
 
 ---
 
-## Requirements
+## Online vs Offline
 
-- Android **8.0 (API 26)** or later
-- Roughly **9-15 GB** of free storage for a medium library (scales with your library size)
-- An active **Spotify account** and/or a **YouTube Music account**
-- Stash is not on the Google Play Store and won't be (see [Why Not Play Store?](#why-not-play-store) below)
+Stash has two modes. They decide what a sync actually does.
+
+**Offline mode** Sync downloads each track as a FLAC file (or the closest lossless source available) and stores it on your phone. Once a track is on disk you can play it forever with no connection. It costs storage but no recurring data.
+
+**Online mode** is for people who don't want the storage hit. Builds a streamable local index of your library — Almost no storage, but you need a connection to play.
 
 ---
 
-## Installation
+## The FLAC backbone
 
-### Option 1 — Download the APK (recommended)
+- **[arcod](https://arcod.xyz)** — a third Qobuz source from yet another operator. Connect a free account once and it slots right into the chain.
+- **[amz.squid.wtf](https://amz.squid.wtf)** — Amazon Music lossless. Structurally independent of the Qobuz proxies, so it keeps your music in FLAC even when both of those are down instead of dropping you to a lossy YouTube rip.
 
-1. Open **[the Releases page](https://github.com/rawnaldclark/Stash/releases)** on your Android device's browser.
-2. Download the latest `Stash-v*.apk` file.
-3. Open the downloaded file.
-4. If Android warns you about "installing from unknown sources," tap **Settings** and allow it for your browser, then try opening the file again.
-5. Tap **Install** when prompted.
-6. Done — open Stash from your app drawer.
+These are run by people doing it for the love of it — mostly solo, mostly free. They're the whole reason Stash can hand you a real lossless file instead of a re-encode. If Stash earns a spot on your phone, send a little of that their way: a thank-you, a tip, whatever you've got. We stand on their shoulders. 🙏
 
-### Option 2 — Auto-update via Obtainium (advanced)
+---
 
-[Obtainium](https://obtainium.imranr.dev/) is a free app that tracks GitHub Releases and notifies you when a new version is out. If you don't want to manually re-download APKs each release:
+### Library
 
-1. Install Obtainium.
-2. Tap **Add App** and paste `https://github.com/rawnaldclark/Stash`.
-3. Obtainium will now prompt you to update whenever a new Stash release ships.
+- **Spotify + YouTube Music in one unified library** — liked songs, playlists, daily mixes, every Spotify mix worth syncing
+- **Bulletproof matching** — finds the right version of a track 99% of the time
+- **Last.fm scrobbling**, optional, off by default
+- **Wrong-match flag** — if Stash picked the wrong version, tap once from Now Playing and it queues a re-search
+- **Likes and History mirroring** — When enabled, each track you like & stream in Stash lands in your Spotify & YouTube accounts.
+- **Optional Navidrome export** — This fork can send downloaded audio, artwork, and playlist manifests to an authenticated HTTPS ingest service. It is off by default; see [Navidrome export](docs/NAVIDROME_EXPORT.md).
+- **Optional Muse request inbox** — manually confirmed missing-track searches
+  from Discord can be downloaded under Stash's Wi-Fi, charging, battery, and
+  storage rules. It is private, authenticated, conservative about ambiguous
+  matches, and off by default; see [Muse acquisition inbox](docs/MUSE_ACQUISITION.md).
+- **Safe fork preview** — without the retained debug-upgrade key, fork CI emits
+  a separate `com.stash.app.preview` app that can be tested beside an existing
+  debug installation without replacing its data. Download the verified
+  [v0.9.75 Navidrome preview](https://github.com/Gaiser147/Stash/releases/tag/v0.9.75-navidrome-preview.1).
+  The normal debug package has a separate, signer-pinned
+  [in-place upgrade process](docs/IN_PLACE_UPGRADE.md).
 
-### Option 3 — Build from source
+### Playback
+
+- 5-band equalizer with presets, bass boost, virtualizer
+- Crossfader
+- Normalizer
+- Synced lyrics, pulled from LRCLIB and scrolled with the track
+
+### Privacy
+
+- No required Stash server or account. No analytics. No third-party crash reporters.
+- Cookies stored on-device, encrypted with AES-256-GCM via Google's [Tink](https://developers.google.com/tink)
+- Optional integrations are off until configured and never receive Spotify or YouTube login cookies.
+- GPL-3.0, every line of code is open source
+
+---
+
+## Install
+
+Three paths. Pick whichever you'd actually use.
+
+### Navidrome fork preview
+
+The verified fork preview is available from the public GitHub prerelease:
+
+- [Release notes and all assets](https://github.com/Gaiser147/Stash/releases/tag/v0.9.75-navidrome-preview.1)
+- [Download the preview APK](https://github.com/Gaiser147/Stash/releases/download/v0.9.75-navidrome-preview.1/Stash-Navidrome-Preview-v0.9.75-1.apk)
+- [Build provenance](https://github.com/Gaiser147/Stash/releases/download/v0.9.75-navidrome-preview.1/Stash-Navidrome-Preview-v0.9.75-1.provenance.json)
+- [SHA-256 checksums](https://github.com/Gaiser147/Stash/releases/download/v0.9.75-navidrome-preview.1/SHA256SUMS.txt)
+
+It installs as `com.stash.app.preview` with the visible name **Stash Navidrome
+Preview**, beside `com.stash.app.debug`. Its database, settings, WorkManager
+jobs, and Keystore entries are separate. Preview data is disposable: a later
+CI-only preview can use a different signing key and require uninstalling only
+the preview app. This APK is not an in-place update for the existing debug app.
+
+Verified APK SHA-256:
+`855784170051ca1ac5c4861686bcf7e8efaa17d522ef6225b2c3fd5570e34828`.
+
+### Direct APK
+
+1. On your Android device, open the [Releases page](https://github.com/rawnaldclark/Stash/releases).
+2. Download the latest `Stash-v*.apk`.
+3. Open it. If Android warns about installs from unknown sources, allow it for the browser and try again.
+4. Tap **Install**.
+
+### Obtainium (auto-updates)
+
+[Obtainium](https://obtainium.imranr.dev/) tracks GitHub Releases and notifies you when a new version ships. Add `https://github.com/rawnaldclark/Stash` and you're done.
+
+### Build from source
 
 ```bash
 git clone https://github.com/rawnaldclark/Stash.git
@@ -74,160 +118,151 @@ cd Stash
 # APK lands in app/build/outputs/apk/debug/
 ```
 
-You'll need **Android Studio** (Hedgehog / 2023.1.1 or later), **JDK 17**, and **Android SDK 35**. Open the project in Android Studio, let Gradle sync, then Run.
+You'll need Android Studio Hedgehog (2023.1.1) or later, JDK 17, and Android SDK 35.
+
+### Requirements
+
+- Android **8.0 (API 26)** or later
+- About **9–15 GB** of free storage for a medium library in Offline mode (scales with how much you sync). Online mode needs almost nothing.
+- A Spotify and/or YouTube Music account
 
 ---
 
-## First-Time Setup
+## First-time setup
 
-Stash doesn't use Spotify's or YouTube's official APIs (they don't offer what Stash needs). Instead, it uses your login cookies. This sounds scary but takes about two minutes per service. Your cookies live **only on your phone**, encrypted with AES-256-GCM, and are sent **only to Spotify and YouTube themselves** — never to a Stash server (there isn't one).
+Stash doesn't use Spotify's or YouTube's official APIs, because the official APIs don't let third-party apps do what Stash does. It uses your existing login cookies instead. This sounds sketchier than it is: cookies live only on your device, encrypted with AES-256-GCM, and the only place they ever get sent is back to Spotify or YouTube themselves. The setup is a couple of minutes per service.
 
 <details>
-<summary><b>🎵 Connect Spotify (click to expand)</b></summary>
+<summary><b>🎵 Connect Spotify</b></summary>
 
-### What you need
-- A computer or another device with a desktop browser (Chrome, Firefox, Edge, or Safari)
-- Spotify account logged in on that browser
+### Option A — Sign in inside the app (easiest)
 
-### Option A — Sign in via the app (easiest)
-
-1. Open Stash → **Settings** → tap **Spotify** under Accounts → tap **Connect**.
-2. A Spotify login page will appear inside the app.
+1. Open Stash → **Settings** → tap **Spotify or YouTube** under Accounts → tap **Connect**.
+2. Spotify & YouTube login page opens inside the app.
 3. Sign in with your email/password, Google, Apple, or Facebook — whatever you normally use.
-4. Once login succeeds, Stash extracts the cookie automatically. Done.
+4. Stash extracts the cookie automatically once login succeeds. Done.
 
-If the in-app login doesn't work for you, use Option B below.
+If the in-app login fails for any reason, fall back to Option B.
 
 ### Option B — Paste the cookie manually
 
-1. On your computer, open **[https://open.spotify.com](https://open.spotify.com)** and make sure you're logged in.
-2. Press **F12** on your keyboard to open Developer Tools. A panel will open on the right or bottom of your browser.
-3. Find the **Application** tab at the top of the DevTools panel (on Firefox it's called **Storage**). If you don't see it, click the `>>` arrows to find it.
-4. In the left sidebar of that tab, expand **Cookies** → click **`https://open.spotify.com`**.
-5. You'll see a list of cookies. Find the one named **`sp_dc`**.
-6. Double-click the value next to `sp_dc` and copy it (Ctrl+C / Cmd+C). It's a long string of random characters.
-7. Open Stash on your phone → **Settings** → tap **Spotify** → tap **Connect** → tap **"Paste cookie"** in the top-right corner.
-8. Paste the `sp_dc` cookie into the dialog and tap **Connect**.
+1. On a computer, open **[https://open.spotify.com](https://open.spotify.com)** and make sure you're logged in.
+2. Press **F12** to open Developer Tools.
+3. Find the **Application** tab at the top of DevTools (it's **Storage** on Firefox). Click the `>>` arrows if you don't see it.
+4. In the left sidebar, expand **Cookies** → click `https://open.spotify.com`.
+5. Find the cookie named **`sp_dc`**.
+6. Double-click the value and copy it.
+7. On your phone, open Stash → **Settings** → tap **Spotify** → **Connect** → **"Paste cookie"** in the top-right.
+8. Paste the value and tap **Connect**.
 
-> **Tip:** Some users have reported that cookies from incognito/private browsing windows can fail to sync. If you run into issues, try using your regular (non-incognito) browser window instead.
+> **Tip:** cookies from incognito / private windows sometimes fail to sync. If you hit weird errors, use a regular browser window.
 
-> **Why a cookie and not a password?** Spotify's mobile login API doesn't allow third-party apps. The cookie approach lets Stash authenticate as your browser session does. The cookie is session-scoped and can be revoked by logging out of Spotify on the web.
+> **Why a cookie?** Spotify's mobile login API doesn't allow third-party apps. The cookie approach authenticates Stash the same way your browser session does. The cookie is session-scoped and can be revoked by logging out of Spotify on the web.
 
 </details>
 
 <details>
-<summary><b>📺 Connect YouTube Music (click to expand)</b></summary>
+<summary><b>📺 Connect YouTube Music</b></summary>
 
-### What you need
-- A computer or another device with a desktop browser
-- Your YouTube Music account logged in on that browser
-
-### Steps
-
-1. On your computer, open **[https://music.youtube.com](https://music.youtube.com)** and make sure you're logged in.
+1. On a computer, open **[https://music.youtube.com](https://music.youtube.com)** and make sure you're logged in.
 2. Press **F12** to open Developer Tools.
-3. Click the **Network** tab at the top of DevTools.
-4. Refresh the YouTube Music page (F5 / Cmd+R).
-5. In the Network tab's filter/search box, type **`browse`** and press Enter.
-6. Click any of the requests in the list (they should all start with `browse`).
-7. Scroll down in the right panel until you find **Request Headers**.
-8. Find the line starting with **`cookie:`** and copy the *entire* value after `cookie:` — it will be a very long string with many `=` and `;` characters.
-9. Open Stash on your phone → **Settings** → tap **YouTube Music** under Accounts → tap **Connect**.
+3. Click the **Network** tab.
+4. Refresh the page (F5).
+5. In the filter box, type **`browse`** and press Enter.
+6. Click any request in the list (they should all start with `browse`).
+7. Scroll the right panel until you find **Request Headers**.
+8. Find the line starting with **`cookie:`** and copy the entire value after `cookie:`. It's long, with a lot of `=` and `;` characters.
+9. On your phone, open Stash → **Settings** → tap **YouTube Music** under Accounts → **Connect**.
 10. Paste the full cookie string and tap **Connect**.
 
-Stash will start fetching your YouTube Music daily mixes, discover mix, replay mix, and liked music.
+Stash will start pulling your YouTube Music daily mixes, discover mix, replay mix, and liked music.
 
-> **Tip:** Some users have reported that cookies from incognito/private browsing windows can fail to sync. If you run into issues, try using your regular (non-incognito) browser window instead.
+> **Tip:** same incognito caveat as Spotify — use a regular browser window.
 
-> **Why the whole cookie header?** YouTube uses multiple cookies together to authenticate (`SAPISID`, `__Secure-3PAPISID`, and `LOGIN_INFO`). Grabbing all of them at once is easier than finding each individually.
+> **Why the whole cookie header?** YouTube authenticates with multiple cookies together (`SAPISID`, `__Secure-3PAPISID`, `LOGIN_INFO`). Grabbing all of them at once is easier than finding each one individually.
 
 </details>
 
 ### After setup
 
-Once you've connected a service, head to the **Sync** tab. Before you hit Sync Now, expand the **Spotify Sync Preferences** card to pick exactly what you want — liked songs, specific playlists, daily mixes, discovery mixes like Release Radar and Discover Weekly, or all of the above. Each one gets its own toggle. Uncheck anything you don't care about and it won't waste your time or storage.
+Open the Sync tab. Before you tap Sync Now, expand the **Spotify Sync Preferences** card and pick the playlists and mixes you actually want — each playlist has its own toggle. For mixes, decide between **Refresh** mode (each sync replaces the mix's contents, cleaning up old tracks) and **Accumulate** mode (each sync stacks new tracks on top of what's there)
 
-For mix playlists, you can also choose between **Refresh** mode (replaces the mix contents each sync, cleaning up old tracks) and **Accumulate** mode (stacks new tracks on top of what's already there). Refresh is the default and works well for most people.
+The first sync is the slow one — a thousand-song library takes about an hour in Offline mode because every track has to download. After that, scheduled syncs just pick up whatever's new and run quietly in the background.
 
-The first sync takes a while depending on how much you're pulling (a library of 1000+ songs might take an hour or so — downloads run 8 at a time now, so it's faster than it used to be). After that, daily syncs just grab whatever's new. You can set it to run automatically on a schedule so your library stays current without you thinking about it.
+### Optional Navidrome export
 
-### Troubleshooting: Sync stops or fails in the background
+Fork builds include an opt-in, one-way export for downloaded files and playlist manifests. It requires a separate authenticated HTTPS `stash-ingest` service; the Android app does not write directly to Navidrome's API or expose Navidrome credentials. Setup, data flow, migration notes, and the versioned HTTP contract are documented in [docs/NAVIDROME_EXPORT.md](docs/NAVIDROME_EXPORT.md).
 
-Some Android devices kill background processes aggressively to save battery. If your sync fails with a foreground service error or just stops partway through, you need to let Stash run unrestricted:
+### When background sync stops working
 
-1. Go to your phone's **Settings** → **Apps** → **Stash**
-2. Tap **Battery** (or "App battery usage")
-3. Select **Unrestricted**
+Some Android phones — looking at you, Samsung, Xiaomi, OnePlus, Huawei — kill background processes aggressively to save battery. If your sync fails partway through with a foreground-service error, the fix is one toggle:
 
-This tells Android to let Stash keep running in the background while it downloads your library. Without this, some phones will kill the sync after a few minutes. You only need to do this once.
+1. Phone Settings → Apps → Stash → **Battery**
+2. Set to **Unrestricted**
 
-> **Note for Samsung, Xiaomi, OnePlus, and Huawei users:** These manufacturers have extra battery restrictions on top of stock Android. If setting Unrestricted doesn't help, check [dontkillmyapp.com](https://dontkillmyapp.com/) for device-specific instructions.
-
----
-
-## Why Not the Play Store?
-
-Stash downloads audio from YouTube and Spotify, which violates both services' Terms of Service. Google Play policy bans apps that facilitate unauthorized downloads. Every app in this space — **NewPipe, YTDLnis, SpotTube, InnerTune** — is distributed outside the Play Store for the same reason.
-
-That's not a bug, it's a principled stance: open-source tools that give users control over their own libraries don't belong in a gatekept store that could revoke them on a whim. Distribution via GitHub Releases and **F-Droid** (once we're ready) is the right home for Stash.
+You only need to do this once. If that's not enough on your specific device, [dontkillmyapp.com](https://dontkillmyapp.com/) has manufacturer-specific instructions.
 
 ---
 
-## Privacy and Security
+## Why Stash isn't on the Play Store
 
-- **Nothing leaves your device** except the API calls to Spotify and YouTube themselves.
-- **No analytics**, no telemetry, no crash reporting to third parties.
-- **Cookies are encrypted** at rest with AES-256-GCM via Google's [Tink](https://developers.google.com/tink) library.
-- **No Stash servers** exist. There's no account, no backend, no "cloud sync" of anything.
-- **All code is open source** and auditable — see the repo.
+Stash downloads audio from YouTube and Spotify, which violates both services' Terms of Service. Google Play policy bans apps that facilitate unauthorized downloads. Every project in this space — NewPipe, YTDLnis, SpotTube, InnerTune — is distributed outside the Play Store for the same reason.
 
-If you find a security issue, please see [SECURITY.md](SECURITY.md) for responsible disclosure guidelines.
+That isn't a workaround. It's a principled choice: open-source tools that give users control over their own libraries don't belong in a gatekept store that could revoke them on a whim. GitHub Releases (and F-Droid, when we're ready) are the right home for Stash.
 
 ---
 
-## Legal Disclaimer
+## Community
 
-Stash is an independent, unofficial project. It is **not affiliated with, endorsed by, or sponsored by Spotify AB, YouTube LLC, Google LLC, or Alphabet Inc.** All trademarks are the property of their respective owners.
-
-Stash is provided **for personal use only** as a tool for managing your own library. You are responsible for complying with the Terms of Service of any music service you use Stash with. Downloading copyrighted content without a license may be illegal in your jurisdiction. The Stash project accepts no responsibility for misuse.
+Bug reports and feature requests through [GitHub Issues](https://github.com/rawnaldclark/Stash/issues). For everything else — questions, requests, "is this thing on" — the [Stash Discord](https://discord.gg/vcbjEby5PC) is the place. Active dev there, fast answers.
 
 ---
 
 ## Contributing
 
-Contributions are welcome. Issues and pull requests through GitHub are the primary channel. Before sending a large PR, please open an issue to discuss the change.
+Pull requests welcome. For anything substantial, please open an issue first so we can talk through the change before you sink time into a PR.
 
-Stash is licensed under **GPL-3.0**, which means:
-- You can use, copy, modify, and redistribute Stash freely.
-- If you distribute a modified version, you must also release your source code under GPL-3.0.
-- No warranty is provided.
-
-See the [LICENSE](LICENSE) file for the full text.
+Stash is GPL-3.0. You can use, copy, modify, and redistribute it freely. If you distribute a modified version, you have to release your changes under GPL-3.0 too.
 
 ---
 
 ## Support Stash
 
-Stash is free, open-source, and has no ads or telemetry. If it replaced a subscription for you, consider supporting the project:
+Stash is free, open source, and has no ads or telemetry. If it replaced a subscription for you and you want to throw a few bucks at the project:
 
 <a href="https://ko-fi.com/rawnald"><img src="https://ko-fi.com/img/githubbutton_sm.svg" alt="Support on Ko-fi" height="36"></a>
 
 You can also [sponsor on GitHub](https://github.com/sponsors/rawnaldclark) for recurring support.
 
-Every contribution — whether it's a donation, a GitHub star, a bug report, or telling a friend — helps keep Stash alive and improving. Thank you.
+A star, a bug report, or telling a friend helps just as much. Thanks.
+
+---
+
+## Privacy and Security
+
+If you find a security issue, please use the disclosure process in [SECURITY.md](SECURITY.md).
+
+---
+
+## Legal disclaimer
+
+Stash is an independent, unofficial project. It is **not affiliated with, endorsed by, or sponsored by Spotify AB, YouTube LLC, Google LLC, or Alphabet Inc.** All trademarks belong to their respective owners.
+
+Stash is provided **for personal use only** — a tool for managing your own library. You're responsible for complying with the Terms of Service of any music service you use Stash with. Downloading copyrighted content without a license may be illegal in your jurisdiction. The Stash project accepts no responsibility for misuse.
 
 ---
 
 ## Acknowledgments
 
-Stash stands on the shoulders of several open-source projects:
+Stash builds on top of several open-source projects:
 
-- **[yt-dlp](https://github.com/yt-dlp/yt-dlp)** — the backbone of all YouTube downloading
-- **[JunkFood02/youtubedl-android](https://github.com/JunkFood02/youtubedl-android)** — Android bindings for yt-dlp
+- **[yt-dlp](https://github.com/yt-dlp/yt-dlp)** — the YouTube extraction backbone
+- **[youtubedl-android](https://github.com/JunkFood02/youtubedl-android)** — yt-dlp's Android bindings
 - **[QuickJS-NG](https://github.com/quickjs-ng/quickjs)** — lightweight JS engine for YouTube's signature challenges
 - **[Media3 / ExoPlayer](https://github.com/androidx/media)** — audio playback
 - **[ytmusicapi](https://github.com/sigma67/ytmusicapi)** — YouTube Music API reverse-engineering reference
-- **[Bungee Shade](https://fonts.google.com/specimen/Bungee+Shade)** — the retro wordmark font, by David Jonathan Ross (SIL OFL)
+- **[Bungee Shade](https://fonts.google.com/specimen/Bungee+Shade)** — the wordmark font, by David Jonathan Ross (SIL OFL)
+- **Discord logo** — Simple Icons (CC0)
 
 ---
 
@@ -235,6 +270,6 @@ Stash stands on the shoulders of several open-source projects:
 
 Copyright © 2026 Rawnald Clark
 
-Stash is free software: you can redistribute it and/or modify it under the terms of the GNU General Public License as published by the Free Software Foundation, either version 3 of the License, or (at your option) any later version.
+Stash is free software: you can redistribute it and/or modify it under the terms of the [GNU General Public License](LICENSE), either version 3 of the License, or (at your option) any later version.
 
-This program is distributed in the hope that it will be useful, but **WITHOUT ANY WARRANTY**; without even the implied warranty of MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the [GNU General Public License](LICENSE) for more details.
+This program is distributed in the hope that it will be useful, but **WITHOUT ANY WARRANTY**; without even the implied warranty of MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the LICENSE file for the full text.

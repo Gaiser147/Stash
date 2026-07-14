@@ -1,0 +1,419 @@
+name: Stash fork verification
+
+on:
+  push:
+    branches: [codex/navidrome-v0.9.75]
+  pull_request:
+  workflow_dispatch:
+  schedule:
+    - cron: "23 4 * * 1"
+
+permissions:
+  contents: read
+  issues: write
+
+concurrency:
+  group: navidrome-fork-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  verify:
+    if: github.event_name != 'schedule'
+    name: Test and build debug APK
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - uses: gradle/actions/setup-gradle@v6
+
+      - name: Restore Gradle wrapper executable bit
+        run: chmod +x gradlew
+
+      - name: Prepare optional stable debug signer
+        id: debug_signing
+        env:
+          DEBUG_KEYSTORE_BASE64: ${{ secrets.STASH_DEBUG_KEYSTORE_BASE64 }}
+          DEBUG_KEYSTORE_PASSWORD: ${{ secrets.STASH_DEBUG_KEYSTORE_PASSWORD }}
+          DEBUG_KEY_ALIAS: ${{ secrets.STASH_DEBUG_KEY_ALIAS }}
+          DEBUG_KEY_PASSWORD: ${{ secrets.STASH_DEBUG_KEY_PASSWORD }}
+        shell: bash
+        run: |
+          configured=0
+          [ -n "$DEBUG_KEYSTORE_BASE64" ] && configured=$((configured + 1))
+          [ -n "$DEBUG_KEYSTORE_PASSWORD" ] && configured=$((configured + 1))
+          [ -n "$DEBUG_KEY_ALIAS" ] && configured=$((configured + 1))
+          [ -n "$DEBUG_KEY_PASSWORD" ] && configured=$((configured + 1))
+          if [ "$configured" -eq 0 ]; then
+            echo "configured=false" >> "$GITHUB_OUTPUT"
+            echo "::warning::Stable debug signing secrets are not configured; artifact is CI-only."
+          elif [ "$configured" -ne 4 ]; then
+            echo "::error::Stable debug signing is only partially configured. Set all four STASH_DEBUG_KEY* secrets."
+            exit 1
+          else
+            echo "$DEBUG_KEYSTORE_BASE64" | base64 --decode > "$RUNNER_TEMP/stash-debug.jks"
+            chmod 600 "$RUNNER_TEMP/stash-debug.jks"
+            keytool -list \
+              -keystore "$RUNNER_TEMP/stash-debug.jks" \
+              -storepass "$DEBUG_KEYSTORE_PASSWORD" \
+              -alias "$DEBUG_KEY_ALIAS" >/dev/null
+            echo "configured=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Check private ingest fixture access
+        id: ingest_fixture
+        env:
+          DEPLOY_KEY: ${{ secrets.STASH_INGEST_DEPLOY_KEY }}
+        run: |
+          if [ -n "$DEPLOY_KEY" ]; then
+            echo "available=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "available=false" >> "$GITHUB_OUTPUT"
+            echo "::warning::Private stash-ingest fixture is unavailable; canonical branch CI must provide STASH_INGEST_DEPLOY_KEY."
+          fi
+
+      - name: Check out pinned stash-ingest contract
+        if: steps.ingest_fixture.outputs.available == 'true'
+        uses: actions/checkout@v7
+        with:
+          repository: Gaiser147/stash-ingest
+          ref: 1bccd832334508b1fe188d4c9c618c0d2c4e1e12
+          path: _e2e/stash-ingest
+          ssh-key: ${{ secrets.STASH_INGEST_DEPLOY_KEY }}
+          persist-credentials: false
+
+      - name: Start pinned stash-ingest TLS fixture
+        if: steps.ingest_fixture.outputs.available == 'true'
+        env:
+          INGEST_COMMIT: 1bccd832334508b1fe188d4c9c618c0d2c4e1e12
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install --yes --no-install-recommends ffmpeg
+          root="$RUNNER_TEMP/stash-ingest-e2e"
+          mkdir -p "$root/library" "$root/state"
+          openssl req -x509 -newkey rsa:2048 -nodes -days 1 \
+            -subj '/CN=localhost' \
+            -addext 'subjectAltName=DNS:localhost,IP:127.0.0.1' \
+            -keyout "$root/key.pem" -out "$root/cert.pem" >/dev/null 2>&1
+          ffmpeg -hide_banner -loglevel error -f lavfi \
+            -i 'sine=frequency=440:duration=0.2' -c:a flac "$root/fixture.flac"
+          STASH_INGEST_TOKEN='dedicated-e2e-token' \
+          STASH_INGEST_LIBRARY_ROOT="$root/library" \
+          STASH_INGEST_STATE_DB="$root/state/state.sqlite3" \
+          PYTHONPATH="$GITHUB_WORKSPACE/_e2e/stash-ingest" \
+            python3 -m stash_ingest --host 127.0.0.1 --port 4655 \
+              --tls-cert "$root/cert.pem" --tls-key "$root/key.pem" \
+              >"$root/server.log" 2>&1 &
+          echo "$!" > "$root/server.pid"
+          ready=false
+          for _ in $(seq 1 50); do
+            if curl --silent --fail --cacert "$root/cert.pem" \
+              -H 'Authorization: Bearer dedicated-e2e-token' \
+              -H 'X-Stash-Contract: 1' \
+              https://localhost:4655/v1/capabilities >/dev/null 2>&1; then
+              ready=true
+              break
+            fi
+            sleep 0.2
+          done
+          if [ "$ready" != true ]; then
+            cat "$root/server.log"
+            exit 1
+          fi
+          echo "STASH_INGEST_E2E_URL=https://localhost:4655" >> "$GITHUB_ENV"
+          echo "STASH_INGEST_E2E_TOKEN=dedicated-e2e-token" >> "$GITHUB_ENV"
+          echo "STASH_INGEST_E2E_CERT=$root/cert.pem" >> "$GITHUB_ENV"
+          echo "STASH_INGEST_E2E_AUDIO=$root/fixture.flac" >> "$GITHUB_ENV"
+          jq -n \
+            --arg client_commit "$GITHUB_SHA" \
+            --arg server_commit "$INGEST_COMMIT" \
+            --arg contract "1" \
+            '{client_commit: $client_commit, server_commit: $server_commit, contract: $contract}' \
+            > "$root/provenance.json"
+
+      - name: Test Stash integrations and affected modules
+        run: >-
+          ./gradlew
+          :data:download:testDebugUnitTest
+          :feature:muse:testDebugUnitTest
+          :feature:settings:testDebugUnitTest
+          --no-daemon
+
+      - name: Test installed v0.9.32 schema upgrade
+        run: >-
+          ./gradlew
+          :core:data:testDebugUnitTest
+          --tests com.stash.core.data.db.MigrationV26V32UpgradeTest
+          --no-daemon
+
+      - name: Verify combined ingest evidence
+        if: steps.ingest_fixture.outputs.available == 'true'
+        run: |
+          root="$RUNNER_TEMP/stash-ingest-e2e"
+          test -s "$root/library/Stash/e2e/artist/album/track.flac"
+          test -s "$root/library/Playlists/Stash/e2e.m3u8"
+          test -s "$root/state/state.sqlite3"
+          ffprobe -v error -select_streams a:0 -show_entries stream=codec_type \
+            -of csv=p=0 "$root/library/Stash/e2e/artist/album/track.flac" \
+            | grep -Fx 'audio'
+          grep -F 'Stash/e2e/artist/album/track.flac' \
+            "$root/library/Playlists/Stash/e2e.m3u8"
+          grep -F '"tls": true' "$root/server.log"
+
+      - name: Stop private ingest fixture
+        if: always() && steps.ingest_fixture.outputs.available == 'true'
+        run: |
+          root="$RUNNER_TEMP/stash-ingest-e2e"
+          if [ -s "$root/server.pid" ]; then
+            kill "$(cat "$root/server.pid")" 2>/dev/null || true
+            wait "$(cat "$root/server.pid")" 2>/dev/null || true
+          fi
+          rm -f "$root/key.pem" "$root/cert.pem"
+
+      - name: Upload combined ingest evidence
+        if: always() && steps.ingest_fixture.outputs.available == 'true'
+        uses: actions/upload-artifact@v7
+        with:
+          name: stash-ingest-e2e-evidence
+          path: |
+            ${{ runner.temp }}/stash-ingest-e2e/server.log
+            ${{ runner.temp }}/stash-ingest-e2e/provenance.json
+          if-no-files-found: ignore
+          retention-days: 14
+
+      - name: Upload unit test reports
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: stash-navidrome-test-reports
+          path: |
+            data/download/build/test-results/testDebugUnitTest/
+            data/download/build/reports/tests/testDebugUnitTest/
+            feature/muse/build/test-results/testDebugUnitTest/
+            feature/muse/build/reports/tests/testDebugUnitTest/
+            feature/settings/build/test-results/testDebugUnitTest/
+            feature/settings/build/reports/tests/testDebugUnitTest/
+            core/data/build/test-results/testDebugUnitTest/
+            core/data/build/reports/tests/testDebugUnitTest/
+          if-no-files-found: ignore
+          retention-days: 14
+
+      - name: Assemble upgrade or preview APK
+        id: build_mode
+        env:
+          STASH_DEBUG_KEYSTORE_FILE: ${{ runner.temp }}/stash-debug.jks
+          STASH_DEBUG_KEYSTORE_PASSWORD: ${{ secrets.STASH_DEBUG_KEYSTORE_PASSWORD }}
+          STASH_DEBUG_KEY_ALIAS: ${{ secrets.STASH_DEBUG_KEY_ALIAS }}
+          STASH_DEBUG_KEY_PASSWORD: ${{ secrets.STASH_DEBUG_KEY_PASSWORD }}
+          LASTFM_API_KEY: ${{ secrets.LASTFM_API_KEY }}
+          LASTFM_API_SECRET: ${{ secrets.LASTFM_API_SECRET }}
+          STABLE_SIGNING: ${{ steps.debug_signing.outputs.configured }}
+        shell: bash
+        run: |
+          if [ "$STABLE_SIGNING" = "true" ]; then
+            ./gradlew :app:assembleLegacyProd --no-daemon
+            echo "application_id=com.stash.app.debug" >> "$GITHUB_OUTPUT"
+            echo "application_label=Stash" >> "$GITHUB_OUTPUT"
+            echo "install_mode=in-place-upgrade" >> "$GITHUB_OUTPUT"
+            echo "artifact_name=stash-in-place-upgrade-candidate" >> "$GITHUB_OUTPUT"
+          else
+            ./gradlew :app:assembleDebug -Pstash.sideBySidePreview=true --no-daemon
+            echo "application_id=com.stash.app.preview" >> "$GITHUB_OUTPUT"
+            echo "application_label=Stash Navidrome Preview" >> "$GITHUB_OUTPUT"
+            echo "install_mode=side-by-side-preview" >> "$GITHUB_OUTPUT"
+            echo "artifact_name=stash-navidrome-preview-ci-only" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Locate APK
+        id: apk
+        shell: bash
+        run: |
+          apk="$(find app/build/outputs/apk -name '*.apk' -print -quit)"
+          if [ -z "$apk" ]; then
+            echo "::error::No debug APK produced"
+            exit 1
+          fi
+          echo "path=$apk" >> "$GITHUB_OUTPUT"
+
+      - name: Write artifact provenance
+        id: provenance
+        env:
+          APK_PATH: ${{ steps.apk.outputs.path }}
+          SIGNING_MODE: ${{ steps.debug_signing.outputs.configured == 'true' && 'stable-signed' || 'ci-only' }}
+          EXPECTED_APPLICATION_ID: ${{ steps.build_mode.outputs.application_id }}
+          EXPECTED_APPLICATION_LABEL: ${{ steps.build_mode.outputs.application_label }}
+          INSTALL_MODE: ${{ steps.build_mode.outputs.install_mode }}
+          DEBUG_KEYSTORE_PASSWORD: ${{ secrets.STASH_DEBUG_KEYSTORE_PASSWORD }}
+          DEBUG_KEY_ALIAS: ${{ secrets.STASH_DEBUG_KEY_ALIAS }}
+          EXPECTED_STABLE_SIGNER_SHA256: 3b89ee42d3535464d02d289427b71e3ffae4f9ea9e8b7628bcdabf44a55ae9be
+        shell: bash
+        run: |
+          provenance="$RUNNER_TEMP/stash-artifact-provenance.json"
+          apk_sha256="$(sha256sum "$APK_PATH" | cut -d ' ' -f 1)"
+          apksigner="$(find "$ANDROID_HOME/build-tools" -type f -name apksigner -print | sort -V | tail -n1)"
+          if [ -z "$apksigner" ]; then
+            echo "::error::Android apksigner was not found"
+            exit 1
+          fi
+          "$apksigner" verify "$APK_PATH"
+          aapt="$(find "$ANDROID_HOME/build-tools" -type f -name aapt -print | sort -V | tail -n1)"
+          if [ -z "$aapt" ]; then
+            echo "::error::Android aapt was not found"
+            exit 1
+          fi
+          application_id="$("$aapt" dump badging "$APK_PATH" \
+            | sed -n "s/^package: name='\([^']*\)'.*/\1/p")"
+          if [ "$application_id" != "$EXPECTED_APPLICATION_ID" ]; then
+            echo "::error::APK application ID $application_id does not match $EXPECTED_APPLICATION_ID"
+            exit 1
+          fi
+          application_label="$("$aapt" dump badging "$APK_PATH" \
+            | sed -n "s/^application-label:'\(.*\)'$/\1/p")"
+          if [ "$application_label" != "$EXPECTED_APPLICATION_LABEL" ]; then
+            echo "::error::APK label $application_label does not match $EXPECTED_APPLICATION_LABEL"
+            exit 1
+          fi
+          signer_output="$("$apksigner" verify --print-certs "$APK_PATH" 2>&1)"
+          printf '%s\n' "$signer_output"
+          signer_sha256="$(printf '%s\n' "$signer_output" \
+            | awk '/SHA-256/ {
+                for (i = 1; i <= NF; i++) {
+                  if ($i ~ /^[[:xdigit:]]{64}$/) { print tolower($i); exit }
+                }
+              }')"
+          if [ -z "$signer_sha256" ]; then
+            echo "::error::Could not read the APK signing certificate"
+            exit 1
+          fi
+          if [ "$SIGNING_MODE" = "stable-signed" ]; then
+            expected_signer="$(keytool -list -v \
+              -keystore "$RUNNER_TEMP/stash-debug.jks" \
+              -storepass "$DEBUG_KEYSTORE_PASSWORD" \
+              -alias "$DEBUG_KEY_ALIAS" \
+              | awk '/SHA256:/ {
+                  value = $0
+                  sub(/^.*SHA256:[[:space:]]*/, "", value)
+                  gsub(":", "", value)
+                  print tolower(value)
+                  exit
+                }')"
+            if [ "$signer_sha256" != "$expected_signer" ]; then
+              echo "::error::APK signer does not match the configured stable keystore"
+              exit 1
+            fi
+            if [ "$signer_sha256" != "$EXPECTED_STABLE_SIGNER_SHA256" ]; then
+              echo "::error::Configured keystore does not match the retained upgrade signer"
+              exit 1
+            fi
+          fi
+          jq -n \
+            --arg repository "$GITHUB_REPOSITORY" \
+            --arg commit "$GITHUB_SHA" \
+            --arg ref "$GITHUB_REF" \
+            --arg run_id "$GITHUB_RUN_ID" \
+            --arg run_attempt "$GITHUB_RUN_ATTEMPT" \
+            --arg signing "$SIGNING_MODE" \
+            --arg application_id "$application_id" \
+            --arg application_label "$application_label" \
+            --arg install_mode "$INSTALL_MODE" \
+            --arg apk_file "$(basename "$APK_PATH")" \
+            --arg apk_sha256 "$apk_sha256" \
+            --arg apk_signer_sha256 "$signer_sha256" \
+            --arg expected_stable_signer_sha256 "$EXPECTED_STABLE_SIGNER_SHA256" \
+            '{
+              repository: $repository,
+              commit: $commit,
+              ref: $ref,
+              workflow_run: $run_id,
+              workflow_attempt: $run_attempt,
+              signing: $signing,
+              application_id: $application_id,
+              application_label: $application_label,
+              install_mode: $install_mode,
+              apk_file: $apk_file,
+              apk_sha256: $apk_sha256,
+              apk_signer_sha256: $apk_signer_sha256,
+              expected_stable_signer_sha256: $expected_stable_signer_sha256
+            }' > "$provenance"
+          echo "path=$provenance" >> "$GITHUB_OUTPUT"
+          echo "APK SHA-256: $apk_sha256" >> "$GITHUB_STEP_SUMMARY"
+          echo "APK signer SHA-256: $signer_sha256" >> "$GITHUB_STEP_SUMMARY"
+          echo "Application ID: $application_id" >> "$GITHUB_STEP_SUMMARY"
+          echo "Application label: $application_label" >> "$GITHUB_STEP_SUMMARY"
+          echo "Install mode: $INSTALL_MODE" >> "$GITHUB_STEP_SUMMARY"
+          echo "Signing mode: $SIGNING_MODE" >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload debug artifact
+        uses: actions/upload-artifact@v7
+        with:
+          name: ${{ steps.build_mode.outputs.artifact_name }}
+          path: |
+            ${{ steps.apk.outputs.path }}
+            ${{ steps.provenance.outputs.path }}
+          retention-days: 14
+
+      - name: Remove temporary signer
+        if: always()
+        run: rm -f "$RUNNER_TEMP/stash-debug.jks"
+
+  upstream-check:
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    name: Check latest upstream release
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+
+      - name: Compare latest release tag
+        id: upstream
+        shell: bash
+        run: |
+          git fetch https://github.com/rawnaldclark/Stash.git master --tags
+          latest="$(git tag --list 'v*' --sort=-v:refname | head -n1)"
+          echo "latest=$latest" >> "$GITHUB_OUTPUT"
+          if git merge-base --is-ancestor "$latest" HEAD; then
+            echo "update=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "update=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Create or refresh upstream update issue
+        if: steps.upstream.outputs.update == 'true'
+        uses: actions/github-script@v9
+        env:
+          LATEST_TAG: ${{ steps.upstream.outputs.latest }}
+        with:
+          script: |
+            const title = `[Upstream] Review ${process.env.LATEST_TAG}`;
+            const body = [
+              `Upstream released **${process.env.LATEST_TAG}**.`,
+              '',
+              'Rebase the Navidrome behavior onto that tag in a review branch, run this workflow, and perform the migration/signing checks before replacing the current branch.',
+              '',
+              'This notification deliberately does not auto-merge or publish an APK.',
+            ].join('\n');
+            const {data: issues} = await github.rest.issues.listForRepo({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              state: 'open',
+              per_page: 100,
+            });
+            const existing = issues.find(issue => issue.title.startsWith('[Upstream] Review '));
+            if (existing) {
+              await github.rest.issues.update({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: existing.number,
+                title,
+                body,
+              });
+            } else {
+              await github.rest.issues.create({owner: context.repo.owner, repo: context.repo.repo, title, body});
+            }

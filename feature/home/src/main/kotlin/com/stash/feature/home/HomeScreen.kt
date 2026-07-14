@@ -1,6 +1,5 @@
 package com.stash.feature.home
 
-import android.text.format.DateUtils
 import androidx.compose.animation.core.EaseInOut
 import androidx.compose.animation.core.LinearEasing
 import androidx.compose.animation.core.RepeatMode
@@ -58,12 +57,14 @@ import androidx.compose.material.icons.filled.FavoriteBorder
 import androidx.compose.material.icons.filled.MusicNote
 import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material.icons.filled.Delete
+import androidx.compose.material.icons.filled.Edit
 import androidx.compose.material.icons.filled.PlaylistAdd
 import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material.icons.filled.Download
 import androidx.compose.material.icons.filled.DownloadDone
 import androidx.compose.material.icons.filled.RemoveCircleOutline
 import androidx.compose.material.icons.automirrored.filled.QueueMusic
+import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.FilterChip
 import androidx.compose.material3.FilterChipDefaults
@@ -99,19 +100,18 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.hilt.navigation.compose.hiltViewModel
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import com.stash.core.data.mix.MixBuildState
 import com.stash.core.model.MusicSource
 import com.stash.core.model.Playlist
 import com.stash.core.model.PlaylistType
-import com.stash.core.model.SyncDisplayStatus
-import com.stash.core.model.SyncState
 import com.stash.core.model.Track
 import com.stash.core.ui.components.CreatePlaylistDialog
 import com.stash.core.ui.components.GlassCard
 import com.stash.core.ui.components.SectionHeader
 import com.stash.core.ui.components.SourceIndicator
 import com.stash.core.ui.theme.LocalIsDarkTheme
-import com.stash.feature.home.streaming.StreamingModeChip
-import com.stash.feature.home.streaming.StreamingModeSheet
+import com.stash.core.ui.components.streaming.StreamingModeChip
+import com.stash.core.ui.components.streaming.StreamingModeSheet
 import androidx.compose.ui.layout.ContentScale
 import coil3.compose.AsyncImage
 import com.stash.core.ui.theme.StashTheme
@@ -127,6 +127,7 @@ fun HomeScreen(
     onNavigateToPlaylist: (Long) -> Unit = {},
     onNavigateToLikedSongs: (String?) -> Unit = {},
     onNavigateToSettings: () -> Unit = {},
+    onNavigateToMixBuilder: (Long?) -> Unit = {},
     viewModel: HomeViewModel = hiltViewModel(),
 ) {
     val uiState by viewModel.uiState.collectAsStateWithLifecycle()
@@ -222,6 +223,20 @@ fun HomeScreen(
 
                 val socialUriHandler = LocalUriHandler.current
                 androidx.compose.material3.IconButton(
+                    onClick = { socialUriHandler.openUri(STASH_DISCORD_URL) },
+                    modifier = Modifier.size(40.dp),
+                ) {
+                    androidx.compose.material3.Icon(
+                        painter = androidx.compose.ui.res.painterResource(
+                            id = R.drawable.ic_discord,
+                        ),
+                        contentDescription = "Join the Stash Discord",
+                        tint = androidx.compose.ui.graphics.Color(0xFF5865F2),
+                        modifier = Modifier.size(20.dp),
+                    )
+                }
+
+                androidx.compose.material3.IconButton(
                     onClick = { socialUriHandler.openUri(STASH_ISSUE_URL) },
                     modifier = Modifier.size(40.dp),
                 ) {
@@ -253,38 +268,8 @@ fun HomeScreen(
             )
         }
 
-        // ── Sync status card ─────────────────────────────────────────
-        item {
-            SyncStatusCard(
-                syncStatus = uiState.syncStatus,
-                spotifyConnected = uiState.spotifyConnected,
-                youTubeConnected = uiState.youTubeConnected,
-                hasEverSynced = uiState.hasEverSynced,
-                modifier = Modifier.padding(horizontal = 16.dp),
-            )
-        }
-
-        // ── Last.fm connect nudge ────────────────────────────────────
-        // Shown only when we have creds wired AND the user has local
-        // plays accumulating locally AND the user hasn't dismissed the
-        // banner. Taps route into Settings; the X dismisses permanently.
-        uiState.lastFmPrompt?.let { prompt ->
-            item {
-                Spacer(Modifier.height(6.dp))
-                LastFmConnectBanner(
-                    pendingCount = prompt.pendingCount,
-                    onConnect = {
-                        // v0.9.13: queue the Settings focus target THEN navigate.
-                        // The Settings VM reads + clears the focus on entry and
-                        // scrolls the Last.fm card into view.
-                        viewModel.requestSettingsLastFmFocus()
-                        onNavigateToSettings()
-                    },
-                    onDismiss = viewModel::dismissLastFmBanner,
-                    modifier = Modifier.padding(horizontal = 16.dp),
-                )
-            }
-        }
+        // ── Powered-by-ARCOD strip: removed 2026-07-01 while ARCOD is parked
+        // (host down for us). PartnerStrip + ArcodPartner kept for re-enabling.
 
         // ── Lossless connect nudge ───────────────────────────────────
         // Shown when the user has lossless toggled OFF and hasn't
@@ -304,30 +289,18 @@ fun HomeScreen(
             }
         }
 
-        // ── Tracks waiting for lossless (FLAC-only deferred set) ─────
-        // v0.9.17: surfaces WAITING_FOR_LOSSLESS rows with one-tap
-        // recovery. State picker is in the ViewModel; this only renders
-        // when [WaitingForLosslessBannerState] is non-Hidden. All four
-        // action callbacks route through existing nav surfaces — no new
-        // nav graph entries.
-        if (uiState.waitingForLosslessBanner !is com.stash.feature.home.banner.WaitingForLosslessBannerState.Hidden) {
+        // ── Re-tagging library (metadata backfill progress) ──────────
+        // v0.9.35: surfaces MetadataBackfillWorker progress on upgrade
+        // so users know why disk IO / yt-dlp activity is happening. The
+        // banner renders Hidden in the steady state (post-backfill); the
+        // 2-second "Done" pulse self-acks via LaunchedEffect inside the
+        // composable.
+        if (uiState.metadataBackfillBanner !is com.stash.feature.home.banner.MetadataBackfillBannerState.Hidden) {
             item {
                 Spacer(Modifier.height(6.dp))
-                com.stash.feature.home.banner.WaitingForLosslessBanner(
-                    state = uiState.waitingForLosslessBanner,
-                    onSolveCaptcha = {
-                        // The captcha WebView is reachable via Settings →
-                        // Audio Quality card. Mirror LosslessConnectBanner's
-                        // path: queue the focus target then navigate.
-                        viewModel.requestSettingsLosslessFocus()
-                        onNavigateToSettings()
-                    },
-                    onConnect = {
-                        viewModel.requestSettingsLosslessFocus()
-                        onNavigateToSettings()
-                    },
-                    onRetry = viewModel::onRetryDeferredRequested,
-                    onDismiss = viewModel::dismissWaitingForLosslessBanner,
+                com.stash.feature.home.banner.MetadataBackfillBanner(
+                    state = uiState.metadataBackfillBanner,
+                    onFinishedAcknowledged = viewModel::onMetadataBackfillFinishedAcknowledged,
                     modifier = Modifier.padding(horizontal = 16.dp),
                 )
             }
@@ -397,22 +370,41 @@ fun HomeScreen(
         // v0.4.1: sits BELOW the sync-sourced Daily Mixes while the
         // feature is in beta. Once it graduates, this block can move
         // back up so user-generated mixes feel primary.
-        if (uiState.stashMixes.isNotEmpty()) {
-            item {
-                SectionHeader(title = "Stash Mixes  (Beta)")
-            }
-            item {
-                LazyRow(
-                    contentPadding = PaddingValues(horizontal = 16.dp),
-                    horizontalArrangement = Arrangement.spacedBy(12.dp),
-                ) {
-                    items(uiState.stashMixes, key = { it.id }) { playlist ->
-                        DailyMixCard(
-                            playlist = playlist,
-                            onClick = { onNavigateToPlaylist(playlist.id) },
-                            onLongPress = { selectedPlaylist = playlist },
-                        )
+        //
+        // The header + row render unconditionally (no `stashMixes.isNotEmpty`
+        // gate) so the trailing "Create mix" tile is ALWAYS reachable, even
+        // for a user with zero mixes. When mixes exist the layout is
+        // identical to before — they render first, Create tile last.
+        item {
+            SectionHeader(title = "Stash Mixes  (Beta)")
+        }
+        item {
+            LazyRow(
+                contentPadding = PaddingValues(horizontal = 16.dp),
+                horizontalArrangement = Arrangement.spacedBy(12.dp),
+            ) {
+                // Create tile leads the row (a compact "add" affordance).
+                item {
+                    CreateMixCard(onClick = { onNavigateToMixBuilder(null) })
+                }
+                items(uiState.stashMixes, key = { it.id }) { playlist ->
+                    val buildState = when {
+                        uiState.buildingMixIds.contains(playlist.id) -> MixBuildState.BUILDING
+                        uiState.emptyMixIds.contains(playlist.id) -> MixBuildState.EMPTY
+                        else -> MixBuildState.READY
                     }
+                    DailyMixCard(
+                        playlist = playlist,
+                        buildState = buildState,
+                        onClick = {
+                            // Opening a stale custom mix transparently
+                            // refreshes it (fire-and-forget; no-ops for
+                            // builtins + non-stale mixes).
+                            viewModel.refreshMixIfStale(playlist.id)
+                            onNavigateToPlaylist(playlist.id)
+                        },
+                        onLongPress = { selectedPlaylist = playlist },
+                    )
                 }
             }
         }
@@ -617,6 +609,33 @@ fun HomeScreen(
                     },
                 )
             }
+
+            // Edit / Delete — only for user-built (non-builtin) Stash Mixes.
+            // Gated on customMixPlaylistIds so builtin recipe playlists (which
+            // can't be edited or deleted here) never surface these rows.
+            if (uiState.customMixPlaylistIds.contains(playlist.id)) {
+                HomeBottomSheetActionRow(
+                    icon = Icons.Default.Edit,
+                    label = "Edit mix",
+                    onClick = {
+                        // Resolve the recipe id async, then route to the
+                        // builder. Dismiss the sheet immediately.
+                        viewModel.editRecipeId(playlist.id) { recipeId ->
+                            onNavigateToMixBuilder(recipeId)
+                        }
+                        selectedPlaylist = null
+                    },
+                )
+                HomeBottomSheetActionRow(
+                    icon = Icons.Default.Delete,
+                    label = "Delete mix",
+                    tint = MaterialTheme.colorScheme.error,
+                    onClick = {
+                        viewModel.deleteCustomMix(playlist)
+                        selectedPlaylist = null
+                    },
+                )
+            }
             HomeBottomSheetActionRow(
                 icon = Icons.Default.PlayArrow,
                 label = "Play All",
@@ -742,196 +761,6 @@ fun HomeScreen(
     }
 }
 
-// ── Sync status card ─────────────────────────────────────────────────────
-
-@Composable
-private fun SyncStatusCard(
-    syncStatus: SyncStatusInfo,
-    spotifyConnected: Boolean,
-    youTubeConnected: Boolean,
-    hasEverSynced: Boolean,
-    modifier: Modifier = Modifier,
-) {
-    val extendedColors = StashTheme.extendedColors
-    val anyServiceConnected = spotifyConnected || youTubeConnected
-
-    GlassCard(modifier = modifier) {
-        Column(
-            modifier = Modifier.fillMaxWidth(),
-            verticalArrangement = Arrangement.spacedBy(12.dp),
-        ) {
-            // -- Connection + sync status header --
-            // Uses SyncDisplayStatus so "Completed with some failures" and
-            // "Interrupted mid-run" don't both read as a generic failure.
-            Row(
-                verticalAlignment = Alignment.CenterVertically,
-                horizontalArrangement = Arrangement.spacedBy(8.dp),
-            ) {
-                PulseDot(color = syncStatusDotColor(syncStatus, anyServiceConnected, hasEverSynced))
-                Text(
-                    text = syncStatusLabel(syncStatus, anyServiceConnected, hasEverSynced),
-                    style = MaterialTheme.typography.titleSmall,
-                    color = MaterialTheme.colorScheme.onSurface,
-                )
-            }
-
-            // Connected-services row removed 2026-04-21: the stats row
-            // below already labels Spotify/YouTube with their counts, so
-            // the dot+label row was pure duplication.
-
-            // -- Prompt or stats depending on sync state --
-            if (!anyServiceConnected) {
-                Text(
-                    text = "Connect Spotify or YouTube Music in Settings to start syncing your library.",
-                    style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                )
-            } else if (!hasEverSynced) {
-                Text(
-                    text = "Tap Sync Now to download your playlists and tracks.",
-                    style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                )
-            } else {
-                // Decoupled gating: show each FLAC sub-line whenever its
-                // own value is > 0. The previous AND-coupling
-                // (`flacTracks > 0 && flacStorageBytes > 0`) hid the
-                // sub-text for any user whose DB had FLAC rows but
-                // file_size_bytes still at 0 — turning the "defensive"
-                // check into a permanent display blocker. Per-stat
-                // gating is the design that v0.9.0 originally shipped
-                // with; the coupling was a regression introduced in
-                // c3c6529 and is now reverted.
-                Row(
-                    modifier = Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.SpaceBetween,
-                ) {
-                    StatItem(
-                        label = "Tracks",
-                        value = syncStatus.totalTracks.toString(),
-                        subValue = if (syncStatus.flacTracks > 0) "${syncStatus.flacTracks} FLAC" else null,
-                    )
-                    StatItem(
-                        label = "Spotify",
-                        value = syncStatus.spotifyTracks.toString(),
-                    )
-                    StatItem(
-                        label = "YouTube",
-                        value = syncStatus.youTubeTracks.toString(),
-                    )
-                    StatItem(
-                        label = "Storage",
-                        value = formatBytes(syncStatus.storageUsedBytes),
-                        subValue = if (syncStatus.flacStorageBytes > 0) "${formatBytes(syncStatus.flacStorageBytes)} FLAC" else null,
-                    )
-                }
-                if (syncStatus.lastSyncTime != null) {
-                    Text(
-                        text = "Last sync ${formatRelativeTime(syncStatus.lastSyncTime)}",
-                        style = MaterialTheme.typography.bodySmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    )
-                }
-            }
-        }
-    }
-}
-
-/**
- * Label shown next to the pulse dot in [SyncStatusCard]. Interprets
- * [SyncStatusInfo.displayStatus] so partial / interrupted runs aren't
- * misreported as generic failures.
- */
-@Composable
-private fun syncStatusLabel(
-    syncStatus: SyncStatusInfo,
-    anyServiceConnected: Boolean,
-    hasEverSynced: Boolean,
-): String = when {
-    !anyServiceConnected -> "No services connected"
-    !hasEverSynced -> "Ready to sync"
-    else -> when (val s = syncStatus.displayStatus) {
-        SyncDisplayStatus.Idle -> "Ready to sync"
-        SyncDisplayStatus.Running -> "Syncing..."
-        SyncDisplayStatus.Success -> "Synced"
-        is SyncDisplayStatus.PartialSuccess ->
-            "Partially synced — ${s.downloaded} saved, ${s.failed} failed"
-        is SyncDisplayStatus.Interrupted ->
-            if (s.downloaded > 0) "Interrupted — ${s.downloaded} saved"
-            else "Interrupted"
-        is SyncDisplayStatus.Failed -> "Sync failed"
-    }
-}
-
-/**
- * Color for the pulse dot in [SyncStatusCard]. Green = success-ish,
- * amber = in-progress / warning, red = genuine failure, gray = idle.
- */
-@Composable
-private fun syncStatusDotColor(
-    syncStatus: SyncStatusInfo,
-    anyServiceConnected: Boolean,
-    hasEverSynced: Boolean,
-): Color {
-    val extendedColors = StashTheme.extendedColors
-    return when {
-        !anyServiceConnected -> MaterialTheme.colorScheme.onSurfaceVariant
-        !hasEverSynced -> extendedColors.warning
-        else -> when (syncStatus.displayStatus) {
-            SyncDisplayStatus.Idle -> extendedColors.warning
-            SyncDisplayStatus.Running -> extendedColors.warning
-            SyncDisplayStatus.Success -> extendedColors.success
-            is SyncDisplayStatus.PartialSuccess -> extendedColors.warning
-            is SyncDisplayStatus.Interrupted -> extendedColors.warning
-            is SyncDisplayStatus.Failed -> Color(0xFFEF4444)
-        }
-    }
-}
-
-@Composable
-private fun StatItem(label: String, value: String, subValue: String? = null) {
-    Column(horizontalAlignment = Alignment.CenterHorizontally) {
-        Text(
-            text = value,
-            style = MaterialTheme.typography.titleMedium,
-            color = MaterialTheme.colorScheme.primary,
-        )
-        Text(
-            text = label,
-            style = MaterialTheme.typography.labelSmall,
-            color = MaterialTheme.colorScheme.onSurfaceVariant,
-        )
-        if (subValue != null) {
-            Text(
-                text = subValue,
-                style = MaterialTheme.typography.labelSmall,
-                color = MaterialTheme.colorScheme.primary,
-            )
-        }
-    }
-}
-
-@Composable
-private fun PulseDot(color: Color, modifier: Modifier = Modifier) {
-    val infiniteTransition = rememberInfiniteTransition(label = "pulse")
-    val alpha by infiniteTransition.animateFloat(
-        initialValue = 1f,
-        targetValue = 0.3f,
-        animationSpec = infiniteRepeatable(
-            animation = tween(durationMillis = 1200, easing = LinearEasing),
-            repeatMode = RepeatMode.Reverse,
-        ),
-        label = "pulseAlpha",
-    )
-    Box(
-        modifier = modifier
-            .size(8.dp)
-            .alpha(alpha)
-            .clip(CircleShape)
-            .background(color),
-    )
-}
-
 // ── Daily mix card ───────────────────────────────────────────────────────
 
 @OptIn(ExperimentalFoundationApi::class)
@@ -941,6 +770,7 @@ private fun DailyMixCard(
     onClick: () -> Unit,
     onLongPress: () -> Unit,
     modifier: Modifier = Modifier,
+    buildState: MixBuildState = MixBuildState.READY,
 ) {
     val extendedColors = StashTheme.extendedColors
     val gradientColors = if (playlist.source == MusicSource.SPOTIFY) {
@@ -1008,11 +838,33 @@ private fun DailyMixCard(
                         maxLines = 1,
                         overflow = TextOverflow.Ellipsis,
                     )
-                    Text(
-                        text = "${playlist.trackCount} tracks",
-                        style = MaterialTheme.typography.bodySmall,
-                        color = Color.White.copy(alpha = 0.75f),
-                    )
+                    when (buildState) {
+                        MixBuildState.BUILDING -> Row(
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(6.dp),
+                        ) {
+                            CircularProgressIndicator(
+                                modifier = Modifier.size(11.dp),
+                                color = Color.White.copy(alpha = 0.85f),
+                                strokeWidth = 1.5.dp,
+                            )
+                            Text(
+                                text = "Building…",
+                                style = MaterialTheme.typography.bodySmall,
+                                color = Color.White.copy(alpha = 0.75f),
+                            )
+                        }
+                        MixBuildState.EMPTY -> Text(
+                            text = "No tracks found",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = Color.White.copy(alpha = 0.75f),
+                        )
+                        MixBuildState.READY -> Text(
+                            text = "${playlist.trackCount} tracks",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = Color.White.copy(alpha = 0.75f),
+                        )
+                    }
                 }
             }
         }
@@ -1652,6 +1504,65 @@ private fun CreatePlaylistCard(
     }
 }
 
+// ── Create mix card ──────────────────────────────────────────────────────
+
+/**
+ * Leading tile in the Stash Mixes row. Tapping it opens the Mix Builder
+ * to create a brand-new custom mix (recipeId = null). Compact (104×120 — a
+ * narrow "add" affordance, not a full 180-wide mix card) with a dashed glass
+ * border, mirroring the Playlists grid's [CreatePlaylistCard] affordance.
+ */
+@Composable
+private fun CreateMixCard(
+    onClick: () -> Unit,
+    modifier: Modifier = Modifier,
+) {
+    val extendedColors = StashTheme.extendedColors
+    val accent = MaterialTheme.colorScheme.primary
+
+    Box(
+        modifier = modifier
+            .width(104.dp)
+            .height(120.dp)
+            .clip(RoundedCornerShape(16.dp))
+            .background(extendedColors.glassBackground)
+            .drawBehind {
+                val stroke = androidx.compose.ui.graphics.drawscope.Stroke(
+                    width = 1.dp.toPx(),
+                    pathEffect = androidx.compose.ui.graphics.PathEffect.dashPathEffect(
+                        floatArrayOf(8.dp.toPx(), 6.dp.toPx()),
+                        0f,
+                    ),
+                )
+                drawRoundRect(
+                    color = accent.copy(alpha = 0.5f),
+                    style = stroke,
+                    cornerRadius = androidx.compose.ui.geometry.CornerRadius(16.dp.toPx()),
+                )
+            }
+            .clickable(onClick = onClick),
+        contentAlignment = Alignment.Center,
+    ) {
+        Column(
+            horizontalAlignment = Alignment.CenterHorizontally,
+            verticalArrangement = Arrangement.spacedBy(6.dp),
+        ) {
+            Icon(
+                imageVector = Icons.Default.Add,
+                contentDescription = null,
+                tint = accent,
+                modifier = Modifier.size(24.dp),
+            )
+            Text(
+                text = "Create\nmix",
+                style = MaterialTheme.typography.labelMedium,
+                color = MaterialTheme.colorScheme.onSurface,
+                textAlign = androidx.compose.ui.text.style.TextAlign.Center,
+            )
+        }
+    }
+}
+
 // ── Bottom sheet action row ──────────────────────────────────────────────
 
 /**
@@ -1691,80 +1602,14 @@ private fun HomeBottomSheetActionRow(
     }
 }
 
-// ── Last.fm connect banner ───────────────────────────────────────────────
-
-/**
- * Surfaces a nudge when the user has local listening history but hasn't
- * connected Last.fm — all those plays are sitting in the scrobble queue
- * with no session to send them to. Tapping the banner jumps to Settings,
- * where the existing connect flow handles the web-auth handshake.
- */
-@Composable
-private fun LastFmConnectBanner(
-    pendingCount: Int,
-    onConnect: () -> Unit,
-    onDismiss: () -> Unit,
-    modifier: Modifier = Modifier,
-) {
-    val accent = MaterialTheme.colorScheme.tertiary
-    Surface(
-        modifier = modifier.fillMaxWidth(),
-        color = accent.copy(alpha = 0.10f),
-        shape = RoundedCornerShape(12.dp),
-        border = androidx.compose.foundation.BorderStroke(1.dp, accent.copy(alpha = 0.35f)),
-    ) {
-        Row(
-            modifier = Modifier
-                .fillMaxWidth()
-                .clickable(onClick = onConnect)
-                .padding(start = 12.dp, end = 4.dp, top = 8.dp, bottom = 8.dp),
-            verticalAlignment = Alignment.CenterVertically,
-            horizontalArrangement = Arrangement.spacedBy(10.dp),
-        ) {
-            Column(modifier = Modifier.weight(1f)) {
-                Text(
-                    text = "Connect Last.fm",
-                    style = MaterialTheme.typography.labelMedium,
-                    color = MaterialTheme.colorScheme.onSurface,
-                )
-                Text(
-                    text = "$pendingCount ${if (pendingCount == 1) "play" else "plays"} waiting to scrobble",
-                    style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                )
-            }
-            Text(
-                text = "Connect →",
-                style = MaterialTheme.typography.labelSmall,
-                color = accent,
-            )
-            // Dismiss-forever X. Stops the click from also triggering
-            // onConnect by putting it on its own clickable region.
-            Box(
-                modifier = Modifier
-                    .size(32.dp)
-                    .clip(CircleShape)
-                    .clickable(onClick = onDismiss),
-                contentAlignment = Alignment.Center,
-            ) {
-                Icon(
-                    imageVector = Icons.Default.Close,
-                    contentDescription = "Dismiss Last.fm banner",
-                    tint = MaterialTheme.colorScheme.onSurfaceVariant,
-                    modifier = Modifier.size(18.dp),
-                )
-            }
-        }
-    }
-}
+// ── Lossless connect banner ──────────────────────────────────────────────
 
 /**
  * "Try lossless audio" Home banner. Shows when the user has
  * lossless turned off (explicit save, since v0.9.8 fresh installs
  * default to ON) and hasn't dismissed. Tapping routes to Settings,
  * where the existing Audio Quality card hosts the toggle + captcha
- * setup flow. Mirrors [LastFmConnectBanner]'s visual treatment so
- * both Home prompts feel consistent.
+ * setup flow.
  */
 @Composable
 private fun LosslessConnectBanner(
@@ -1834,6 +1679,11 @@ private data class Supporter(
 // wordmark on Home. Tap → GitHub new-issue form so users can file
 // bugs without leaving the project. Edit when the repo URL changes.
 private const val STASH_ISSUE_URL = "https://github.com/rawnaldclark/Stash/issues/new"
+
+// v0.9.38+: Discord invite shown as a chat-bubble icon (blurple-tinted)
+// to the left of the wrench. Tap → opens the invite in the default
+// browser. Edit when the invite rotates.
+private const val STASH_DISCORD_URL = "https://discord.gg/vcbjEby5PC"
 
 private val HOME_SUPPORTERS = listOf(
     Supporter(
@@ -1927,7 +1777,9 @@ private fun SupporterPill(
                             fontStyle = FontStyle.Italic,
                         ),
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
-                        maxLines = 4,
+                        // Cap long donation messages at 2 lines so a paragraph
+                        // can't balloon the pill height; ellipsis trims the rest.
+                        maxLines = 2,
                         overflow = TextOverflow.Ellipsis,
                     )
                 }
@@ -1989,26 +1841,3 @@ private fun PlaylistSortOrder.displayName(): String = when (this) {
     PlaylistSortOrder.MOST_PLAYED -> "Most Played"
 }
 
-// ── Utilities ────────────────────────────────────────────────────────────
-
-/**
- * Formats a byte count into a human-readable string (e.g. "45.2 MB").
- */
-private fun formatBytes(bytes: Long): String {
-    if (bytes <= 0) return "0 B"
-    val units = arrayOf("B", "KB", "MB", "GB", "TB")
-    val digitGroups = (Math.log10(bytes.toDouble()) / Math.log10(1024.0)).toInt()
-    val safeIndex = digitGroups.coerceIn(0, units.lastIndex)
-    return "%.1f %s".format(bytes / Math.pow(1024.0, safeIndex.toDouble()), units[safeIndex])
-}
-
-/**
- * Formats an epoch-millis timestamp into a relative time string (e.g. "2 hours ago").
- */
-private fun formatRelativeTime(epochMillis: Long): String {
-    return DateUtils.getRelativeTimeSpanString(
-        epochMillis,
-        System.currentTimeMillis(),
-        DateUtils.MINUTE_IN_MILLIS,
-    ).toString()
-}

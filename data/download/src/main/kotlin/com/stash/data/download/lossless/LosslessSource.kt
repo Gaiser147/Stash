@@ -1,5 +1,7 @@
 package com.stash.data.download.lossless
 
+import com.stash.data.download.lossless.spotifyresolve.SpotifyUriResolver
+
 /**
  * Pluggable resolver for lossless (or higher-quality-than-current) audio
  * sources. Each external source — squid.wtf's per-provider endpoints,
@@ -58,8 +60,12 @@ interface LosslessSource {
      *  5. On 429, call [AggregatorRateLimiter.reportRateLimited]; on
      *     any other failure, [AggregatorRateLimiter.reportFailure]; on
      *     success, [AggregatorRateLimiter.reportSuccess].
+     *
+     * @param bypassRateLimit when true, a user-initiated (foreground) resolve
+     *   skips the per-source token bucket. Background/speculative callers pass
+     *   false (the default). Sources without a rate limiter ignore it.
      */
-    suspend fun resolve(query: TrackQuery): SourceResult?
+    suspend fun resolve(query: TrackQuery, bypassRateLimit: Boolean = false): SourceResult?
 
     /**
      * Inspect the source's current rate-limit state. Used by the Library
@@ -83,7 +89,76 @@ data class TrackQuery(
     val album: String? = null,
     val isrc: String? = null,
     val durationMs: Long? = null,
+    /**
+     * The track's Spotify URI (`spotify:track:<id>`, a bare id, or an
+     * `open.spotify.com/track/<id>` URL), when known. Used only by sources
+     * that resolve from a Spotify URL (antra). Null for search-tab /
+     * YouTube-pathway downloads, which correctly makes them skip antra.
+     */
+    val spotifyUri: String? = null,
+    /**
+     * The local DB id of the track, when known. Used as the resolution key by
+     * [SpotifyUriResolver] (cache side-table + in-flight coalescing) when no
+     * [spotifyUri] is present, so a YouTube-pathway track can still be routed
+     * to antra after a Spotify search. Null when there is no backing DB row.
+     */
+    val trackId: Long? = null,
 )
+
+/**
+ * The `https://open.spotify.com/track/<id>` URL antra's `/api/resolve`
+ * consumes, derived from [TrackQuery.spotifyUri]. Normalises the three
+ * shapes a URI arrives in (the `spotify:track:<id>` URI, a bare id, or an
+ * already-open URL) and returns null for anything that isn't a *track* —
+ * so albums/playlists/episodes never get mis-routed to a track resolver.
+ */
+fun TrackQuery.spotifyTrackUrl(): String? {
+    val raw = spotifyUri?.trim()?.takeIf { it.isNotEmpty() } ?: return null
+    val id = when {
+        raw.startsWith("spotify:track:") -> raw.removePrefix("spotify:track:")
+        raw.startsWith("spotify:") -> return null // album/playlist/episode URI
+        raw.contains("open.spotify.com/track/") ->
+            raw.substringAfter("open.spotify.com/track/").substringBefore("?").substringBefore("/")
+        raw.contains("open.spotify.com/") -> return null // non-track open URL
+        raw.contains(":") || raw.contains("/") -> return null // unrecognised scheme/path
+        else -> raw // bare id
+    }.trim()
+    return id.takeIf { it.isNotEmpty() }?.let { "https://open.spotify.com/track/$it" }
+}
+
+/**
+ * The Spotify track URL to hand antra: the existing one derived from
+ * [spotifyUri] when present, otherwise — when a [trackId] is available —
+ * a [SpotifyUriResolver] lookup (cache-first Spotify search). Returns null
+ * when there is neither a usable existing URL nor a trackId to resolve on,
+ * so the resolver is never consulted for a track it could not key.
+ */
+suspend fun TrackQuery.resolvedSpotifyTrackUrl(resolver: SpotifyUriResolver): String? =
+    spotifyTrackUrl() ?: trackId?.let { id -> resolver.resolveUrl(id, this) }
+
+/**
+ * The proxy search terms to try for this query, in priority order.
+ *
+ * - When an [TrackQuery.isrc] is present it is the precise index key — used alone.
+ * - Otherwise the FULL artist credit is tried first ("Tyler, The Creator Foo"),
+ *   so single artists whose name contains a comma still match.
+ * - Then, for multi-artist credits joined with commas (e.g.
+ *   "¥$, Kanye West, Ty Dolla $ign"), a fallback using only the PRIMARY artist
+ *   (text before the first comma → "¥$") is appended. Sending the full credit
+ *   verbatim makes the proxy return the featured artists' popular tracks
+ *   instead of the actual song, so every candidate scores 0 and the download
+ *   fails; the primary-artist retry rescues it. (Stream + download share this.)
+ */
+fun TrackQuery.searchTerms(): List<String> {
+    isrc?.takeIf { it.isNotBlank() }?.let { return listOf(it) }
+    val full = "$artist $title".trim()
+    val primary = artist.substringBefore(",").trim()
+    return if (primary.isNotEmpty() && !primary.equals(artist.trim(), ignoreCase = true)) {
+        listOf(full, "$primary $title".trim())
+    } else {
+        listOf(full)
+    }
+}
 
 /**
  * A successful match returned by a [LosslessSource]. The downstream
@@ -137,6 +212,16 @@ data class SourceResult(
      * client-side as needed.
      */
     val coverArtUrl: String? = null,
+
+    /**
+     * AES-128 hex key for sources whose [downloadUrl] serves CENC/CMAF
+     * *encrypted* bytes that must be decrypted client-side before the file
+     * is usable (amz/Amazon Music). When non-null, the downloader fetches
+     * the encrypted body then runs `ffmpeg -decryption_key` (see
+     * `AmzDecryptor`) to produce clear FLAC. `null` for sources that serve
+     * already-clear audio (Qobuz/Kennyy) — the common case.
+     */
+    val decryptionKey: String? = null,
 )
 
 /**

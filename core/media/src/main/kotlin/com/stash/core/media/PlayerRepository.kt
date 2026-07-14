@@ -75,6 +75,29 @@ interface PlayerRepository {
      */
     val currentPosition: Flow<Long>
 
+    /**
+     * Hot SharedFlow of cascade-halt events. Emitted at most once per
+     * outage (resets after successful playback or user transport).
+     * UI surface: in-app Snackbar in NowPlaying.
+     */
+    val streamingHaltedEvents: kotlinx.coroutines.flow.SharedFlow<StreamingHaltedEvent>
+
+    /**
+     * Snackbar-targeted one-shot messages from playback flow. Used for
+     * conditions the player layer surfaces directly to the user:
+     *
+     *  - "Couldn't play this track right now." — `setQueue` couldn't
+     *    resolve the tapped track via any source.
+     *  - "End of offline Mix" — auto-advance silent-skip exhausted the
+     *    queue trying to find a playable item while offline (v0.9.37).
+     *
+     * Collected by NowPlayingViewModel and forwarded into its own
+     * `userMessages` SharedFlow so the Snackbar/Toast surfaces while the
+     * user is on Now Playing or anywhere else the global player UI is
+     * visible.
+     */
+    val userMessages: kotlinx.coroutines.flow.SharedFlow<String>
+
     /** Start or resume playback. */
     suspend fun play()
 
@@ -96,6 +119,20 @@ interface PlayerRepository {
     suspend fun setQueue(tracks: List<Track>, startIndex: Int = 0)
 
     /**
+     * Restore the last-played queue — full queue, saved current track,
+     * saved position, and shuffle state — and start playing. Reuses the
+     * normal [setQueue] resolution path, so it works in both offline and
+     * online modes (downloaded files and streamed tracks) with background
+     * queue fill, exactly like a normal playlist tap.
+     *
+     * Fire-and-forget: the work runs on the repository's own scope so the
+     * caller (a no-UI trampoline activity launched from an app shortcut /
+     * Bluetooth routine) can finish immediately. Falls back to the most
+     * recently played / added track when no queue has been persisted yet.
+     */
+    fun resumeLastQueue()
+
+    /**
      * v0.9.14: Replace the queue with a freshly-shuffled snapshot of the
      * user's entire downloaded library, begin playback, and arm the
      * auto-grow watcher so the queue refills from the unused remainder
@@ -114,6 +151,37 @@ interface PlayerRepository {
      * Playback continues uninterrupted.
      */
     suspend fun addToQueue(track: Track)
+
+    /**
+     * Append [tracks] (in order) to the end of the current queue.
+     * Single MediaController.addMediaItems round-trip — preferred
+     * over looping the single-track variant for known-size batches
+     * like an album's full tracklist or an artist's catalog. Empty
+     * list is a no-op.
+     *
+     * Playback continues uninterrupted.
+     */
+    suspend fun addToQueue(tracks: List<Track>)
+
+    /**
+     * Start a radio station seeded from an artist or track. Builds a balanced
+     * queue and arms self-extension; replaces any current queue/station. Returns
+     * false (no-op) if streaming is off/offline or the seed yields nothing.
+     *
+     * [keepCurrent] = true (the Now Playing "Start radio from this song" case):
+     * the seed IS the currently-playing track, so DON'T restart it — keep the
+     * current item playing and splice the discoveries around it.
+     */
+    suspend fun startRadio(
+        seed: com.stash.core.data.radio.RadioSeed,
+        keepCurrent: Boolean = false,
+    ): Boolean
+
+    /** Stop the active station (queued tracks remain; no more auto-grow). */
+    fun stopRadio()
+
+    /** Live label of the active station's seed (null when no station). */
+    val radioSeedLabel: StateFlow<String?>
 
     /** Toggle shuffle mode on/off. */
     suspend fun toggleShuffle()

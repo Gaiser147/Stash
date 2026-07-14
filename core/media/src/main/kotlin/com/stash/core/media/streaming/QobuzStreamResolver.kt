@@ -1,6 +1,8 @@
 package com.stash.core.media.streaming
 
+import android.util.Log
 import com.stash.core.data.db.entity.TrackEntity
+import com.stash.data.download.lossless.LosslessSourceHealthGate
 import com.stash.data.download.lossless.TrackQuery
 import com.stash.data.download.lossless.qobuz.QobuzSource
 import javax.inject.Inject
@@ -28,9 +30,21 @@ import javax.inject.Singleton
 @Singleton
 class QobuzStreamResolver @Inject constructor(
     private val source: QobuzSource,
+    private val healthGate: LosslessSourceHealthGate,
+    private val qualityPolicy: StreamQualityPolicy,
 ) {
     suspend fun resolve(track: TrackEntity): StreamUrl? {
-        if (!source.isEnabledForStreaming()) return null
+        if (healthGate.isDegraded(QobuzSource.SOURCE_ID)) {
+            // Content-degraded (preview-sample / lossy downgrade) within the
+            // cooldown — skip so the streaming registry fails over.
+            Log.d(TAG, "skip id=${track.id} (squid content-degraded)")
+            return null
+        }
+        Log.d(TAG, "resolve attempt id=${track.id} title='${track.title}'")
+        if (!source.isEnabledForStreaming()) {
+            Log.d(TAG, "disabled id=${track.id} (no cookie or stale)")
+            return null
+        }
 
         val query = TrackQuery(
             artist = track.artist,
@@ -39,8 +53,19 @@ class QobuzStreamResolver @Inject constructor(
             isrc = track.isrc?.takeIf { it.isNotBlank() },
             durationMs = track.durationMs,
         )
-        val result = source.resolveImmediate(query) ?: return null
-        val etspMs = parseEtspMs(result.downloadUrl) ?: return null
+        val requestedQuality = qualityPolicy.streamingTier().qobuzCode
+        val result = source.resolveImmediate(query, requestedQuality) ?: run {
+            Log.d(TAG, "no_result id=${track.id}")
+            return null
+        }
+        val etspMs = parseEtspMs(result.downloadUrl) ?: run {
+            Log.w(TAG, "no_etsp id=${track.id}")
+            return null
+        }
+        Log.d(
+            TAG,
+            "resolved id=${track.id} origin=$ORIGIN expiresInSec=${(etspMs - System.currentTimeMillis()) / 1000}",
+        )
         return StreamUrl(
             url = result.downloadUrl,
             expiresAtMs = etspMs,
@@ -49,6 +74,7 @@ class QobuzStreamResolver @Inject constructor(
             sampleRateHz = result.format.sampleRateHz.takeIf { it > 0 },
             bitrateKbps = result.format.bitrateKbps.takeIf { it > 0 },
             coverArtUrl = result.coverArtUrl?.takeIf { it.isNotBlank() },
+            origin = ORIGIN,
         )
     }
 
@@ -59,6 +85,8 @@ class QobuzStreamResolver @Inject constructor(
     }
 
     private companion object {
+        const val TAG = "QobuzStreamResolver"
+        const val ORIGIN = "squid"
         val ETSP_REGEX = Regex("""[?&]etsp=(\d+)""")
     }
 }

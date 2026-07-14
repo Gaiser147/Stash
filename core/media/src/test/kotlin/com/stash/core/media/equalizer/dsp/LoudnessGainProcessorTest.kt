@@ -13,7 +13,7 @@ import io.mockk.mockk
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.runBlocking
-import kotlinx.coroutines.test.StandardTestDispatcher
+import kotlinx.coroutines.test.UnconfinedTestDispatcher
 import kotlinx.coroutines.test.resetMain
 import kotlinx.coroutines.test.setMain
 import org.junit.After
@@ -32,7 +32,11 @@ class LoudnessGainProcessorTest {
   private val rampSamples = sampleRate * 15 / 1000  // 661
 
   @Before fun setUp() {
-    Dispatchers.setMain(StandardTestDispatcher())
+    // Controller initialization is launched on Main. An unconfined test
+    // dispatcher lets that initialization run before awaitInit() is called;
+    // a StandardTestDispatcher would require manually advancing its scheduler
+    // and deadlock this runBlocking-based fixture instead.
+    Dispatchers.setMain(UnconfinedTestDispatcher())
     store = mockk(relaxed = true)
     // Default: enabled with 0 dB gain. Individual tests override via setCurrentTrackGain.
     coEvery { store.read() } returns LoudnessState(enabled = true, currentTrackGainDb = 0f, currentTargetGainDb = 0f)

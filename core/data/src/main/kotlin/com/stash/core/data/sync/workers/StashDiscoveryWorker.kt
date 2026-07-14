@@ -1,23 +1,27 @@
 package com.stash.core.data.sync.workers
 
 import android.content.Context
+import android.content.pm.ServiceInfo
 import android.util.Log
 import androidx.hilt.work.HiltWorker
+import androidx.work.Constraints
 import androidx.work.CoroutineWorker
 import androidx.work.ExistingPeriodicWorkPolicy
 import androidx.work.ExistingWorkPolicy
+import androidx.work.ForegroundInfo
+import androidx.work.NetworkType
 import androidx.work.OneTimeWorkRequestBuilder
+import androidx.work.OutOfQuotaPolicy
 import androidx.work.PeriodicWorkRequestBuilder
 import androidx.work.WorkManager
 import androidx.work.WorkerParameters
 import com.stash.core.data.db.dao.DiscoveryQueueDao
+import com.stash.core.data.sync.SyncNotificationManager
 import com.stash.core.model.DownloadNetworkMode
 import com.stash.core.data.prefs.DownloadNetworkPreference
-import com.stash.core.data.db.dao.DownloadQueueDao
 import com.stash.core.data.db.dao.StashMixRecipeDao
 import com.stash.core.data.db.dao.TrackDao
 import com.stash.core.data.db.entity.DiscoveryQueueEntity
-import com.stash.core.data.db.entity.DownloadQueueEntity
 import com.stash.core.data.db.entity.TrackEntity
 import com.stash.core.data.sync.TrackMatcher
 import com.stash.core.model.MusicSource
@@ -30,35 +34,73 @@ import java.util.concurrent.TimeUnit
  * [StashMixRefreshWorker]. For each one:
  *
  *  1. Check whether a track with the same canonical identity already
- *     exists in the library — if so, skip the download and just link the
- *     existing track into the recipe's playlist.
- *  2. Otherwise create a stub [TrackEntity] (is_downloaded = false) and
- *     file a [DownloadQueueEntity] row. The existing
- *     [TrackDownloadWorker] picks that up and performs the actual YT
- *     search + download, reusing every bit of matching infra we already
- *     ship. No duplicate code paths.
- *  3. Link the new (or found) track into the recipe's playlist so it
- *     appears in the mix as soon as its audio is downloaded.
- *  4. Mark the discovery row DONE with a reference to the created track
- *     so diagnostics can trace the seed → candidate → download chain.
+ *     exists (downloaded) in the library — if so, skip and just reuse
+ *     the existing track row when the materializer later links the
+ *     recipe's playlist.
+ *  2. Otherwise create a stub [TrackEntity] with `isStreamable = true,
+ *     isDownloaded = false`. v0.9.37 stream-only seam: no
+ *     `download_queue` row is filed. The v0.9.30 streaming engine
+ *     (`PlayerRepositoryImpl.buildMediaItemForTrack` → Qobuz/Kennyy +
+ *     YouTube fallback) plays the stub on demand without ever writing
+ *     a file to disk. Saves data + storage for what is, by recipe
+ *     design, ephemeral discovery content. Existing downloaded Mix
+ *     tracks remain on disk; no purge.
+ *  3. Mark the discovery row DONE with a reference to the created (or
+ *     reused) track so the next [StashMixRefreshWorker.materializeMix]
+ *     pass can link it into the recipe's playlist via
+ *     `PlaylistDao.getStreamableOrDoneTrackIdsForRecipe`.
  *
- * Caps per-recipe throughput at 10 new discoveries per rolling 7 days so
- * a mix with many pending candidates doesn't blow up the user's disk
- * overnight. Requires unmetered network + charging to be polite about
- * data and battery.
+ * v0.9.37 also dropped the `DownloadQueueDao` constructor injection —
+ * this worker no longer files download rows. The chained
+ * [DiscoveryDownloadWorker] still drains legacy / leftover rows in
+ * `download_queue` (orphan PENDING, retry-eligible FAILED from prior
+ * runs); see `doWork()`'s tail chain.
+ *
+ * Caps per-recipe throughput at 100 new discoveries per rolling 7 days
+ * (a hold-over from the download-era storage cap; storage cost is gone
+ * now, raising the cap is tracked as separate future work). Requires
+ * unmetered network + charging to be polite about data and battery.
  */
 @HiltWorker
 class StashDiscoveryWorker @AssistedInject constructor(
     @Assisted appContext: Context,
     @Assisted params: WorkerParameters,
     private val discoveryQueueDao: DiscoveryQueueDao,
-    private val downloadQueueDao: DownloadQueueDao,
     private val trackDao: TrackDao,
     private val recipeDao: StashMixRecipeDao,
     private val trackMatcher: TrackMatcher,
     private val blocklistGuard: com.stash.core.data.blocklist.BlocklistGuard,
     private val downloadNetworkPreference: DownloadNetworkPreference,
+    private val syncNotificationManager: SyncNotificationManager,
 ) : CoroutineWorker(appContext, params) {
+
+    /**
+     * Required for expedited execution on API < 31 (where expedited work runs
+     * as a short foreground service). Mirrors [DiscoveryDownloadWorker]'s
+     * notification so the brief "preparing your mix" promotion looks
+     * consistent with the rest of the discovery pipeline. On API 31+
+     * WorkManager uses the platform expedited job and never shows this.
+     */
+    override suspend fun getForegroundInfo(): ForegroundInfo =
+        buildForegroundInfo("Building your mix", "Finding tracks…", progress = -1f)
+
+    private fun buildForegroundInfo(title: String, text: String, progress: Float): ForegroundInfo {
+        val notification = syncNotificationManager.buildProgressNotification(
+            title = title,
+            text = text,
+            progress = progress,
+            cancelIntent = WorkManager.getInstance(applicationContext).createCancelPendingIntent(id),
+        )
+        return if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
+            ForegroundInfo(
+                SyncNotificationManager.NOTIFICATION_ID_PROGRESS,
+                notification,
+                ServiceInfo.FOREGROUND_SERVICE_TYPE_DATA_SYNC,
+            )
+        } else {
+            ForegroundInfo(SyncNotificationManager.NOTIFICATION_ID_PROGRESS, notification)
+        }
+    }
 
     companion object {
         private const val TAG = "StashDiscovery"
@@ -106,14 +148,31 @@ class StashDiscoveryWorker @AssistedInject constructor(
          * pipeline: discovery_queue PENDING → stubs + download_queue PENDING →
          * actual downloads.
          */
-        fun enqueueOneTime(context: Context, mode: DownloadNetworkMode) {
-            val work = OneTimeWorkRequestBuilder<StashDiscoveryWorker>()
-                .setConstraints(constraintsForManualTrigger(mode))
-                .build()
+        fun enqueueOneTime(context: Context, mode: DownloadNetworkMode, expedited: Boolean = false) {
+            val builder = OneTimeWorkRequestBuilder<StashDiscoveryWorker>()
+            if (expedited) {
+                // Jump the queue: when a mix is created/refreshed mid library-sync
+                // the drain would otherwise sit behind hundreds of sync-spawned
+                // jobs (downloads, lyrics, art-backfill) on the OS JobScheduler,
+                // leaving the mix on "Building…" for a long time. RUN_AS_NON_-
+                // EXPEDITED fallback means an out-of-quota app still drains, just
+                // not expedited — never worse than the non-expedited path.
+                //
+                // Expedited jobs may carry ONLY network + storage constraints —
+                // battery-not-low (in constraintsForManualTrigger) is rejected by
+                // WorkRequest.build() — so use a network-only constraint here.
+                builder
+                    .setConstraints(
+                        Constraints.Builder().setRequiredNetworkType(NetworkType.CONNECTED).build(),
+                    )
+                    .setExpedited(OutOfQuotaPolicy.RUN_AS_NON_EXPEDITED_WORK_REQUEST)
+            } else {
+                builder.setConstraints(constraintsForManualTrigger(mode))
+            }
             WorkManager.getInstance(context).enqueueUniqueWork(
                 ONE_SHOT_WORK_NAME,
                 ExistingWorkPolicy.REPLACE,
-                work,
+                builder.build(),
             )
         }
     }
@@ -132,20 +191,41 @@ class StashDiscoveryWorker @AssistedInject constructor(
 
         // v0.9.21: pre-filter the PENDING fetch by under-cap recipes so a
         // single recipe's deferred-at-cap backlog doesn't starve other
-        // recipes' fresh candidates out of the BATCH_SIZE window. See
-        // conversation 2026-05-12: First Listen had 100+ deferred-at-cap
-        // PENDING rows clogging the head of the queue so Deep Cuts'
-        // freshly-queued candidates never reached the worker.
+        // recipes' fresh candidates out of the BATCH_SIZE window.
+        //
+        // v0.9.38: combine the cap pre-filter with round-robin batching.
+        // Plain FIFO `getPending` lets one recipe with a deep PENDING
+        // backlog monopolise the BATCH_SIZE window even when it's *under*
+        // cap (conversation 2026-05-28: Daily Discover had 131 PENDING
+        // queued before Deep Cuts/First Listen's batches and consumed 57
+        // of every 60-row drain; Deep Cuts + First Listen never ran). The
+        // cap query was also dead in v0.9.37 — fixed in the DAO by
+        // counting both downloaded AND streamable DONE rows.
         val cappedRecipeIds = discoveryQueueDao.findRecipesAtWeeklyCap(
             sinceMillis = System.currentTimeMillis() - WEEK_MS,
             cap = PER_RECIPE_WEEKLY_CAP,
         )
-        val pending = if (cappedRecipeIds.isEmpty()) {
-            discoveryQueueDao.getPending(BATCH_SIZE)
-        } else {
+        if (cappedRecipeIds.isNotEmpty()) {
             Log.i(TAG, "recipes at cap (excluded from fetch): $cappedRecipeIds")
-            discoveryQueueDao.getPendingExcludingRecipes(cappedRecipeIds, BATCH_SIZE)
         }
+        // Room rejects empty `IN ()` lists. -1L is safe as a sentinel —
+        // real recipe ids are autogen > 0.
+        val cappedSentinel = cappedRecipeIds.ifEmpty { listOf(-1L) }
+        val activeRecipes = discoveryQueueDao.getRecipesWithPending(cappedSentinel)
+        val pending = if (activeRecipes.isEmpty()) {
+            emptyList()
+        } else {
+            // Fair quota: ceil(BATCH_SIZE / activeRecipes). With the typical
+            // 3 builtin recipes that's 20/each; a single solo recipe still
+            // gets the full 60.
+            val perRecipeQuota = (BATCH_SIZE + activeRecipes.size - 1) / activeRecipes.size
+            activeRecipes.flatMap { rid ->
+                discoveryQueueDao.getPendingForRecipe(rid, perRecipeQuota)
+            }
+        }
+        // Count stream-only stubs created/reused this run so we can trigger a
+        // (network-only) re-materialize afterwards — see the post-loop kick.
+        var newlyMaterialized = 0
         if (pending.isEmpty()) {
             Log.d(TAG, "no pending discoveries")
             // Don't return early — fall through to the chain. download_queue
@@ -182,6 +262,7 @@ class StashDiscoveryWorker @AssistedInject constructor(
                 val result = handle(entry, now)
                 if (result.trackId != null) {
                     recipeBudget[entry.recipeId] = used + 1
+                    newlyMaterialized++
                 }
                 discoveryQueueDao.updateStatus(
                     id = entry.id,
@@ -191,6 +272,26 @@ class StashDiscoveryWorker @AssistedInject constructor(
                     errorMessage = result.error,
                 )
             }
+        }
+
+        // Stream-only stubs need no download — only a materialize pass to link
+        // them into the recipe playlists. That pass runs in StashMixRefreshWorker,
+        // which the DiscoveryDownloadWorker chain below also re-kicks — but that
+        // worker is battery-not-low gated (it downloads files), so on a low
+        // battery the freshly-drained stubs would never surface and the mix sits
+        // on "Building…" indefinitely (root cause: device at 4%, stubs DONE,
+        // playlist empty). Kick the network-only refresh directly so stream-only
+        // mixes materialize regardless of battery. Same unique work as the
+        // chain's kick (REPLACE) → the two coalesce when both fire. Guarded, and
+        // only when we actually produced stubs so an idle run doesn't spin the
+        // refresh⇄drain loop.
+        if (newlyMaterialized > 0) {
+            // Materialize-only: LINK the freshly-drained stubs into the mix
+            // playlists, but do NOT re-queue discovery or re-kick this drain —
+            // otherwise refresh⇄drain loops forever, continuously clearing +
+            // reinserting every mix (the multi-genre "repopulate" churn).
+            runCatching { StashMixRefreshWorker.enqueueOneTime(applicationContext, materializeOnly = true) }
+                .onFailure { Log.w(TAG, "post-drain re-materialize enqueue failed; stubs surface on next refresh", it) }
         }
 
         // v0.9.20: after queueing/processing discoveries, kick the downloader
@@ -222,10 +323,18 @@ class StashDiscoveryWorker @AssistedInject constructor(
     )
 
     /**
-     * Processes a single pending discovery row. Reuses the existing
-     * "create track + enqueue download" pattern that DiffWorker uses for
-     * unmatched Spotify tracks, so downloads run through the same queue
-     * the sync pipeline already drains.
+     * Processes a single pending discovery row. v0.9.37 stream-only
+     * contract: creates (or reuses) a streamable stub [TrackEntity] for
+     * the row. The v0.9.30 streaming engine plays the stub on demand via
+     * the Qobuz/Kennyy + YouTube fallback chain; no file is downloaded.
+     * [StashMixRefreshWorker.materializeMix] picks the stubs up via
+     * `PlaylistDao.getStreamableOrDoneTrackIdsForRecipe` (v0.9.37) on the
+     * next refresh pass to link them into the recipe's playlist.
+     *
+     * Guards: blocklist-rejects the candidate before any insert, and
+     * skips recipes whose materialized playlist doesn't exist yet (the
+     * very first refresh hasn't run — materializer owns playlist
+     * creation, not this worker).
      */
     private suspend fun handle(
         entry: DiscoveryQueueEntity,
@@ -237,7 +346,12 @@ class StashDiscoveryWorker @AssistedInject constructor(
                 null,
                 "recipe ${entry.recipeId} missing",
             )
-        val playlistId = recipe.playlistId
+        // Don't process discoveries for un-materialized recipes — the
+        // first StashMixRefreshWorker pass creates the playlist row, and
+        // until that's run there's nothing for materializeMix to link
+        // this stub into. Leave the row PENDING-failed; next refresh
+        // cycle will re-queue.
+        recipe.playlistId
             ?: return HandledResult(
                 DiscoveryQueueEntity.STATUS_FAILED,
                 null,
@@ -274,7 +388,30 @@ class StashDiscoveryWorker @AssistedInject constructor(
             // Nothing to download — just link.
             existing.id
         } else {
-            // Create stub + enqueue.
+            // v0.9.37: stream-only seam. Every recipe in `stash_mix_recipes`
+            // is materialized as PlaylistType.STASH_MIX (see
+            // StashMixRefreshWorker.materializeMix), so every PENDING row
+            // this worker drains belongs to a Stash Mix. Per the v0.9.37
+            // spec we no longer file a `download_queue` row for these —
+            // instead the stub lands with `isStreamable = true` and the
+            // v0.9.30 streaming engine plays it on-demand via the
+            // Qobuz/Kennyy + YouTube fallback chain. Existing downloaded
+            // Mix tracks remain on disk and are untouched.
+            //
+            // Note: no `findByYoutubeId` upsert defense needed at this
+            // call site because the stub is inserted with `youtubeId =
+            // null` (the videoId is resolved later by
+            // StashDiscoveryWorker's chain into the streaming engine /
+            // player path, never by THIS row's insert). With both
+            // `spotifyUri` and `youtubeId` NULL the UNIQUE indexes can't
+            // collide; the canonical-identity dedup above already absorbs
+            // the only realistic cross-source race (streaming engine
+            // inserting a row with matching canonical title+artist first,
+            // which `findDownloadedByCanonical` won't catch because
+            // streaming inserts aren't `is_downloaded = 1`). Broadening
+            // that lookup is a separate refactor — out of scope for the
+            // stream-only seam; the worst-case here is a duplicate stub,
+            // not a constraint violation.
             val stub = TrackEntity(
                 title = entry.title,
                 artist = entry.artist,
@@ -282,17 +419,9 @@ class StashDiscoveryWorker @AssistedInject constructor(
                 canonicalTitle = canonicalTitle,
                 canonicalArtist = canonicalArtist,
                 isDownloaded = false,
+                isStreamable = true,
             )
-            val newId = trackDao.insert(stub)
-            downloadQueueDao.insert(
-                DownloadQueueEntity(
-                    trackId = newId,
-                    syncId = null,
-                    searchQuery = "${entry.artist} - ${entry.title}",
-                    youtubeUrl = null,
-                )
-            )
-            newId
+            trackDao.insert(stub)
         }
 
         // v0.9.21: Do NOT insert into playlist_tracks here. Earlier versions

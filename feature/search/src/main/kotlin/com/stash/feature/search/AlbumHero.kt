@@ -19,6 +19,7 @@ import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
+import androidx.compose.material.icons.automirrored.filled.PlaylistAdd
 import androidx.compose.material.icons.filled.Album
 import androidx.compose.material.icons.filled.Download
 import androidx.compose.material.icons.filled.PlayArrow
@@ -74,6 +75,10 @@ import com.stash.core.ui.util.formatTotalDuration
  *                      album from index 0 — streaming-mode (Kennyy) or
  *                      downloaded-only depending on user preference,
  *                      routed through `PlayerRepository.setQueue`.
+ * @param onAddToQueue  Invoked when the "Queue" chip is tapped. Appends the
+ *                      album's tracks to the end of the current playback
+ *                      queue without interrupting playback, routed through
+ *                      `PlayerRepository.addToQueue(List)`.
  */
 @Composable
 fun AlbumHero(
@@ -83,7 +88,13 @@ fun AlbumHero(
     onShuffle: () -> Unit,
     onDownloadAll: () -> Unit,
     onPlayAlbum: () -> Unit,
+    onAddToQueue: () -> Unit,
+    streamingEnabled: Boolean,
+    onStreamingClick: () -> Unit,
     modifier: Modifier = Modifier,
+    // Qobuz albums have no per-track videoId, so download-by-id isn't available
+    // (Phase 1) — the chip is hidden for them. Defaults true for YT callers.
+    downloadSupported: Boolean = true,
 ) {
     val extendedColors = StashTheme.extendedColors
 
@@ -160,6 +171,18 @@ fun AlbumHero(
                     tint = MaterialTheme.colorScheme.onSurface,
                 )
             }
+
+            // Top-right Online/Offline chip — flip playback mode from the album page.
+            if (com.stash.core.common.constants.StashConstants.STREAMING_ENGINE_ENABLED) {
+                com.stash.core.ui.components.streaming.StreamingModeChip(
+                    streamingEnabled = streamingEnabled,
+                    onClick = onStreamingClick,
+                    modifier = Modifier
+                        .statusBarsPadding()
+                        .padding(8.dp)
+                        .align(Alignment.TopEnd),
+                )
+            }
         }
 
         // -- Metadata + action chips --
@@ -225,6 +248,22 @@ fun AlbumHero(
                         style = MaterialTheme.typography.labelLarge,
                     )
                 }
+                OutlinedButton(
+                    onClick = onAddToQueue,
+                    contentPadding = PaddingValues(horizontal = 16.dp, vertical = 10.dp),
+                    shape = RoundedCornerShape(12.dp),
+                ) {
+                    Icon(
+                        imageVector = Icons.AutoMirrored.Filled.PlaylistAdd,
+                        contentDescription = null,
+                        modifier = Modifier.size(18.dp),
+                    )
+                    Spacer(Modifier.width(6.dp))
+                    Text(
+                        text = "Queue",
+                        style = MaterialTheme.typography.labelLarge,
+                    )
+                }
                 if (hasDownloaded) {
                     OutlinedButton(
                         onClick = onShuffle,
@@ -243,21 +282,23 @@ fun AlbumHero(
                         )
                     }
                 }
-                OutlinedButton(
-                    onClick = onDownloadAll,
-                    contentPadding = PaddingValues(horizontal = 16.dp, vertical = 10.dp),
-                    shape = RoundedCornerShape(12.dp),
-                ) {
-                    Icon(
-                        imageVector = Icons.Default.Download,
-                        contentDescription = null,
-                        modifier = Modifier.size(18.dp),
-                    )
-                    Spacer(Modifier.width(6.dp))
-                    Text(
-                        text = "Download all",
-                        style = MaterialTheme.typography.labelLarge,
-                    )
+                if (downloadSupported) {
+                    OutlinedButton(
+                        onClick = onDownloadAll,
+                        contentPadding = PaddingValues(horizontal = 16.dp, vertical = 10.dp),
+                        shape = RoundedCornerShape(12.dp),
+                    ) {
+                        Icon(
+                            imageVector = Icons.Default.Download,
+                            contentDescription = null,
+                            modifier = Modifier.size(18.dp),
+                        )
+                        Spacer(Modifier.width(6.dp))
+                        Text(
+                            text = "Download all",
+                            style = MaterialTheme.typography.labelLarge,
+                        )
+                    }
                 }
             }
 

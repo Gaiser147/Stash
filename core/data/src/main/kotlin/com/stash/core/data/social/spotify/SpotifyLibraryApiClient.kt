@@ -1,12 +1,8 @@
 package com.stash.core.data.social.spotify
 
 import android.util.Log
-import com.stash.core.auth.TokenManager
-import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.withContext
-import okhttp3.OkHttpClient
-import okhttp3.Request
-import okhttp3.RequestBody.Companion.toRequestBody
+import com.stash.data.spotify.SpotifyApiClient
+import com.stash.data.spotify.SpotifyLibraryWriteResult
 import javax.inject.Inject
 import javax.inject.Singleton
 
@@ -17,66 +13,54 @@ class SpotifyApiException(val code: Int, val body: String?) :
     Exception("Spotify API error $code: $body")
 
 /**
- * v0.9.13: Wraps Spotify Web API's "Save Tracks for User" endpoint.
+ * Save / remove tracks in the user's Spotify library — the heart button's
+ * remote destination for like-mirroring.
  *
- * Public API: `PUT /v1/me/tracks?ids=<id1>,<id2>,...`
- * Scope: `user-library-modify` — covered by the existing sp_dc-derived
- *   web-player token (Spotify Web's Like button uses the same scope).
- *   No Premium requirement.
- * Idempotent: re-saving an already-saved track is a no-op (no error).
- * Batch limit: 50 IDs per request.
+ * **v0.9.73:** rewired off the deprecated REST `PUT/DELETE /v1/me/tracks`
+ * (removed in Spotify's Feb-2026 Web API change, and hard-429'd for sp_dc
+ * web-player tokens — the reason Spotify likes never actually synced) onto
+ * the web player's own GraphQL `addToLibrary` / `removeFromLibrary`
+ * mutations via [SpotifyApiClient], using the same sp_dc token + client
+ * token the app already reads the library with.
  *
- * Auth: routes through TokenManager.getSpotifyAccessToken (auto-refresh)
- * and TokenManager.forceRefreshSpotifyAccessToken (401 invalidate path).
- * NO direct dependency on SpotifyAuthManager.
+ * This stays the seam the [com.stash.core.data.social.LikeDestinationDispatcher]
+ * calls: signatures ([saveTracks] / [removeTracks]) and the thrown exception
+ * contract ([SpotifyRateLimitException] with Retry-After,
+ * [SpotifyAuthException]) are unchanged, so the coordinator's pacing keeps
+ * working. Idempotent; full `spotify:track:…` URIs (the GraphQL mutation
+ * wants URIs, not the bare ids the old REST endpoint took).
  */
 @Singleton
 class SpotifyLibraryApiClient @Inject constructor(
-    private val tokenManager: TokenManager,
-    private val httpClient: OkHttpClient,
+    private val spotifyApiClient: SpotifyApiClient,
 ) {
-    suspend fun saveTracks(spotifyUris: List<String>) = withContext(Dispatchers.IO) {
+    suspend fun saveTracks(spotifyUris: List<String>) {
         require(spotifyUris.isNotEmpty()) { "saveTracks: empty list" }
-        require(spotifyUris.size <= 50) { "Spotify caps at 50 IDs per call (got ${spotifyUris.size})" }
+        require(spotifyUris.size <= MAX_URIS) { "Spotify caps at $MAX_URIS URIs per call (got ${spotifyUris.size})" }
+        map("saveTracks", spotifyApiClient.addToLibrary(spotifyUris))
+    }
 
-        val token = tokenManager.getSpotifyAccessToken()
-            ?: throw SpotifyAuthException()
+    suspend fun removeTracks(spotifyUris: List<String>) {
+        require(spotifyUris.isNotEmpty()) { "removeTracks: empty list" }
+        require(spotifyUris.size <= MAX_URIS) { "Spotify caps at $MAX_URIS URIs per call (got ${spotifyUris.size})" }
+        map("removeTracks", spotifyApiClient.removeFromLibrary(spotifyUris))
+    }
 
-        // Strip "spotify:track:" prefix; Spotify accepts bare IDs.
-        val ids = spotifyUris.joinToString(",") { it.removePrefix("spotify:track:") }
-        val url = "https://api.spotify.com/v1/me/tracks?ids=$ids"
-
-        // PUT /v1/me/tracks expects an empty body (IDs are in the query).
-        val emptyBody = ByteArray(0).toRequestBody(null)
-        val request = Request.Builder()
-            .url(url)
-            .put(emptyBody)
-            .header("Authorization", "Bearer $token")
-            .build()
-
-        httpClient.newCall(request).execute().use { response ->
-            when (response.code) {
-                200, 201, 204 -> {
-                    Log.d(TAG, "saved ${spotifyUris.size} track(s) to Spotify")
-                }
-                401 -> {
-                    Log.w(TAG, "401 — invalidating Spotify token")
-                    tokenManager.forceRefreshSpotifyAccessToken()
-                    throw SpotifyAuthException()
-                }
-                429 -> {
-                    val retryAfter = response.header("Retry-After")?.toIntOrNull()
-                    throw SpotifyRateLimitException(retryAfter)
-                }
-                else -> {
-                    val body = response.body?.string()
-                    throw SpotifyApiException(response.code, body)
-                }
-            }
+    private fun map(verb: String, result: SpotifyLibraryWriteResult) {
+        when (result) {
+            SpotifyLibraryWriteResult.Success -> Log.d(TAG, "$verb ok")
+            is SpotifyLibraryWriteResult.RateLimited ->
+                throw SpotifyRateLimitException(result.retryAfterSeconds)
+            SpotifyLibraryWriteResult.AuthFailed -> throw SpotifyAuthException()
+            is SpotifyLibraryWriteResult.Failed ->
+                throw SpotifyApiException(0, result.message)
         }
     }
 
     companion object {
         private const val TAG = "SpotifyLibraryApiClient"
+
+        /** Batch cap — matches the web player's own library-mutation batching. */
+        private const val MAX_URIS = 50
     }
 }

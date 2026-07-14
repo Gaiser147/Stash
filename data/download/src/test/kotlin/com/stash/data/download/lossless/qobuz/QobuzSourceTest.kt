@@ -1,8 +1,11 @@
 package com.stash.data.download.lossless.qobuz
 
+import com.google.common.truth.Truth.assertThat
 import com.stash.data.download.lossless.AggregatorRateLimiter
 import com.stash.data.download.lossless.LosslessQualityTier
+import com.stash.data.download.lossless.LosslessSourceHealthGate
 import com.stash.data.download.lossless.LosslessSourcePreferences
+import com.stash.data.download.lossless.LosslessUrlInspector
 import com.stash.data.download.lossless.RateLimitState
 import com.stash.data.download.lossless.TrackQuery
 import com.stash.data.download.lossless.squid.CaptchaExpiredNotifier
@@ -37,8 +40,11 @@ class QobuzSourceTest {
     private val rateLimiter: AggregatorRateLimiter = mockk(relaxUnitFun = true)
     private val captchaExpiredNotifier: CaptchaExpiredNotifier = mockk(relaxUnitFun = true)
     private val losslessPrefs: LosslessSourcePreferences = mockk()
+    private val urlInspector = LosslessUrlInspector() // real pure classifier
+    private val healthGate: LosslessSourceHealthGate = mockk(relaxUnitFun = true)
 
-    private fun source() = QobuzSource(apiClient, rateLimiter, captchaExpiredNotifier, losslessPrefs)
+    private fun source() =
+        QobuzSource(apiClient, rateLimiter, captchaExpiredNotifier, losslessPrefs, urlInspector, healthGate)
 
     private fun stubLimiterReady() {
         coEvery { rateLimiter.acquire(QobuzSource.SOURCE_ID) } returns true
@@ -133,6 +139,73 @@ class QobuzSourceTest {
         assertEquals(0.95f, result!!.confidence, 0.01f)
     }
 
+    @Test fun `resolve falls back to primary artist when full-credit search misses`() = runTest {
+        stubLimiterReady()
+        val fullTerm = "¥\$, Kanye West, Ty Dolla \$ign STARS"
+        val primaryTerm = "¥\$ STARS"
+        // Full multi-artist credit makes the proxy return the FEATURED
+        // artists' unrelated hits — title mismatch → confidence 0.
+        coEvery { apiClient.search(fullTerm, any(), any()) } returns
+            QobuzSearchData(tracks = QobuzTrackList(items = listOf(
+                candidate(id = 99L, title = "All Mine", artist = "Kanye West"),
+            )))
+        // Primary-artist retry surfaces the real track.
+        coEvery { apiClient.search(primaryTerm, any(), any()) } returns
+            QobuzSearchData(tracks = QobuzTrackList(items = listOf(
+                candidate(id = 7L, title = "STARS", artist = "¥\$"),
+            )))
+        coEvery { apiClient.getFileUrl(7L, any(), any()) } returns download()
+
+        val result = source().resolve(
+            query(artist = "¥\$, Kanye West, Ty Dolla \$ign", title = "STARS"),
+        )
+
+        assertNotNull(result)
+        assertEquals("7", result!!.sourceTrackId)
+        assertTrue("confidence ${result.confidence}", result.confidence > 0.5f)
+        coVerify { apiClient.search(fullTerm, any(), any()) }
+        coVerify { apiClient.search(primaryTerm, any(), any()) }
+    }
+
+    @Test fun `resolve does NOT issue a primary-artist retry for a single artist`() = runTest {
+        stubLimiterReady()
+        coEvery { apiClient.search("Radiohead Karma Police", any(), any()) } returns
+            QobuzSearchData(tracks = QobuzTrackList(items = listOf(candidate())))
+        coEvery { apiClient.getFileUrl(1L, any(), any()) } returns download()
+
+        val result = source().resolve(query())
+
+        assertNotNull(result)
+        // No comma in the artist → only one search term, no fallback call.
+        coVerify(exactly = 1) { apiClient.search(any(), any(), any()) }
+    }
+
+    // ── resolveImmediate explicit-quality threading ────────────────────
+
+    @Test fun `resolveImmediate with explicit quality requests that format_id`() = runTest {
+        stubLimiterReady()
+        coEvery { losslessPrefs.qualityTierNow() } returns LosslessQualityTier.MAX // download tier MAX (27)
+        coEvery { apiClient.search("Radiohead Karma Police", any(), any()) } returns
+            QobuzSearchData(tracks = QobuzTrackList(items = listOf(candidate())))
+        coEvery { apiClient.getFileUrl(1L, any(), any()) } returns download()
+
+        source().resolveImmediate(query(), requestedQuality = QobuzQuality.FLAC_CD)
+
+        coVerify { apiClient.getFileUrl(1L, QobuzQuality.FLAC_CD, any()) }
+    }
+
+    @Test fun `resolveImmediate without quality falls back to download tier`() = runTest {
+        stubLimiterReady()
+        coEvery { losslessPrefs.qualityTierNow() } returns LosslessQualityTier.MAX // → 27
+        coEvery { apiClient.search("Radiohead Karma Police", any(), any()) } returns
+            QobuzSearchData(tracks = QobuzTrackList(items = listOf(candidate())))
+        coEvery { apiClient.getFileUrl(1L, any(), any()) } returns download()
+
+        source().resolveImmediate(query()) // no explicit quality
+
+        coVerify { apiClient.getFileUrl(1L, QobuzQuality.FLAC_HIRES_192, any()) }
+    }
+
     // ── resolve failure paths ──────────────────────────────────────────
 
     @Test fun `resolve null when search returns no tracks`() = runTest {
@@ -166,6 +239,28 @@ class QobuzSourceTest {
             QobuzSearchData(tracks = QobuzTrackList(items = listOf(candidate())))
         coEvery { apiClient.getFileUrl(any(), any(), any()) } returns download(url = null)
         assertNull(source().resolve(query()))
+    }
+
+    @Test fun `resolve null + records degraded when getFileUrl returns a preview-sample url`() = runTest {
+        stubLimiterReady()
+        coEvery { apiClient.search(any(), any(), any()) } returns
+            QobuzSearchData(tracks = QobuzTrackList(items = listOf(candidate())))
+        coEvery { apiClient.getFileUrl(any(), any(), any()) } returns
+            download(url = "https://cdn.qobuz/file?fmt=27&range=20-30&etsp=9999999999")
+
+        assertNull(source().resolve(query()))
+        coVerify { healthGate.recordDegraded(QobuzSource.SOURCE_ID) }
+    }
+
+    @Test fun `resolve returns result + does NOT record degraded for healthy full url`() = runTest {
+        stubLimiterReady()
+        coEvery { apiClient.search(any(), any(), any()) } returns
+            QobuzSearchData(tracks = QobuzTrackList(items = listOf(candidate())))
+        coEvery { apiClient.getFileUrl(any(), any(), any()) } returns
+            download(url = "https://cdn.qobuz/file?fmt=27&etsp=9999999999")
+
+        assertNotNull(source().resolve(query()))
+        coVerify(exactly = 0) { healthGate.recordDegraded(any()) }
     }
 
     @Test fun `resolve null when getFileUrl 403s (region lock)`() = runTest {
@@ -305,5 +400,34 @@ class QobuzSourceTest {
 
     @Test fun `artistSimilarity returns 1 for identical strings`() {
         assertEquals(1.0f, QobuzSource.artistSimilarity("radiohead", "radiohead"), 0.001f)
+    }
+
+    @Test
+    fun `artistSimilarity matches yen-dollar against expanded form`() {
+        val score = QobuzSource.artistSimilarity(
+            QobuzSource.normalize("¥$, Kanye West, Ty Dolla \$ign"),
+            QobuzSource.normalize("¥$"),
+        )
+        // Subset coverage should hit since "¥$" is fully contained and
+        // distinctive (non-alphanumeric).
+        assertThat(score).isAtLeast(0.5f)
+    }
+
+    @Test
+    fun `normalize preserves currency symbols`() {
+        assertThat(QobuzSource.normalize("¥$")).isEqualTo("¥$")
+        assertThat(QobuzSource.normalize("\$NOT")).isEqualTo("\$not")
+        assertThat(QobuzSource.normalize("+44")).isEqualTo("+44")
+    }
+
+    @Test
+    fun `artistSimilarity still rejects generic short tokens`() {
+        // "U2" vs "Air": both length-2 letter-only tokens, should NOT
+        // hit the distinctive-overlap shortcut and should score low.
+        val score = QobuzSource.artistSimilarity(
+            QobuzSource.normalize("U2"),
+            QobuzSource.normalize("Air"),
+        )
+        assertThat(score).isLessThan(0.5f)
     }
 }

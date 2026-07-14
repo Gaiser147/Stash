@@ -25,6 +25,7 @@ fun TrackEntity.toDomain(): Track = Track(
     youtubeId = youtubeId,
     albumArtUrl = albumArtUrl,
     albumArtPath = albumArtPath,
+    albumArtist = albumArtist,
     dateAdded = dateAdded.toEpochMilli(),
     lastPlayed = lastPlayed?.toEpochMilli(),
     playCount = playCount,
@@ -40,6 +41,8 @@ fun TrackEntity.toDomain(): Track = Track(
     stashLikedAt = stashLikedAt,
     isStreamable = isStreamable,
     isStreamableCheckedAt = isStreamableCheckedAt,
+    metadataEmbeddedAt = metadataEmbeddedAt,
+    lyricsFetchedAt = lyricsFetchedAt,
 )
 
 /**
@@ -62,6 +65,7 @@ fun Track.toEntity(): TrackEntity = TrackEntity(
     youtubeId = youtubeId,
     albumArtUrl = albumArtUrl,
     albumArtPath = albumArtPath,
+    albumArtist = albumArtist,
     dateAdded = Instant.ofEpochMilli(dateAdded),
     lastPlayed = lastPlayed?.let { Instant.ofEpochMilli(it) },
     playCount = playCount,
@@ -77,4 +81,6 @@ fun Track.toEntity(): TrackEntity = TrackEntity(
     stashLikedAt = stashLikedAt,
     isStreamable = isStreamable,
     isStreamableCheckedAt = isStreamableCheckedAt,
+    metadataEmbeddedAt = metadataEmbeddedAt,
+    lyricsFetchedAt = lyricsFetchedAt,
 )

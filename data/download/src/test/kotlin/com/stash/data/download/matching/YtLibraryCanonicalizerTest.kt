@@ -14,6 +14,7 @@ import kotlinx.serialization.json.jsonObject
 import org.junit.Assert.assertEquals
 import org.junit.Test
 import org.mockito.kotlin.any
+import org.mockito.kotlin.anyOrNull
 import org.mockito.kotlin.eq
 import org.mockito.kotlin.mock
 import org.mockito.kotlin.never
@@ -47,7 +48,9 @@ class YtLibraryCanonicalizerTest {
         val inner = mock<InnerTubeClient>()
         val json = loadFixture("innertube_search_smooth_criminal.json")
         runBlocking {
-            whenever(inner.search(any())).thenReturn(Json.parseToJsonElement(json).jsonObject)
+            // search(query, params = null): executor calls search(query) → JVM
+            // search(query, null), so the params matcher must accept null.
+            whenever(inner.search(any(), anyOrNull())).thenReturn(Json.parseToJsonElement(json).jsonObject)
         }
         val realExecutor = InnerTubeSearchExecutor(inner)
         return runBlocking { realExecutor.search("Michael Jackson Smooth Criminal", maxResults = 10) }
@@ -114,8 +117,10 @@ class YtLibraryCanonicalizerTest {
             title = eq("Smooth Criminal"),
             canonicalTitle = any(),
             canonicalArtist = any(),
-            album = any(),
-            albumArtUrl = any(),
+            // album/albumArtUrl are String? and the ATV candidate carries them
+            // null here — any() rejects null, so use anyOrNull() for these two.
+            album = anyOrNull(),
+            albumArtUrl = anyOrNull(),
             durationMs = any(),
         )
     }

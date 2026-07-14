@@ -100,12 +100,60 @@ open class CrashFileStore @Inject constructor(
      * Synchronous + side-effect-free. Exposed for tests.
      */
     internal fun formatReport(thread: Thread, throwable: Throwable): String {
-        val versionInfo = appVersionInfo()
         val sw = StringWriter()
         throwable.printStackTrace(PrintWriter(sw))
         return buildString {
             appendLine("Stash crash report")
             appendLine("==================")
+            append(deviceMetadataBlock())
+            appendLine("Thread:         ${thread.name}")
+            appendLine()
+            appendLine("Memory")
+            appendLine("------")
+            append(memoryBlock())
+            append(CrashDiagnostics.snapshot())
+            appendLine()
+            appendLine("Stack trace")
+            appendLine("-----------")
+            append(sw.toString())
+        }
+    }
+
+    /**
+     * Java-heap fill level + the Java/native/graphics PSS split. The split is
+     * the OOM discriminator: the 256MB growth limit is the JAVA heap, so a
+     * report showing java-heap ≈ heapMax names a live-object leak, while a
+     * fat native/graphics number with a small Java heap points at
+     * bitmaps/buffers instead (issues #238/#239 triage). Wrapped because it
+     * runs post-OOM — losing this block must never lose the stack trace.
+     */
+    internal fun memoryBlock(): String = runCatching {
+        val rt = Runtime.getRuntime()
+        val mi = android.os.Debug.MemoryInfo()
+        android.os.Debug.getMemoryInfo(mi)
+        buildString {
+            appendLine(
+                "heap: used=${(rt.totalMemory() - rt.freeMemory()) / MB}MB " +
+                    "committed=${rt.totalMemory() / MB}MB max=${rt.maxMemory() / MB}MB",
+            )
+            appendLine(
+                "pss(KB): java=${mi.getMemoryStat("summary.java-heap")} " +
+                    "native=${mi.getMemoryStat("summary.native-heap")} " +
+                    "graphics=${mi.getMemoryStat("summary.graphics")} " +
+                    "total=${mi.getMemoryStat("summary.total-pss")}",
+            )
+        }
+    }.getOrElse { "memory stats unavailable (${it.javaClass.simpleName})\n" }
+
+    /**
+     * Single source for the device/app metadata header (Time → Build).
+     * Reused by the crash report and by the diagnostics bundle so both
+     * render an IDENTICAL block. Excludes crash-specific lines (e.g.
+     * `Thread:`), which callers append themselves.
+     */
+    internal fun deviceMetadataBlock(): String {
+        val versionInfo = appVersionInfo()
+        return buildString {
             appendLine("Time:           ${TIMESTAMP_FORMAT.format(Date())} UTC")
             appendLine("App version:    ${versionInfo.versionName} (versionCode ${versionInfo.versionCode})")
             appendLine("Device:         ${Build.MANUFACTURER} ${Build.MODEL}")
@@ -115,11 +163,6 @@ open class CrashFileStore @Inject constructor(
             // build display already encodes the OEM build ID, which is enough
             // to spot Samsung-specific behaviour when triaging.
             appendLine("Build:          ${Build.DISPLAY}")
-            appendLine("Thread:         ${thread.name}")
-            appendLine()
-            appendLine("Stack trace")
-            appendLine("-----------")
-            append(sw.toString())
         }
     }
 
@@ -141,6 +184,7 @@ open class CrashFileStore @Inject constructor(
 
     companion object {
         private const val TAG = "CrashFileStore"
+        private const val MB = 1024L * 1024L
         const val MAX_FILES = 10
         const val FILE_PROVIDER_SUFFIX = ".fileprovider"
         const val SHARE_MIME_TYPE = "text/plain"

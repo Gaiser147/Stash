@@ -7,6 +7,7 @@ import androidx.datastore.preferences.core.Preferences
 import androidx.datastore.preferences.core.booleanPreferencesKey
 import androidx.datastore.preferences.core.edit
 import androidx.datastore.preferences.core.emptyPreferences
+import androidx.datastore.preferences.core.longPreferencesKey
 import androidx.datastore.preferences.core.stringPreferencesKey
 import androidx.datastore.preferences.preferencesDataStore
 import com.stash.core.data.db.dao.DownloadQueueDao
@@ -46,10 +47,18 @@ class LosslessSourcePreferences @Inject constructor(
     private val priorityKey = stringPreferencesKey("priority_order")
     private val minQualityKey = stringPreferencesKey("min_quality")
     private val enabledKey = booleanPreferencesKey("enabled")
+    private val qbdlxEnabledKey = booleanPreferencesKey("qbdlx_enabled")
     private val captchaCookieKey = stringPreferencesKey("squid_wtf_captcha_verified_at")
+    private val captchaCookieSetAtKey = longPreferencesKey("squid_wtf_captcha_set_at_ms")
     private val bannerDismissedKey = booleanPreferencesKey("home_banner_dismissed")
     private val qualityTierKey = stringPreferencesKey("lossless_quality_tier")
     private val youtubeFallbackKey = booleanPreferencesKey("youtube_fallback_enabled")
+    // Retained only so [purgeAntraCredentials] can delete the harvested
+    // antra.hoshi.cfd session from existing installs; the antra source was
+    // removed (see fix/remove-antra).
+    private val antraSessionKey = stringPreferencesKey("antra_session_cookie")
+    private val antraCfClearanceKey = stringPreferencesKey("antra_cf_clearance_cookie")
+    private val antraUsernameKey = stringPreferencesKey("antra_username")
 
     /**
      * Master switch for the lossless-source pipeline. When false, the
@@ -72,6 +81,24 @@ class LosslessSourcePreferences @Inject constructor(
     }
 
     suspend fun enabledNow(): Boolean = enabled.first()
+
+    /**
+     * Per-source enable toggle for the qbdlx direct-Qobuz source. Defaults
+     * to true — fresh installs land it ready (it has a bundled token pool).
+     * Gates BOTH download ([QbdlxQobuzSource.isEnabled]) and streaming
+     * ([QbdlxQobuzSource.isEnabledForStreaming]); turning it off blocks the
+     * source everywhere. Mirrors [enabled]/[enabledNow]; no requeue side
+     * effect (it's one source among several, not the master switch).
+     */
+    val qbdlxEnabled: Flow<Boolean> = context.losslessDataStore.data.map { prefs ->
+        prefs[qbdlxEnabledKey] ?: true
+    }
+
+    suspend fun qbdlxEnabledNow(): Boolean = qbdlxEnabled.first()
+
+    suspend fun setQbdlxEnabled(value: Boolean) {
+        context.losslessDataStore.edit { prefs -> prefs[qbdlxEnabledKey] = value }
+    }
 
     suspend fun setEnabled(value: Boolean) {
         context.losslessDataStore.edit { prefs -> prefs[enabledKey] = value }
@@ -130,13 +157,43 @@ class LosslessSourcePreferences @Inject constructor(
         prefs[captchaCookieKey]?.takeIf { it.isNotBlank() }
     }
 
+    /**
+     * Wall-clock epoch-millis when the current captcha cookie was set.
+     * Emits 0L when no cookie has ever been stored or the most recent
+     * value was cleared. Used by SquidCookieAutoRefresher to derive
+     * cookie age and schedule the next refresh ~25 min after set.
+     */
+    val captchaCookieSetAtMs: Flow<Long> = context.losslessDataStore.data.map { prefs ->
+        prefs[captchaCookieSetAtKey] ?: 0L
+    }
+
     suspend fun captchaCookieValueNow(): String? = captchaCookieValue.first()
 
     suspend fun setCaptchaCookieValue(value: String?) {
+        val now = System.currentTimeMillis()
         context.losslessDataStore.edit { prefs ->
             val trimmed = value?.trim()?.takeIf { it.isNotEmpty() }
-            if (trimmed == null) prefs.remove(captchaCookieKey)
-            else prefs[captchaCookieKey] = trimmed
+            if (trimmed == null) {
+                prefs.remove(captchaCookieKey)
+                prefs.remove(captchaCookieSetAtKey)
+            } else {
+                prefs[captchaCookieKey] = trimmed
+                prefs[captchaCookieSetAtKey] = now
+            }
+        }
+    }
+
+    /**
+     * One-shot cleanup for the removed antra source: deletes the harvested
+     * antra.hoshi.cfd session cookie, cf_clearance cookie, and username from
+     * existing installs so no stale login session lingers on disk. Called
+     * once at startup (see StashApplication). No-op when the keys are absent.
+     */
+    suspend fun purgeAntraCredentials() {
+        context.losslessDataStore.edit { prefs ->
+            prefs.remove(antraSessionKey)
+            prefs.remove(antraCfClearanceKey)
+            prefs.remove(antraUsernameKey)
         }
     }
 
@@ -253,15 +310,26 @@ class LosslessSourcePreferences @Inject constructor(
          * preserve their value.
          *
          * Order:
-         * 1. squid_qobuz — Qobuz Hi-Res FLAC via qobuz.squid.wtf (existing
-         *    integration since v0.9.0; proven matching, well-known catalog)
-         * 2. kennyy_qobuz — Qobuz Hi-Res FLAC via qobuz.kennyy.com.br
-         *    (added in v0.9.10; sibling Qobuz-DL proxy, different operator,
-         *    no captcha gate — outages uncorrelated with squid.wtf)
+         * 1. qbdlx_qobuz — Qobuz Hi-Res FLAC via a direct www.qobuz.com call
+         *    (MD5 request signing + a rotating token pool). Ranked FIRST: it's
+         *    the fastest lossless path — plain Range-seekable FLAC, no proxy
+         *    operator and no client-side decryption (unlike amz).
+         * 2. squid_qobuz — Qobuz Hi-Res FLAC via qobuz.squid.wtf.
+         * 3. kennyy_qobuz — Qobuz Hi-Res FLAC via qobuz.kennyy.com.br.
+         * 4. arcod — Qobuz Hi-Res FLAC via arcod.xyz (per-user Supabase session).
+         *    2–4 are currently PARKED (hosts down for us) — see
+         *    [LosslessSourceRegistry.PARKED_SOURCE_IDS]; the code + this ranking
+         *    stay so re-enabling is a one-line change when they recover.
+         * 5. amz — Amazon Music FLAC via amz.squid.wtf. Ranked LAST: its stream
+         *    path decrypts the whole file client-side (tens of seconds), so it's
+         *    the slow, different-catalog fallback after every Qobuz source.
          */
         val DEFAULT_PRIORITY: List<String> = listOf(
+            "qbdlx_qobuz",
             "squid_qobuz",
             "kennyy_qobuz",
+            "arcod",
+            "amz",
         )
     }
 }

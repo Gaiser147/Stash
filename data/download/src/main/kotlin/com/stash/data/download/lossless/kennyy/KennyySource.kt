@@ -4,10 +4,13 @@ import android.util.Log
 import com.stash.data.download.lossless.AggregatorRateLimiter
 import com.stash.data.download.lossless.AudioFormat
 import com.stash.data.download.lossless.LosslessSource
+import com.stash.data.download.lossless.LosslessSourceHealthGate
 import com.stash.data.download.lossless.LosslessSourcePreferences
+import com.stash.data.download.lossless.LosslessUrlInspector
 import com.stash.data.download.lossless.RateLimitState
 import com.stash.data.download.lossless.SourceResult
 import com.stash.data.download.lossless.TrackQuery
+import com.stash.data.download.lossless.searchTerms
 import com.stash.data.download.lossless.qobuz.QobuzApiException
 import com.stash.data.download.lossless.qobuz.QobuzQuality
 import com.stash.data.download.lossless.qobuz.QobuzSource
@@ -15,6 +18,7 @@ import com.stash.data.download.lossless.qobuz.QobuzTrack
 import javax.inject.Inject
 import javax.inject.Singleton
 import kotlin.math.abs
+import kotlinx.coroutines.CancellationException
 
 /**
  * [LosslessSource] backed by the Qobuz catalog via the kennyy.com.br
@@ -40,11 +44,30 @@ class KennyySource @Inject constructor(
     private val apiClient: KennyyApiClient,
     private val rateLimiter: AggregatorRateLimiter,
     private val losslessPrefs: LosslessSourcePreferences,
+    private val urlInspector: LosslessUrlInspector,
+    private val healthGate: LosslessSourceHealthGate,
 ) : LosslessSource {
 
     override val id: String = SOURCE_ID
 
     override val displayName: String = "Qobuz (kennyy.com.br)"
+
+    /**
+     * Set to true by [callLimited] when the most recent call failed due
+     * to a network/HTTP/proxy error (NOT a catalog miss). Read by
+     * [com.stash.core.media.streaming.KennyyStreamResolver] to disambiguate
+     * "request failed" from "no match" before recording the outcome with
+     * KennyyHealthMonitor.
+     *
+     * @Volatile because the flag is written from one coroutine and read
+     * from another (resolver runs on the IO dispatcher; reader is the
+     * caller scope). resolveImmediate-style callers are serialized by
+     * the rate limiter / single-flight contract so concurrent races on
+     * the flag itself aren't a concern in practice.
+     */
+    @Volatile
+    var lastResolveFailedNetwork: Boolean = false
+        private set
 
     override suspend fun isEnabled(): Boolean {
         // No credentials gate — the only reason to skip this source is
@@ -52,8 +75,8 @@ class KennyySource @Inject constructor(
         return !rateLimiter.stateOf(id).isCircuitBroken
     }
 
-    override suspend fun resolve(query: TrackQuery): SourceResult? =
-        resolveInternal(query, bypassRateLimit = false)
+    override suspend fun resolve(query: TrackQuery, bypassRateLimit: Boolean): SourceResult? =
+        resolveInternal(query, bypassRateLimit = bypassRateLimit, requestedQuality = null)
 
     /**
      * User-initiated immediate resolve for the streaming path. Skips
@@ -68,50 +91,81 @@ class KennyySource @Inject constructor(
      * in the session. Background paths ([resolve]) still respect the
      * breaker.
      */
-    suspend fun resolveImmediate(query: TrackQuery): SourceResult? =
-        resolveInternal(query, bypassRateLimit = true)
+    suspend fun resolveImmediate(
+        query: TrackQuery,
+        requestedQuality: Int? = null,
+    ): SourceResult? =
+        resolveInternal(query, bypassRateLimit = true, requestedQuality = requestedQuality)
 
-    private suspend fun resolveInternal(query: TrackQuery, bypassRateLimit: Boolean): SourceResult? {
+    private suspend fun resolveInternal(
+        query: TrackQuery,
+        bypassRateLimit: Boolean,
+        requestedQuality: Int?,
+    ): SourceResult? {
+        lastResolveFailedNetwork = false
+        Log.d(TAG, "resolve attempt artist='${query.artist}' title='${query.title}' isrc=${query.isrc ?: "none"}")
         // 1. Search kennyy.com.br for candidates. ISRC is Qobuz's best
         // index key — when we have one, send it as the query directly.
-        val searchTerm = query.isrc ?: "${query.artist} ${query.title}"
-        val searchData = callLimited(bypassRateLimit) { apiClient.search(searchTerm) }
-            ?: return null
+        // Try the full artist credit first (single artists with commas in
+        // their NAME still match), then fall back to the PRIMARY artist
+        // (before the first comma) — rescues multi-artist credits like
+        // "¥$, Kanye West, Ty Dolla $ign" whose full-credit query returns the
+        // featured artists' tracks (all scoring 0). ISRC, when present, is
+        // used alone. See TrackQuery.searchTerms.
+        var found: Pair<QobuzTrack, Float>? = null
+        for (term in query.searchTerms()) {
+            val searchData = callLimited(bypassRateLimit) { apiClient.search(term) } ?: continue
+            val candidates = searchData.tracks?.items.orEmpty()
+            if (candidates.isEmpty()) continue
 
-        val candidates = searchData.tracks?.items.orEmpty()
-        if (candidates.isEmpty()) return null
-
-        // 2. Score and pick the best candidate that crosses the
-        // confidence threshold.
-        val scored = candidates.map { it to confidence(query, it) }
-        val best = scored
-            .filter { it.second >= MIN_CONFIDENCE }
-            .maxByOrNull { it.second }
-
-        if (best == null) {
+            val scored = candidates.map { it to confidence(query, it) }
+            val match = scored.filter { it.second >= MIN_CONFIDENCE }.maxByOrNull { it.second }
+            if (match != null) {
+                found = match
+                break
+            }
             val top = scored.sortedByDescending { it.second }.take(3)
             Log.d(
                 TAG,
-                "no candidate above threshold ($MIN_CONFIDENCE) for '${query.artist} - ${query.title}': " +
+                "below_confidence (<$MIN_CONFIDENCE) term='$term' for '${query.artist} - ${query.title}': " +
                     top.joinToString(", ") { (c, s) ->
                         "[${"%.2f".format(s)} '${c.title}' by '${c.performer?.name}']"
                     },
             )
+        }
+        val best = found ?: run {
+            Log.d(TAG, "no_match artist='${query.artist}' title='${query.title}'")
             return null
         }
 
         // 3. Resolve to a signed download URL. kennyy.com.br returns 403
         // when the track is non-streamable; callLimited returns null so
         // we fall through to the next source cleanly.
-        val tier = losslessPrefs.qualityTierNow()
-        val requestedQuality = tier.qobuzCode
-        Log.d(TAG, "kennyy_qobuz: requested quality=$requestedQuality (tier=${tier.name})")
+        val requestedQualityCode = requestedQuality ?: losslessPrefs.qualityTierNow().qobuzCode
+        Log.d(
+            TAG,
+            "kennyy_qobuz: requested quality=$requestedQualityCode " +
+                "(${if (requestedQuality != null) "explicit" else "download-tier"})",
+        )
         val download = callLimited(bypassRateLimit) {
-            apiClient.getFileUrl(best.first.id, requestedQuality)
+            apiClient.getFileUrl(best.first.id, requestedQualityCode)
         } ?: return null
 
         if (download.url.isNullOrEmpty()) {
             Log.d(TAG, "download-music returned empty url for ${best.first.id}")
+            return null
+        }
+        if (urlInspector.isDegraded(download.url, requestedQualityCode)) {
+            // Proxy returned a preview sample or a lossy downgrade instead of
+            // the requested lossless track. Treat as a miss so the registry
+            // fails over, and cool the source down so we stop wasting a
+            // round-trip per track until it recovers.
+            Log.w(
+                TAG,
+                "degraded url for ${best.first.id} (sample/downgrade) — failing over; " +
+                    "url=${download.url.take(80)}",
+            )
+            healthGate.recordDegraded(id)
             return null
         }
 
@@ -123,20 +177,23 @@ class KennyySource @Inject constructor(
             ?: albumImage?.thumbnail
             ?: albumImage?.small
 
-        return SourceResult(
+        val format = AudioFormat(
+            codec = if (requestedQualityCode == QobuzQuality.MP3_320) "mp3" else "flac",
+            bitrateKbps = 0,
+            sampleRateHz = (best.first.maximumSamplingRate * 1000f).toInt(),
+            bitsPerSample = best.first.maximumBitDepth,
+        )
+        val result = SourceResult(
             sourceId = id,
             downloadUrl = download.url,
             downloadHeaders = emptyMap(),
-            format = AudioFormat(
-                codec = if (requestedQuality == QobuzQuality.MP3_320) "mp3" else "flac",
-                bitrateKbps = 0,
-                sampleRateHz = (best.first.maximumSamplingRate * 1000f).toInt(),
-                bitsPerSample = best.first.maximumBitDepth,
-            ),
+            format = format,
             confidence = best.second,
             sourceTrackId = best.first.id.toString(),
             coverArtUrl = artUrl,
         )
+        Log.d(TAG, "resolved '${query.title}' url=${result.downloadUrl.take(60)}... codec=${format.codec}")
+        return result
     }
 
     override suspend fun rateLimitState(): RateLimitState = rateLimiter.stateOf(id)
@@ -170,11 +227,15 @@ class KennyySource @Inject constructor(
                 e.status == 429 -> rateLimiter.reportRateLimited(id)
                 else -> rateLimiter.reportFailure(id)
             }
-            Log.w(TAG, "kennyy.com.br API call failed: $e")
+            lastResolveFailedNetwork = true
+            Log.w(TAG, "failed reason=network kennyy.com.br API call failed", e)
             null
+        } catch (cancelled: CancellationException) {
+            throw cancelled
         } catch (e: Exception) {
             rateLimiter.reportFailure(id)
-            Log.w(TAG, "kennyy.com.br call threw: ${e.javaClass.simpleName}: ${e.message}")
+            lastResolveFailedNetwork = true
+            Log.w(TAG, "failed reason=network kennyy.com.br call threw: ${e.javaClass.simpleName}: ${e.message}", e)
             null
         }
     }

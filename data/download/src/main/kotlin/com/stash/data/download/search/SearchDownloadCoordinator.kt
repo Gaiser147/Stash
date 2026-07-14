@@ -18,6 +18,7 @@ import com.stash.data.download.lossless.LosslessSourcePreferences
 import com.stash.data.download.lossless.LosslessSourceRegistry
 import com.stash.data.download.lossless.SourceResult
 import com.stash.data.download.lossless.TrackQuery
+import com.stash.data.download.lyrics.LyricsFetchTrigger
 import com.stash.data.download.shared.TrackFinalizer
 import dagger.hilt.android.qualifiers.ApplicationContext
 import kotlinx.coroutines.CoroutineScope
@@ -77,7 +78,16 @@ class SearchDownloadCoordinator @Inject constructor(
      */
     private val losslessPrefs: LosslessSourcePreferences,
     private val downloadQueueDao: DownloadQueueDao,
+    private val localFileOps: com.stash.core.data.files.LocalFileOps,
     private val loudnessMeasurer: com.stash.core.data.audio.LoudnessMeasurer,
+    /**
+     * v0.9.36: enqueue a [com.stash.data.lyrics.worker.LyricsFetchWorker]
+     * after a successful finalize on either branch. Interface lives in
+     * `:data:download` and the production binding in `:app`, mirroring
+     * the [com.stash.data.download.DownloadManager] hookup — see
+     * [LyricsFetchTrigger] for the cyclic-dep rationale.
+     */
+    private val lyricsFetchTrigger: LyricsFetchTrigger,
 ) {
     // App-lifetime scope. Class is @Singleton.
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
@@ -148,6 +158,19 @@ class SearchDownloadCoordinator @Inject constructor(
     // -------------------------------------------------------------------------
 
     private suspend fun performDownload(track: TrackItem): DownloadJobResult {
+        // Master lossless switch OFF → skip the registry (and the strict-FLAC
+        // defer) entirely and go straight to yt-dlp, mirroring
+        // DownloadManager.executeDownload. Without this, "lossless off" still
+        // resolved the registry, missed (sources down / no captcha cookie),
+        // and — with fallback also off — deferred to WAITING_FOR_LOSSLESS, so
+        // artist-page / search downloads hung on "waiting for lossless" forever.
+        if (!losslessPrefs.enabledNow()) {
+            return DownloadJobResult.Resolved(
+                source = SearchDownloadStatus.Source.YOUTUBE,
+                outcome = finalizeFromYtDlp(track),
+            )
+        }
+
         val match = runCatching { registry.resolve(track.toQuery()) }
             .onFailure { e ->
                 Log.w(TAG, "registry.resolve threw for ${track.videoId}: ${e.message}")
@@ -268,6 +291,11 @@ class SearchDownloadCoordinator @Inject constructor(
             }.onFailure { e ->
                 Log.e(TAG, "upsertSearchTrack failed for ${track.videoId}: ${e.message}", e)
             }
+            // v0.9.36 lyrics integration: chain the lyrics-fetch enqueue off
+            // the stamp's resolved trackId so we don't repeat findByYoutubeId.
+            // If the stamp lookup failed (returned null), skip lyrics too —
+            // we have no stable id to key the worker on.
+            stampEmbeddedAt(track.videoId)?.let { lyricsFetchTrigger.enqueueFor(it) }
         }
 
         // Free preview-cache space now that bytes are on permanent storage.
@@ -323,8 +351,34 @@ class SearchDownloadCoordinator @Inject constructor(
             }.onFailure { e ->
                 Log.e(TAG, "upsertSearchTrack (yt-dlp) failed for ${track.videoId}: ${e.message}", e)
             }
+            // v0.9.36 lyrics integration: parity with the lossless branch.
+            stampEmbeddedAt(track.videoId)?.let { lyricsFetchTrigger.enqueueFor(it) }
         }
         return finalized
+    }
+
+    /**
+     * Stamps `tracks.metadata_embedded_at` after a successful finalize so the
+     * v0.9.35 backfill worker skips this row. Lookup is best-effort: when the
+     * Track row isn't found by videoId (rare — `upsertSearchTrack` always
+     * inserts before we get here, but defensive against a concurrent delete)
+     * the stamp is simply skipped. Failure is non-fatal — the file is on
+     * disk and playable regardless.
+     *
+     * v0.9.36: returns the resolved Long trackId so the caller can hand it
+     * straight to [LyricsFetchTrigger.enqueueFor] without repeating the
+     * `findByYoutubeId` lookup. Returns null when the row isn't found OR
+     * the DAO call threw — both cases mean we couldn't establish a stable
+     * trackId, so the lyrics enqueue must also be skipped.
+     */
+    private suspend fun stampEmbeddedAt(videoId: String): Long? {
+        return runCatching {
+            val trackId = trackDao.findByYoutubeId(videoId)?.id ?: return null
+            trackDao.setMetadataEmbeddedAt(trackId, System.currentTimeMillis())
+            trackId
+        }.onFailure { e ->
+            Log.w(TAG, "setMetadataEmbeddedAt failed for $videoId: ${e.message}")
+        }.getOrNull()
     }
 
     // -------------------------------------------------------------------------
@@ -404,6 +458,14 @@ class SearchDownloadCoordinator @Inject constructor(
                 .onFailure { e -> Log.w(TAG, "updateAlbumArtistIfEmpty failed: ${e.message}") }
         }
 
+        // Reject a "successful" download whose file is too small to be audio
+        // (a failed yt-dlp run leaving a tiny error body). Delete it + leave
+        // the track not-downloaded (streamable) rather than mark junk.
+        if (!localFileOps.acceptDownloadOrDelete(finalized.committed.filePath)) {
+            Log.w(TAG, "search download: discarded too-small file for trackId=$trackId: ${finalized.committed.filePath}")
+            return
+        }
+
         trackDao.markAsDownloaded(
             trackId = trackId,
             filePath = finalized.committed.filePath,
@@ -470,6 +532,10 @@ class SearchDownloadCoordinator @Inject constructor(
         // (durationSeconds * 1_000).toLong() preserves sub-second precision —
         // .toLong().times(1_000L) would truncate 3.7s → 3_000ms (wrong).
         durationMs = durationSeconds.takeIf { it > 0 }?.let { (it * 1_000).toLong() },
+        // TrackItem is the YouTube/search-tab flow (videoId/title/artist/
+        // duration only) — no Spotify URI exists, so search-tab downloads
+        // correctly skip antra (which requires a spotify track URL).
+        spotifyUri = null,
     )
 
     /**
@@ -486,6 +552,7 @@ class SearchDownloadCoordinator @Inject constructor(
         title = title,
         artist = artist,
         album = album.orEmpty(),
+        albumArtist = albumArtist.orEmpty(),
         durationMs = (durationSeconds * 1_000).toLong(),
         albumArtUrl = thumbnailUrl,
         youtubeId = videoId,

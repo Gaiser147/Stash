@@ -2,6 +2,8 @@ package com.stash.core.data.di
 
 import com.stash.core.data.audio.FFmpegBridge
 import com.stash.core.data.audio.FFmpegBridgeImpl
+import com.stash.core.data.prefs.CrossfadePreference
+import com.stash.core.data.prefs.CrossfadePreferencesManager
 import com.stash.core.data.prefs.StoragePreference
 import com.stash.core.data.prefs.StoragePreferencesManager
 import com.stash.core.data.prefs.ThemePreference
@@ -35,6 +37,10 @@ abstract class RepositoryModule {
     @Binds
     @Singleton
     abstract fun bindStoragePreference(impl: StoragePreferencesManager): StoragePreference
+
+    @Binds
+    @Singleton
+    abstract fun bindCrossfadePreference(impl: CrossfadePreferencesManager): CrossfadePreference
 
     @Binds
     @Singleton

@@ -14,14 +14,17 @@ import com.stash.feature.library.ArtistDetailScreen
 import com.stash.feature.library.LibraryScreen
 import com.stash.feature.library.LikedSongsDetailScreen
 import com.stash.feature.library.PlaylistDetailScreen
+import com.stash.feature.library.mixbuilder.MixBuilderScreen
+import com.stash.feature.muse.MuseScreen
 import com.stash.feature.nowplaying.NowPlayingScreen
 import com.stash.feature.search.AlbumDiscoveryScreen
 import com.stash.feature.search.ArtistProfileScreen
 import com.stash.feature.search.SearchScreen
 import com.stash.feature.settings.BlockedSongsScreen
-import com.stash.feature.settings.SettingsScreen
+import com.stash.feature.settings.SettingsHubScreen
 import com.stash.feature.settings.equalizer.EqualizerScreen
 import com.stash.feature.settings.libraryhealth.LibraryHealthScreen
+import com.stash.feature.sync.FailedDownloadsScreen
 import com.stash.feature.sync.FailedMatchesScreen
 import com.stash.feature.sync.SyncScreen
 
@@ -38,6 +41,11 @@ private const val SLIDE_DURATION_MS = 350
 fun StashNavHost(
     navController: NavHostController,
     modifier: Modifier = Modifier,
+    // Forwarded to detail screens that support multi-select so the host can hide
+    // the mini-player while a screen is in selection mode. General by design:
+    // the same lambda will be wired to Liked/Album/Artist/Library detail screens
+    // in later tasks — only the Playlist destination consumes it today.
+    onSelectionModeChanged: (Boolean) -> Unit = {},
 ) {
     NavHost(
         navController = navController,
@@ -58,7 +66,13 @@ fun StashNavHost(
                         launchSingleTop = true
                     }
                 },
+                onNavigateToMixBuilder = { recipeId ->
+                    navController.navigate(MixBuilderRoute(recipeId))
+                },
             )
+        }
+        composable<MixBuilderRoute> {
+            MixBuilderScreen(onBack = { navController.popBackStack() })
         }
         composable<LibraryRoute> {
             LibraryScreen(
@@ -71,6 +85,7 @@ fun StashNavHost(
                 onNavigateToAlbum = { albumName, artistName ->
                     navController.navigate(AlbumDetailRoute(albumName, artistName))
                 },
+                onSelectionModeChanged = onSelectionModeChanged,
             )
         }
         composable<SearchRoute> {
@@ -86,10 +101,14 @@ fun StashNavHost(
                             artist = album.artist,
                             thumbnailUrl = album.thumbnailUrl,
                             year = album.year,
+                            source = album.source,
                         ),
                     )
                 },
             )
+        }
+        composable<MuseRoute> {
+            MuseScreen(onOpenSync = { navController.navigate(SyncRoute) })
         }
         composable<SyncRoute> {
             SyncScreen(
@@ -99,19 +118,88 @@ fun StashNavHost(
                 // Phase 8: Library actions (Blocked Songs + Fix wrong-version)
                 // moved out of Settings into the Sync tab's Library section.
                 onNavigateToBlockedSongs = { navController.navigate(BlockedSongsRoute) },
+                onNavigateToFailedDownloads = {
+                    navController.navigate(FailedDownloadsRoute)
+                },
+                onNavigateToSettings = {
+                    navController.navigate(SettingsRoute) {
+                        launchSingleTop = true
+                    }
+                },
             )
         }
         composable<SettingsRoute> {
-            SettingsScreen(
-                onNavigateToEqualizer = {
-                    navController.navigate(EqualizerRoute)
-                },
-                onNavigateToLibraryHealth = {
-                    navController.navigate(LibraryHealthRoute)
-                },
-                onNavigateToSquidWtfCaptcha = {
-                    navController.navigate(SquidWtfCaptchaRoute)
-                },
+            val uriHandler = androidx.compose.ui.platform.LocalUriHandler.current
+            SettingsHubScreen(
+                onOpenPlayback = { navController.navigate(SettingsPlaybackRoute) },
+                onOpenAudioQuality = { navController.navigate(SettingsAudioQualityRoute) },
+                onOpenAccounts = { navController.navigate(SettingsAccountsRoute) },
+                onOpenLibraryStorage = { navController.navigate(SettingsLibraryStorageRoute) },
+                onOpenAppearance = { navController.navigate(SettingsAppearanceRoute) },
+                onOpenAbout = { navController.navigate(SettingsAboutRoute) },
+                onDonate = { runCatching { uriHandler.openUri("https://ko-fi.com/rawnald") } },
+                onStar = { runCatching { uriHandler.openUri("https://github.com/rawnaldclark/Stash") } },
+            )
+        }
+
+        composable<SettingsPlaybackRoute> { backStackEntry ->
+            val settingsEntry = remember(backStackEntry) { navController.getBackStackEntry(SettingsRoute) }
+            val viewModel: com.stash.feature.settings.SettingsViewModel =
+                androidx.hilt.navigation.compose.hiltViewModel(settingsEntry)
+            com.stash.feature.settings.SettingsPlaybackScreen(
+                onBack = { navController.popBackStack() },
+                viewModel = viewModel,
+            )
+        }
+        composable<SettingsAudioQualityRoute> { backStackEntry ->
+            val settingsEntry = remember(backStackEntry) { navController.getBackStackEntry(SettingsRoute) }
+            val viewModel: com.stash.feature.settings.SettingsViewModel =
+                androidx.hilt.navigation.compose.hiltViewModel(settingsEntry)
+            com.stash.feature.settings.SettingsAudioQualityScreen(
+                onBack = { navController.popBackStack() },
+                onNavigateToEqualizer = { navController.navigate(EqualizerRoute) },
+                onNavigateToSquidWtfCaptcha = { navController.navigate(SquidWtfCaptchaRoute) },
+                onNavigateToArcodConnect = { navController.navigate(ArcodConnectRoute) },
+                viewModel = viewModel,
+            )
+        }
+        composable<SettingsAccountsRoute> { backStackEntry ->
+            val settingsEntry = remember(backStackEntry) { navController.getBackStackEntry(SettingsRoute) }
+            val viewModel: com.stash.feature.settings.SettingsViewModel =
+                androidx.hilt.navigation.compose.hiltViewModel(settingsEntry)
+            com.stash.feature.settings.SettingsAccountsScreen(
+                onBack = { navController.popBackStack() },
+                experimentalSpotifyCookieEnabled = com.stash.app.BuildConfig.EXPERIMENTAL_SPOTIFY_COOKIE_ENABLED,
+                viewModel = viewModel,
+            )
+        }
+        composable<SettingsLibraryStorageRoute> { backStackEntry ->
+            val settingsEntry = remember(backStackEntry) { navController.getBackStackEntry(SettingsRoute) }
+            val viewModel: com.stash.feature.settings.SettingsViewModel =
+                androidx.hilt.navigation.compose.hiltViewModel(settingsEntry)
+            com.stash.feature.settings.SettingsLibraryStorageScreen(
+                onBack = { navController.popBackStack() },
+                onNavigateToLibraryHealth = { navController.navigate(LibraryHealthRoute) },
+                viewModel = viewModel,
+            )
+        }
+        composable<SettingsAppearanceRoute> { backStackEntry ->
+            val settingsEntry = remember(backStackEntry) { navController.getBackStackEntry(SettingsRoute) }
+            val viewModel: com.stash.feature.settings.SettingsViewModel =
+                androidx.hilt.navigation.compose.hiltViewModel(settingsEntry)
+            com.stash.feature.settings.SettingsAppearanceScreen(
+                onBack = { navController.popBackStack() },
+                viewModel = viewModel,
+            )
+        }
+        composable<SettingsAboutRoute> { backStackEntry ->
+            val settingsEntry = remember(backStackEntry) { navController.getBackStackEntry(SettingsRoute) }
+            val viewModel: com.stash.feature.settings.SettingsViewModel =
+                androidx.hilt.navigation.compose.hiltViewModel(settingsEntry)
+            com.stash.feature.settings.SettingsAboutScreen(
+                onBack = { navController.popBackStack() },
+                onNavigateToDiagnosticsPreview = { navController.navigate(DiagnosticsPreviewRoute) },
+                viewModel = viewModel,
             )
         }
 
@@ -132,6 +220,21 @@ fun StashNavHost(
             )
         }
 
+        composable<ArcodConnectRoute> { backStackEntry ->
+            // Reuse the Settings-scoped ViewModel so the harvested Supabase
+            // session writes to the same ArcodCredentialStore the source +
+            // interceptor read from, and survives this route's dispose.
+            val settingsEntry = remember(backStackEntry) {
+                navController.getBackStackEntry(SettingsRoute)
+            }
+            val viewModel: com.stash.feature.settings.SettingsViewModel =
+                androidx.hilt.navigation.compose.hiltViewModel(settingsEntry)
+            com.stash.feature.settings.components.ArcodConnectScreen(
+                onConnected = viewModel::onArcodConnected,
+                onClose = { navController.popBackStack() },
+            )
+        }
+
         composable<EqualizerRoute> {
             EqualizerScreen(
                 onNavigateBack = { navController.popBackStack() },
@@ -140,6 +243,12 @@ fun StashNavHost(
 
         composable<LibraryHealthRoute> {
             LibraryHealthScreen(
+                onNavigateBack = { navController.popBackStack() },
+            )
+        }
+
+        composable<DiagnosticsPreviewRoute> {
+            com.stash.feature.settings.diagnostics.DiagnosticsPreviewScreen(
                 onNavigateBack = { navController.popBackStack() },
             )
         }
@@ -153,24 +262,28 @@ fun StashNavHost(
         composable<PlaylistDetailRoute> {
             PlaylistDetailScreen(
                 onBack = { navController.popBackStack() },
+                onSelectionModeChanged = onSelectionModeChanged,
             )
         }
 
         composable<ArtistDetailRoute> {
             ArtistDetailScreen(
                 onBack = { navController.popBackStack() },
+                onSelectionModeChanged = onSelectionModeChanged,
             )
         }
 
         composable<AlbumDetailRoute> {
             AlbumDetailScreen(
                 onBack = { navController.popBackStack() },
+                onSelectionModeChanged = onSelectionModeChanged,
             )
         }
 
         composable<LikedSongsDetailRoute> {
             LikedSongsDetailScreen(
                 onBack = { navController.popBackStack() },
+                onSelectionModeChanged = onSelectionModeChanged,
             )
         }
 
@@ -178,6 +291,10 @@ fun StashNavHost(
             FailedMatchesScreen(
                 onBack = { navController.popBackStack() },
             )
+        }
+
+        composable<FailedDownloadsRoute> {
+            FailedDownloadsScreen(onBack = { navController.popBackStack() })
         }
 
         composable<SearchArtistRoute> {
@@ -191,6 +308,7 @@ fun StashNavHost(
                             artist = album.artist,
                             thumbnailUrl = album.thumbnailUrl,
                             year = album.year,
+                            source = album.source,
                         ),
                     )
                 },
@@ -211,6 +329,7 @@ fun StashNavHost(
                             artist = album.artist,
                             thumbnailUrl = album.thumbnailUrl,
                             year = album.year,
+                            source = album.source,
                         ),
                     )
                 },
@@ -245,6 +364,9 @@ fun StashNavHost(
         ) {
             NowPlayingScreen(
                 onDismiss = { navController.popBackStack() },
+                onNavigateToArtist = { id, name, avatar, focusAlbum ->
+                    navController.navigate(SearchArtistRoute(id, name, avatar, focusAlbum))
+                },
             )
         }
     }

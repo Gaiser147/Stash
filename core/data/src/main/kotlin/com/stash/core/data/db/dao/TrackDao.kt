@@ -118,6 +118,19 @@ data class DurationBackfillRow(
 )
 
 /**
+ * Minimal row projection for the v0.9.38 stream-only metadata backfill —
+ * stubs that StashDiscoveryWorker created with bare title+artist, no art
+ * URL and no duration. A single Last.fm `track.getInfo` lookup yields
+ * both fields so this row carries just the identity needed to make the
+ * call.
+ */
+data class StreamableBackfillRow(
+    val id: Long,
+    val artist: String,
+    val title: String,
+)
+
+/**
  * Minimal projection for the startup file-integrity sweep — only needs id
  * and the stored path so we can verify the file actually exists on disk.
  * `file_path` is nullable in the schema; rows with `is_downloaded=1` and
@@ -245,6 +258,15 @@ interface TrackDao {
      * Checked-but-unavailable rows (checked_at != null AND is_streamable = 0)
      * are always excluded; unchecked rows (checked_at IS NULL) are also
      * excluded so they don't pop in/out as the worker drains.
+     *
+     * STASH_MIX exemption — Stash Mixes are an inherently online discovery
+     * surface (recipe-driven, Last.fm-seeded, stream-only by design; see the
+     * v0.9.37 stream-only design doc). Their streamable tracks stay visible
+     * even when [includeStreamable] is false (Offline mode), so the full mix
+     * renders instead of collapsing to the handful of manually-downloaded
+     * tracks. The per-tap connectivity guard in PlaylistDetailViewModel still
+     * governs whether a stream-only track can actually play. Other playlist
+     * types remain downloaded-only in Offline mode (Library = your saved music).
      */
     @Query(
         """
@@ -258,7 +280,11 @@ interface TrackDao {
         WHERE pt.playlist_id = :playlistId
           AND pt.removed_at IS NULL
           AND bl.canonical_key IS NULL
-          AND (t.is_downloaded = 1 OR :includeStreamable)
+          AND (
+              t.is_downloaded = 1
+              OR :includeStreamable
+              OR (p.type = 'STASH_MIX' AND t.is_streamable = 1)
+          )
         ORDER BY
             CASE WHEN p.type = 'DAILY_MIX' THEN pt.added_at END DESC,
             pt.position ASC
@@ -348,6 +374,14 @@ interface TrackDao {
     /** Find a track by primary key. */
     @Query("SELECT * FROM tracks WHERE id = :trackId LIMIT 1")
     suspend fun getById(trackId: Long): TrackEntity?
+
+    /**
+     * Batch lookup by primary key. SQLite's `IN` does not preserve the
+     * order of [trackIds]; callers that need the original order (e.g.
+     * restoring a persisted playback queue) must re-sort the result.
+     */
+    @Query("SELECT * FROM tracks WHERE id IN (:trackIds)")
+    suspend fun getByIds(trackIds: List<Long>): List<TrackEntity>
 
     // ── Download tracking ────────────────────────────────────────────────
 
@@ -730,6 +764,92 @@ interface TrackDao {
     )
     suspend fun invalidateOldStreamableChecks(cutoff: Long): Int
 
+    // ── Metadata embedding backfill (v0.9.35) ───────────────────────────
+
+    /**
+     * Stamps a single row's `metadata_embedded_at` column. The
+     * [MetadataBackfillWorker] passes the current wall clock on success
+     * and `0L` on irrecoverable failure (file missing, ffmpeg error, SAF
+     * row we can't operate on in place). Both values remove the row
+     * from [getTracksNeedingEmbed]'s result set so the worker
+     * terminates.
+     */
+    @Query("UPDATE tracks SET metadata_embedded_at = :timestamp WHERE id = :trackId")
+    suspend fun setMetadataEmbeddedAt(trackId: Long, timestamp: Long)
+
+    /**
+     * Paginated scan of downloaded tracks whose on-disk file has never
+     * had the v0.9.35 tag-set written. Drives the
+     * [MetadataBackfillWorker]'s resumable batch loop — pass `(limit,
+     * offset)` and stamp each returned row so the next call advances
+     * past it. `file_path IS NOT NULL` excludes streaming-only rows
+     * (nothing to tag).
+     */
+    @Query(
+        """
+        SELECT * FROM tracks
+        WHERE is_downloaded = 1
+          AND file_path IS NOT NULL
+          AND metadata_embedded_at IS NULL
+        ORDER BY id ASC
+        LIMIT :limit OFFSET :offset
+        """
+    )
+    suspend fun getTracksNeedingEmbed(limit: Int, offset: Int): List<TrackEntity>
+
+    /**
+     * Reactive count of rows still awaiting an embed pass. Subscribed
+     * by the Home banner's `MetadataBackfillBannerState` so the
+     * "Tagging N files…" affordance counts down as the worker drains
+     * the backlog and disappears when the count hits zero.
+     */
+    @Query(
+        """
+        SELECT COUNT(*) FROM tracks
+        WHERE is_downloaded = 1
+          AND file_path IS NOT NULL
+          AND metadata_embedded_at IS NULL
+        """
+    )
+    fun observeTracksNeedingEmbedCount(): Flow<Int>
+
+    // ── Lyrics fetch (v0.9.36) ──────────────────────────────────────────
+
+    /**
+     * Stamps a single row's `lyrics_fetched_at` column. The lyrics fetch
+     * paths pass the current wall clock on success (paired with
+     * [LyricsDao.upsert]) and `0L` when every source returned a definitive
+     * "no lyrics" answer (the confirmed-miss sentinel). `null` clears the
+     * stamp back to never-tried — the Retry path uses this so the sheet
+     * visibly returns to Loading while the re-fetch runs. Mirror of
+     * [setMetadataEmbeddedAt] semantics from v0.9.35.
+     */
+    @Query("UPDATE tracks SET lyrics_fetched_at = :ts WHERE id = :trackId")
+    suspend fun setLyricsFetchedAt(trackId: Long, ts: Long?)
+
+    /**
+     * One-shot repair for miss-stamps written before v0.9.73: transient
+     * failures (timeouts, 429s, DNS drops during bulk post-download bursts)
+     * were conflated with genuine misses and stamped `0L` permanently —
+     * on-device forensics found ~72% of stamped misses had lyrics available.
+     * Resets every miss-stamp to NULL so each track re-fetches on its next
+     * sheet open; genuine misses simply re-stamp `0L` then. Gated to run
+     * once from [com.stash.app.StashApplication] — post-fix `0L` stamps are
+     * trustworthy and must not be wiped again.
+     */
+    @Query("UPDATE tracks SET lyrics_fetched_at = NULL WHERE lyrics_fetched_at = 0")
+    suspend fun resetMissedLyricsStamps(): Int
+
+    /**
+     * Observe a single row's `lyrics_fetched_at` stamp. The Now Playing lyrics
+     * sheet pairs this with [LyricsDao.observe] so it reflects a fetch completing
+     * live — null = never tried, 0L = tried+missed, non-zero = hit. Without this,
+     * the sheet derives Loading/None from a stale captured value and sticks on
+     * Loading until a close+reopen.
+     */
+    @Query("SELECT lyrics_fetched_at FROM tracks WHERE id = :trackId")
+    fun observeLyricsFetchedAt(trackId: Long): kotlinx.coroutines.flow.Flow<Long?>
+
     // ── Release-downloads worker (Off→On "release space" path) ──────────
 
     /**
@@ -857,6 +977,21 @@ interface TrackDao {
     suspend fun markYtMusicSaved(trackId: Long, ts: Long)
 
     /**
+     * v0.9.52 like-mirroring: clears the Spotify dedup timestamp after a
+     * successful symmetric un-like (`DELETE /v1/me/tracks`), so a future
+     * re-heart re-fires the external save.
+     */
+    @Query("UPDATE tracks SET spotify_saved_at = NULL WHERE id = :trackId")
+    suspend fun clearSpotifySaved(trackId: Long)
+
+    /**
+     * v0.9.52 like-mirroring: clears the YT Music dedup timestamp after a
+     * successful InnerTube `like/removelike`.
+     */
+    @Query("UPDATE tracks SET ytmusic_saved_at = NULL WHERE id = :trackId")
+    suspend fun clearYtMusicSaved(trackId: Long)
+
+    /**
      * v0.9.13: Mark a track as added to the local Stash "Liked Songs"
      * playlist. Called by [StashLikedPlaylistRepository.add] after the
      * cross-ref is in place.
@@ -905,6 +1040,16 @@ interface TrackDao {
     fun observeLikeState(trackId: Long): Flow<TrackLikeState?>
 
     /**
+     * v0.9.37: youtube_id-keyed equivalent of [observeLikeState]. The
+     * notification mini-player and Now Playing both fall back to this
+     * when the active MediaItem's mediaId is a streaming-engine
+     * synthetic `videoId.hashCode().toLong()` that doesn't match any
+     * `tracks.id` (issue #105 follow-up).
+     */
+    @Query("SELECT id, stash_liked_at, spotify_saved_at, ytmusic_saved_at FROM tracks WHERE youtube_id = :youtubeId LIMIT 1")
+    fun observeLikeStateByYoutubeId(youtubeId: String): Flow<TrackLikeState?>
+
+    /**
      * v0.9.13: Live-observe a full track row by id. Now Playing uses
      * this as the canonical source for currentTrack — the Player only
      * provides id+title+artist+album+art via MediaItem extras, but
@@ -916,6 +1061,18 @@ interface TrackDao {
      */
     @Query("SELECT * FROM tracks WHERE id = :trackId")
     fun observeById(trackId: Long): Flow<TrackEntity?>
+
+    /**
+     * Live-observe a track by its `youtube_id`. Needed by Now Playing so
+     * streaming-engine tracks (whose `currentTrack.id` is a synthetic
+     * `videoId.hashCode().toLong()`) can find the real Room row that
+     * `MusicRepository.ensureTrackPersisted` writes under a fresh autogen
+     * PK. Without this fallback the heart icon never reflects the post-
+     * persist `stashLikedAt` because `observeById(syntheticId)` returns
+     * null forever (issue #105 follow-up).
+     */
+    @Query("SELECT * FROM tracks WHERE youtube_id = :youtubeId LIMIT 1")
+    fun observeByYoutubeId(youtubeId: String): Flow<TrackEntity?>
 
     /**
      * v0.9.13: Count of tracks marked as auto-saved to Spotify since
@@ -1166,6 +1323,25 @@ interface TrackDao {
     suspend fun updateYoutubeId(trackId: Long, youtubeId: String)
 
     /**
+     * Set the Spotify URI for a track — used by the cross-platform like
+     * resolver to persist a match it found for a previously YouTube-only
+     * track, so the next heart dedups and the URI is cached. Can throw on the
+     * `spotify_uri` UNIQUE index if another row already owns it; callers wrap
+     * this best-effort (the resolved URI is still used for the like in-memory).
+     */
+    @Query("UPDATE tracks SET spotify_uri = :spotifyUri WHERE id = :trackId")
+    suspend fun updateSpotifyUri(trackId: Long, spotifyUri: String)
+
+    /**
+     * Backfill duration_ms when the existing row has 0 (no duration yet —
+     * usually because the row was inserted by `ensureTrackPersisted` from
+     * a streaming-engine Track whose `durationMs` wasn't yet known at
+     * insert time). Issue #105 follow-up.
+     */
+    @Query("UPDATE tracks SET duration_ms = :durationMs WHERE id = :trackId AND duration_ms <= 0")
+    suspend fun backfillDurationIfMissing(trackId: Long, durationMs: Long)
+
+    /**
      * Set the cached canonical ATV/OMV video id for this track. Called once
      * per track by [com.stash.core.data.youtube.YtCanonicalResolver] when it
      * resolves a non-ATV/OMV track via InnerTube search. Never re-runs —
@@ -1229,7 +1405,10 @@ interface TrackDao {
     @Query(
         """
         UPDATE tracks
-        SET album = CASE WHEN album IS NULL OR album = '' THEN :album ELSE album END,
+        SET album = CASE
+                WHEN (album IS NULL OR album = '') AND :album IS NOT NULL THEN :album
+                ELSE album
+            END,
             album_art_url = CASE
                 WHEN album_art_url IS NULL OR album_art_url = '' THEN :albumArtUrl
                 ELSE album_art_url
@@ -1366,6 +1545,32 @@ interface TrackDao {
         """
     )
     suspend fun findArtBackfillCandidates(limit: Int): List<ArtBackfillRow>
+
+    /**
+     * Candidate projection for the v0.9.38 stream-only metadata backfill —
+     * tracks that StashDiscoveryWorker filed as `is_streamable = 1,
+     * is_downloaded = 0` stubs with no art and no duration. Returns rows
+     * where at least one of (art, duration) is still missing so a single
+     * Last.fm `track.getInfo` round-trip can fill both in one pass.
+     *
+     * Pre-fix: stream-only mix tracks rendered with empty thumbnails and
+     * "0:00" durations on first paint; metadata only filled in
+     * incidentally when the player resolved a queue window at play time
+     * (conversation 2026-05-28).
+     */
+    @Query(
+        """
+        SELECT id, artist, title
+        FROM tracks
+        WHERE is_streamable = 1
+          AND is_downloaded = 0
+          AND (album_art_url IS NULL OR album_art_url = '' OR duration_ms = 0)
+          AND artist != ''
+          AND title != ''
+        LIMIT :limit
+        """
+    )
+    suspend fun findStreamableMetadataBackfillCandidates(limit: Int): List<StreamableBackfillRow>
 
     /**
      * Atomically reverts a track to an undownloaded state so the download

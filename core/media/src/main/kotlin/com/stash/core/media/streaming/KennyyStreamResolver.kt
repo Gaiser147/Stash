@@ -1,10 +1,14 @@
 package com.stash.core.media.streaming
 
+import android.util.Log
 import com.stash.core.data.db.entity.TrackEntity
+import com.stash.data.download.lossless.LosslessSourceHealthGate
 import com.stash.data.download.lossless.TrackQuery
 import com.stash.data.download.lossless.kennyy.KennyySource
 import javax.inject.Inject
 import javax.inject.Singleton
+import kotlinx.coroutines.TimeoutCancellationException
+import kotlinx.coroutines.withTimeout
 
 /**
  * Result of a successful stream-URL lookup. [url] is the signed CDN URL
@@ -38,6 +42,16 @@ data class StreamUrl(
      * source didn't surface it.
      */
     val coverArtUrl: String? = null,
+    /**
+     * Which resolver served this URL — used by the UI to label tracks
+     * that are streaming from a non-lossless fallback (e.g. YouTube)
+     * so the user knows quality has degraded from the Qobuz baseline.
+     *
+     * Conventional values:
+     *  - `"kennyy"` / `"squid"`  — Qobuz catalog (lossless)
+     *  - `"youtube"`             — yt-dlp/InnerTube extraction (lossy)
+     */
+    val origin: String? = null,
 )
 
 /**
@@ -60,19 +74,26 @@ data class StreamUrl(
  *    safely refresh is one we shouldn't cache; treat it as unresolved
  *    rather than letting the player hit a non-refreshable 403 later.
  *  - The `etsp` value isn't an integer.
- *
- * v1 note: streaming quality follows the existing lossless-download
- * preference ([com.stash.data.download.lossless.LosslessSourcePreferences])
- * because [TrackQuery] has no `preferredQuality` field yet. The
- * `streamQuality` flow on [com.stash.core.media.streaming
- * .StreamingPreference] is stored but unused here until a follow-up
- * threads quality through [KennyySource.resolve].
  */
 @Singleton
 class KennyyStreamResolver @Inject constructor(
     private val source: KennyySource,
+    private val healthMonitor: KennyyHealthMonitor,
+    private val healthGate: LosslessSourceHealthGate,
+    private val qualityPolicy: StreamQualityPolicy,
 ) {
     suspend fun resolve(track: TrackEntity): StreamUrl? {
+        if (healthGate.isDegraded(KennyySource.SOURCE_ID)) {
+            // Content-degraded (preview-sample / lossy downgrade) within the
+            // cooldown — skip so the streaming registry fails over.
+            Log.d(TAG, "skip id=${track.id} (kennyy content-degraded)")
+            return null
+        }
+        if (!healthMonitor.isHealthy.value) {
+            Log.d(TAG, "skip id=${track.id} (kennyy unhealthy)")
+            return null
+        }
+        Log.d(TAG, "resolve attempt id=${track.id} title='${track.title}'")
         val query = TrackQuery(
             artist = track.artist,
             title = track.title,
@@ -84,8 +105,36 @@ class KennyyStreamResolver @Inject constructor(
         // is user-initiated and must not queue behind background
         // AvailabilityCheckWorker batches that hold the limiter at 1
         // req/s. See KennyySource.resolveImmediate KDoc for rationale.
-        val result = source.resolveImmediate(query) ?: return null
-        val etspMs = parseEtspMs(result.downloadUrl) ?: return null
+        val requestedQuality = qualityPolicy.streamingTier().qobuzCode
+        val result = try {
+            withTimeout(STREAM_RESOLVE_TIMEOUT_MS) { source.resolveImmediate(query, requestedQuality) }
+        } catch (e: TimeoutCancellationException) {
+            healthMonitor.recordFailure()
+            Log.w(TAG, "timeout id=${track.id} after ${STREAM_RESOLVE_TIMEOUT_MS}ms")
+            return null
+        }
+        if (result == null) {
+            if (source.lastResolveFailedNetwork) {
+                healthMonitor.recordFailure()
+                Log.d(TAG, "no_result id=${track.id} (network failure)")
+            } else {
+                healthMonitor.recordNoMatch()
+                Log.d(TAG, "no_result id=${track.id} (no match)")
+            }
+            return null
+        }
+        val etspMs = parseEtspMs(result.downloadUrl)
+        if (etspMs == null) {
+            // Treat unparseable URL as a proxy-side anomaly worth signaling.
+            healthMonitor.recordFailure()
+            Log.w(TAG, "no_etsp id=${track.id}")
+            return null
+        }
+        healthMonitor.recordSuccess()
+        Log.d(
+            TAG,
+            "resolved id=${track.id} origin=$ORIGIN expiresInSec=${(etspMs - System.currentTimeMillis()) / 1000}",
+        )
         return StreamUrl(
             url = result.downloadUrl,
             expiresAtMs = etspMs,
@@ -94,6 +143,7 @@ class KennyyStreamResolver @Inject constructor(
             sampleRateHz = result.format.sampleRateHz.takeIf { it > 0 },
             bitrateKbps = result.format.bitrateKbps.takeIf { it > 0 },
             coverArtUrl = result.coverArtUrl?.takeIf { it.isNotBlank() },
+            origin = ORIGIN,
         )
     }
 
@@ -104,6 +154,9 @@ class KennyyStreamResolver @Inject constructor(
     }
 
     private companion object {
+        const val TAG = "KennyyStreamResolver"
+        const val ORIGIN = "kennyy"
+        const val STREAM_RESOLVE_TIMEOUT_MS = 3_000L
         val ETSP_REGEX = Regex("""[?&]etsp=(\d+)""")
     }
 }

@@ -41,10 +41,15 @@ fun PopularTracksSection(
     downloadingIds: Set<String>,
     downloadedIds: Set<String>,
     previewLoadingId: String?,
+    currentPlayingYoutubeId: String?,
     losslessPrefetcher: LosslessUrlPrefetcher,
     onPreview: (TrackItem) -> Unit,
     onStopPreview: () -> Unit,
     onDownload: (SearchResultItem) -> Unit,
+    onPlayNext: (TrackItem) -> Unit = {},
+    onAddToQueue: (TrackItem) -> Unit = {},
+    onStartRadio: (TrackItem) -> Unit = {},
+    onRequestAddToPlaylist: (TrackItem) -> Unit = {},
     modifier: Modifier = Modifier,
 ) {
     Column(
@@ -59,16 +64,21 @@ fun PopularTracksSection(
             LaunchedEffect(track.videoId) {
                 losslessPrefetcher.warmUp(trackItem)
             }
-            PreviewDownloadRow(
+            SongRow(
                 item = item,
                 isDownloading = track.videoId in downloadingIds,
                 isDownloaded = track.videoId in downloadedIds,
                 isPreviewLoading = previewLoadingId == track.videoId,
                 isPreviewPlaying = previewState is PreviewState.Playing &&
                     previewState.videoId == track.videoId,
-                onPreview = { onPreview(trackItem) },
+                isPlaying = isRowPlaying(track.videoId, currentPlayingYoutubeId),
+                onPlay = { onPreview(trackItem) },
                 onStopPreview = onStopPreview,
                 onDownload = { onDownload(item) },
+                onPlayNext = { onPlayNext(trackItem) },
+                onAddToQueue = { onAddToQueue(trackItem) },
+                onStartRadio = { onStartRadio(trackItem) },
+                onAddToPlaylist = { onRequestAddToPlaylist(trackItem) },
             )
         }
     }

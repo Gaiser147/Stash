@@ -11,6 +11,7 @@ import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
 import org.mockito.kotlin.any
+import org.mockito.kotlin.anyOrNull
 import org.mockito.kotlin.mock
 import org.mockito.kotlin.whenever
 
@@ -45,7 +46,10 @@ class InnerTubeSearchExecutorTest {
     private fun executorFor(fixture: String): InnerTubeSearchExecutor {
         val inner = mock<InnerTubeClient>()
         val parsed = Json.parseToJsonElement(loadFixture(fixture)).jsonObject
-        runBlocking { whenever(inner.search(any())).thenReturn(parsed) }
+        // search(query, params = null): the executor calls search(query), which
+        // the JVM expands to search(query, null) — so the params matcher must
+        // accept null (anyOrNull), else Mockito sees 1 matcher for a 2-arg call.
+        runBlocking { whenever(inner.search(any(), anyOrNull())).thenReturn(parsed) }
         return InnerTubeSearchExecutor(inner)
     }
 

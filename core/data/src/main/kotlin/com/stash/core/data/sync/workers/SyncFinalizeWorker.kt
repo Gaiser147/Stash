@@ -9,6 +9,7 @@ import com.stash.core.data.db.dao.RemoteSnapshotDao
 import com.stash.core.data.db.dao.SyncHistoryDao
 import com.stash.core.data.sync.SyncNotificationManager
 import com.stash.core.data.sync.SyncStateManager
+import com.stash.core.data.sync.NavidromeExportScheduler
 import com.stash.core.model.SyncState
 import dagger.assisted.Assisted
 import dagger.assisted.AssistedInject
@@ -27,6 +28,7 @@ class SyncFinalizeWorker @AssistedInject constructor(
     private val remoteSnapshotDao: RemoteSnapshotDao,
     private val syncStateManager: SyncStateManager,
     private val syncNotificationManager: SyncNotificationManager,
+    private val navidromeExportScheduler: NavidromeExportScheduler,
 ) : CoroutineWorker(appContext, params) {
 
     companion object {
@@ -65,6 +67,12 @@ class SyncFinalizeWorker @AssistedInject constructor(
 
             // Clean up snapshot tables for this sync run.
             remoteSnapshotDao.deleteAllSnapshotsBySyncId(syncId)
+
+            // Export only current playlist manifests here. Newly downloaded
+            // files have their own idempotent work items, and an explicit full
+            // reconciliation remains available from Settings.
+            runCatching { navidromeExportScheduler.enqueuePlaylistExport() }
+                .onFailure { Log.w(TAG, "Could not enqueue Navidrome playlist export") }
 
             // Cancel the ongoing progress notification.
             syncNotificationManager.cancelProgress()

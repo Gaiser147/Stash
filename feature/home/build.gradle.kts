@@ -13,13 +13,20 @@ android {
     }
 }
 dependencies {
-    implementation(project(":core:auth"))
+    // :core:auth was used by HomeViewModel for TokenManager / AuthState
+    // to feed the SyncStatusCard's "Connect Spotify / YouTube" prompt.
+    // Both moved to :feature:sync along with the card.
     implementation(project(":core:data"))
     implementation(project(":core:media"))
-    // For FileOrganizer.getTotalStorageBytes / getLosslessStorageBytes —
-    // disk-truth Storage stats on the Home sync card (bypassing the
-    // unreliable DB `file_size_bytes` SUM for legacy libraries).
+    // Still required after the SyncStatusCard relocation: the lossless
+    // retry/backfill banners on Home read MetadataBackfillState,
+    // LosslessRetryWorker, KennyySource, QobuzSource, and the
+    // AggregatorRateLimiter from this module.
     implementation(project(":data:download"))
+    // v0.9.36: LyricsBackfillState snapshot for the LyricsBackfillBanner
+    // on Home — mirrors the :data:download dependency for the v0.9.35
+    // metadata banner.
+    implementation(project(":data:lyrics"))
     implementation(libs.compose.material.icons.extended)
     implementation(libs.coil.compose)
     implementation(libs.coil.network.okhttp)
@@ -28,4 +35,9 @@ dependencies {
     implementation(libs.work.runtime.ktx)
 
     testImplementation("junit:junit:4.13.2")
+    testImplementation("org.jetbrains.kotlinx:kotlinx-coroutines-test:1.10.1")
+    testImplementation("com.google.truth:truth:1.4.4")
+    // Matches the test harness in :feature:library — see MixOfflineTapGuardTest.
+    testImplementation("org.mockito:mockito-core:5.14.2")
+    testImplementation("org.mockito.kotlin:mockito-kotlin:5.4.0")
 }

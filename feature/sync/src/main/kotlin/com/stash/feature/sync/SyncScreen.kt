@@ -21,9 +21,12 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.KeyboardArrowRight
 import androidx.compose.material.icons.filled.Block
 import androidx.compose.material.icons.filled.Clear
+import androidx.compose.material.icons.filled.ErrorOutline
 import androidx.compose.material.icons.filled.Search
 import androidx.compose.material.icons.filled.Warning
+import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.FilterChip
+import androidx.compose.material3.TextButton
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.OutlinedTextField
@@ -50,11 +53,13 @@ import com.stash.core.model.SyncDisplayStatus
 import com.stash.core.model.SyncMode
 import com.stash.core.ui.components.GlassCard
 import com.stash.core.ui.theme.StashTheme
+import com.stash.feature.sync.components.AuthExpiredBanner
 import com.stash.feature.sync.components.RecentSyncRow
 import com.stash.feature.sync.components.RecentSyncsCard
 import com.stash.feature.sync.components.SyncRowStatus
 import com.stash.feature.sync.components.SyncHeroCard
 import com.stash.feature.sync.components.SyncActionProgress
+import com.stash.feature.sync.components.SyncStatusCard
 import com.stash.feature.sync.components.StatusPill
 import com.stash.feature.sync.components.formatRelativeTime
 
@@ -69,10 +74,15 @@ fun SyncScreen(
     modifier: Modifier = Modifier,
     onNavigateToFailedMatches: () -> Unit = {},
     onNavigateToBlockedSongs: () -> Unit = {},
+    onNavigateToFailedDownloads: () -> Unit = {},
+    onNavigateToSettings: () -> Unit = {},
     viewModel: SyncViewModel = hiltViewModel(),
 ) {
     val uiState by viewModel.uiState.collectAsStateWithLifecycle()
     val blockedCount by viewModel.blockedCount.collectAsStateWithLifecycle()
+    val failedDownloadsCount by viewModel.failedDownloadsCount.collectAsStateWithLifecycle()
+    val authState by viewModel.authExpiry.collectAsStateWithLifecycle()
+    val streamingMode by viewModel.streamingEnabled.collectAsStateWithLifecycle()
 
     LazyColumn(
         modifier = modifier
@@ -80,6 +90,32 @@ fun SyncScreen(
             .padding(horizontal = 16.dp),
         verticalArrangement = Arrangement.spacedBy(16.dp),
     ) {
+        // -- Auth expiry banner ----------------------------------------------
+        // Mounted ABOVE the SyncStatusCard so users see "session expired"
+        // before anything else when probes flag expired Spotify/YouTube
+        // credentials. The banner renders zero-height when neither source
+        // is expired, so it's a no-op for healthy logins.
+        item {
+            AuthExpiredBanner(
+                state = authState,
+                onReauth = onNavigateToSettings,
+            )
+        }
+
+        // -- Sync status card (relocated from Home) ---------------------------
+        // Lives at the very top of the Sync tab so library-status info
+        // sits with the rest of the Sync surface (was previously the
+        // first content card on Home, directly under the supporter pill).
+        item {
+            Spacer(Modifier.height(8.dp))
+            SyncStatusCard(
+                syncStatus = uiState.syncStatus,
+                spotifyConnected = uiState.spotifyConnected,
+                youTubeConnected = uiState.youTubeConnected,
+                hasEverSynced = uiState.hasEverSynced,
+            )
+        }
+
         // -- Header -----------------------------------------------------------
         item {
             Spacer(Modifier.height(8.dp))
@@ -99,6 +135,8 @@ fun SyncScreen(
                 healthLabel = uiState.lastSyncHealthLabel,
                 healthColor = uiState.lastSyncHealthColor,
                 isSyncing = uiState.isSyncing,
+                streamingMode = streamingMode,
+                onStreamingModeChange = viewModel::setStreamingEnabled,
                 onSyncNow = viewModel::onSyncNow,
                 progressContent = {
                     SyncActionProgress(
@@ -124,6 +162,19 @@ fun SyncScreen(
                     unmatchedCount = uiState.unmatchedCount,
                     flaggedCount = uiState.flaggedCount,
                     onClick = onNavigateToFailedMatches,
+                )
+            }
+        }
+
+        // -- Failed downloads card -------------------------------------------
+        // Sibling to the review-queue card. Surfaces tracks that couldn't
+        // be downloaded (auth, network, storage, ...) so the user can
+        // retry or block from one screen. Hidden when count is 0.
+        if (failedDownloadsCount > 0) {
+            item(key = "failed_downloads") {
+                FailedDownloadsCard(
+                    count = failedDownloadsCount,
+                    onClick = onNavigateToFailedDownloads,
                 )
             }
         }
@@ -159,6 +210,7 @@ fun SyncScreen(
                         SpotifyExpandedContent(
                             uiState = uiState,
                             onSyncModeChanged = viewModel::onSpotifySyncModeChanged,
+                            onRequestRefresh = viewModel::onRequestSpotifyRefresh,
                             onPlaylistToggled = viewModel::onTogglePlaylistSync,
                         )
                     },
@@ -194,6 +246,7 @@ fun SyncScreen(
                         YouTubeExpandedContent(
                             uiState = uiState,
                             onSyncModeChanged = viewModel::onYoutubeSyncModeChanged,
+                            onRequestRefresh = viewModel::onRequestYoutubeRefresh,
                             onStudioOnlyChanged = viewModel::onYoutubeLikedStudioOnlyChanged,
                             onPlaylistToggled = viewModel::onTogglePlaylistSync,
                         )
@@ -260,6 +313,32 @@ fun SyncScreen(
 
         // Bottom spacing so content isn't hidden behind nav bar
         item { Spacer(Modifier.height(80.dp)) }
+    }
+
+    // Refresh-confirm dialog. Sibling to the LazyColumn (NOT inside an
+    // item {}) so it stays composed regardless of scroll position; an
+    // AlertDialog hosts its own window, so it has no effect on layout.
+    if (uiState.pendingRefreshSource != null) {
+        AlertDialog(
+            onDismissRequest = viewModel::cancelRefreshMode,
+            title = { Text("Switch to Refresh?") },
+            text = {
+                Text(
+                    "Refresh pulls fresh tracks each sync — your auto-generated " +
+                        "daily mixes, weekly discovery, and other rotating playlists. " +
+                        "Tracks that rotate out are removed from the mix and their " +
+                        "downloads deleted to keep your library lean. Cleanup runs once " +
+                        "all sources are set to Refresh — while any source still " +
+                        "accumulates, nothing is deleted. Tracks you added manually are kept."
+                )
+            },
+            confirmButton = {
+                TextButton(onClick = viewModel::confirmRefreshMode) { Text("Switch to Refresh") }
+            },
+            dismissButton = {
+                TextButton(onClick = viewModel::cancelRefreshMode) { Text("Cancel") }
+            },
+        )
     }
 }
 
@@ -427,6 +506,78 @@ private fun UnmatchedSongsCard(
     }
 }
 
+// -- Failed downloads warning card --------------------------------------------
+
+/**
+ * Red-tinted warning card surfaced when one or more tracks failed to
+ * download (auth, network, storage, codec, ...). Tapping navigates to
+ * the FailedDownloads screen where the user can review classified
+ * reasons and retry or block per track. Modeled after [UnmatchedSongsCard]
+ * to keep the Sync-tab warning surfaces visually consistent.
+ *
+ * @param count   Number of FAILED rows in download_queue.
+ * @param onClick Navigation callback — routes to the Failed Downloads screen.
+ */
+@Composable
+private fun FailedDownloadsCard(
+    count: Int,
+    onClick: () -> Unit,
+    modifier: Modifier = Modifier,
+) {
+    val extendedColors = StashTheme.extendedColors
+    val accent = Color(0xFFEF4444) // Red — distinct from the amber UnmatchedSongsCard.
+
+    Surface(
+        modifier = modifier
+            .fillMaxWidth()
+            .clickable(onClick = onClick),
+        color = extendedColors.glassBackground,
+        shape = RoundedCornerShape(16.dp),
+        border = BorderStroke(1.dp, extendedColors.glassBorder),
+    ) {
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .background(
+                    Brush.horizontalGradient(
+                        listOf(
+                            accent.copy(alpha = 0.15f),
+                            Color.Transparent,
+                        )
+                    )
+                )
+                .padding(16.dp),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(12.dp),
+        ) {
+            Icon(
+                imageVector = Icons.Filled.ErrorOutline,
+                contentDescription = null,
+                tint = accent,
+                modifier = Modifier.size(24.dp),
+            )
+            Column(modifier = Modifier.weight(1f)) {
+                Text(
+                    text = "Failed Downloads",
+                    style = MaterialTheme.typography.bodyMedium,
+                    color = MaterialTheme.colorScheme.onSurface,
+                )
+                Text(
+                    text = "$count track${if (count != 1) "s" else ""} need attention",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            }
+            Icon(
+                imageVector = Icons.AutoMirrored.Filled.ArrowForward,
+                contentDescription = null,
+                tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                modifier = Modifier.size(20.dp),
+            )
+        }
+    }
+}
+
 // ── Refresh / Accumulate chip row (shared Spotify + YouTube) ────────────────
 
 /**
@@ -439,6 +590,7 @@ private fun UnmatchedSongsCard(
 private fun SyncModeChipRow(
     mode: SyncMode,
     onChange: (SyncMode) -> Unit,
+    onRequestRefresh: () -> Unit,
     accent: Color,
 ) {
     Text(
@@ -453,7 +605,7 @@ private fun SyncModeChipRow(
     ) {
         FilterChip(
             selected = mode == SyncMode.REFRESH,
-            onClick = { onChange(SyncMode.REFRESH) },
+            onClick = { onRequestRefresh() },
             label = { Text("Refresh") },
         )
         FilterChip(
@@ -584,6 +736,7 @@ private fun SpotifySummaryPills(uiState: SyncUiState) {
 private fun SpotifyExpandedContent(
     uiState: SyncUiState,
     onSyncModeChanged: (SyncMode) -> Unit,
+    onRequestRefresh: () -> Unit,
     onPlaylistToggled: (Long, Boolean) -> Unit,
 ) {
     val purple = MaterialTheme.colorScheme.primary
@@ -600,6 +753,7 @@ private fun SpotifyExpandedContent(
         SyncModeChipRow(
             mode = uiState.spotifySyncMode,
             onChange = onSyncModeChanged,
+            onRequestRefresh = onRequestRefresh,
             accent = purple,
         )
         Spacer(modifier = Modifier.height(8.dp))
@@ -800,6 +954,7 @@ private fun YouTubeSummaryPills(uiState: SyncUiState) {
 private fun YouTubeExpandedContent(
     uiState: SyncUiState,
     onSyncModeChanged: (SyncMode) -> Unit,
+    onRequestRefresh: () -> Unit,
     onStudioOnlyChanged: (Boolean) -> Unit,
     onPlaylistToggled: (Long, Boolean) -> Unit,
 ) {
@@ -819,6 +974,7 @@ private fun YouTubeExpandedContent(
         SyncModeChipRow(
             mode = uiState.youtubeSyncMode,
             onChange = onSyncModeChanged,
+            onRequestRefresh = onRequestRefresh,
             accent = accent,
         )
         Spacer(modifier = Modifier.height(8.dp))

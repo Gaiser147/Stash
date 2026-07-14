@@ -7,21 +7,25 @@ import com.stash.core.auth.TokenManager
 import com.stash.core.auth.model.AuthState
 import com.stash.core.data.db.dao.SyncHistoryDao
 import com.stash.core.data.db.entity.SyncHistoryEntity
+import com.stash.core.data.sync.AuthExpiryState
 import com.stash.core.data.sync.SyncPhase
 import com.stash.core.data.sync.SyncPreferences
 import com.stash.core.data.sync.SyncPreferencesManager
+import com.stash.core.model.MusicSource
 import com.stash.core.model.SyncMode
 import com.stash.core.data.sync.DayOfWeekSet
 import com.stash.core.data.sync.SyncScheduler
 import com.stash.core.data.sync.SyncStateManager
 import com.stash.core.data.sync.toDisplayStatus
 import com.stash.core.model.SyncDisplayStatus
+import com.stash.data.download.files.LibrarySizeHolder
 import dagger.hilt.android.lifecycle.HiltViewModel
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.combine
+import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
@@ -94,10 +98,17 @@ data class SyncUiState(
     /**
      * Per-source sync modes. Each service's Sync Preferences card
      * renders its own Refresh/Accumulate chip row bound to one of
-     * these. Defaults to REFRESH for both.
+     * these. Defaults to ACCUMULATE for both.
      */
-    val spotifySyncMode: SyncMode = SyncMode.REFRESH,
-    val youtubeSyncMode: SyncMode = SyncMode.REFRESH,
+    val spotifySyncMode: SyncMode = SyncMode.ACCUMULATE,
+    val youtubeSyncMode: SyncMode = SyncMode.ACCUMULATE,
+    /**
+     * Non-null while the Refresh-confirm dialog is shown for that source.
+     * Set when the user taps Refresh on a source currently in ACCUMULATE
+     * (Refresh deletes rotated-out downloads, so we ask first); cleared on
+     * confirm/cancel. null = no dialog.
+     */
+    val pendingRefreshSource: MusicSource? = null,
     /**
      * When true, the YT Music Liked Songs sync filters out UGC, cover,
      * live, and podcast tracks. Other YT content is unaffected. Default false.
@@ -126,6 +137,23 @@ data class SyncUiState(
     val lastSyncHealthLabel: String = "",
     /** Tint colour for [lastSyncHealthLabel]. */
     val lastSyncHealthColor: androidx.compose.ui.graphics.Color = androidx.compose.ui.graphics.Color.Transparent,
+
+    // -- SyncStatusCard inputs (relocated from HomeUiState) -------------------
+    /**
+     * Aggregated stats + display status driving the
+     * [com.stash.feature.sync.components.SyncStatusCard] at the top of
+     * this screen. Assembled by [SyncViewModel.observeSyncStatusCard]
+     * from the latest sync history + Room track counts + disk-walked
+     * library size, mirroring the original HomeViewModel wiring verbatim.
+     */
+    val syncStatus: SyncStatusInfo = SyncStatusInfo(),
+    /**
+     * True after at least one sync has completed. Drives the
+     * "Tap Sync Now" prompt vs. the stats grid in [SyncStatusCard].
+     * Derived as `syncStatus.lastSyncTime != null` so it stays in lock-
+     * step with the displayed "Last sync …" line.
+     */
+    val hasEverSynced: Boolean = false,
 )
 
 /**
@@ -145,6 +173,21 @@ class SyncViewModel @Inject constructor(
     private val downloadQueueDao: com.stash.core.data.db.dao.DownloadQueueDao,
     private val musicRepository: com.stash.core.data.repository.MusicRepository,
     private val blocklistGuard: com.stash.core.data.blocklist.BlocklistGuard,
+    /**
+     * Disk-walked library size (storage-mode-aware: internal File walk
+     * OR SAF DocumentFile traversal). Drives the SyncStatusCard's
+     * Storage column. Mirrors HomeViewModel's injection — the Room
+     * `file_size_bytes` column is bypassed because legacy libraries
+     * have it stuck at 0 for thousands of rows.
+     */
+    private val librarySizeHolder: LibrarySizeHolder,
+    /**
+     * Online-vs-offline preference. Drives the Sync Now button label so
+     * users can tell whether tapping it will download tracks to disk
+     * (offline mode) or merely surface the library for streaming
+     * playback (online mode). See [streamingEnabled].
+     */
+    private val streamingPreference: com.stash.core.data.prefs.StreamingPreference,
 ) : ViewModel() {
 
     /**
@@ -161,6 +204,60 @@ class SyncViewModel @Inject constructor(
                 initialValue = 0,
             )
 
+    /**
+     * Reactive count of FAILED rows in download_queue. Drives the
+     * "Failed Downloads" card on the Sync tab — the card hides itself
+     * when this is 0 so a healthy library shows no clutter.
+     */
+    val failedDownloadsCount: StateFlow<Int> =
+        downloadQueueDao.getFailedDownloads()
+            .map { it.size }
+            .stateIn(
+                scope = viewModelScope,
+                started = SharingStarted.WhileSubscribed(5_000),
+                initialValue = 0,
+            )
+
+    /**
+     * Per-source auth expiry state from SyncStateManager. The Sync tab's
+     * AuthExpiredBanner subscribes to this flow and renders nothing when
+     * `anyExpired == false`, so re-auth surfaces only when probes flag a
+     * problem at sync start.
+     */
+    val authExpiry: StateFlow<AuthExpiryState> =
+        syncStateManager.authExpiry
+            .stateIn(
+                scope = viewModelScope,
+                started = SharingStarted.WhileSubscribed(5_000),
+                initialValue = AuthExpiryState(false, false),
+            )
+
+    /**
+     * Reactive online-streaming-mode flag. The Sync Now button reads
+     * this to pick its label: "Surface Library for Streaming" in Online
+     * mode, "Download Tracks to Device" in Offline mode. Initial value
+     * matches `StreamingPreference.enabled`'s default (false / Offline)
+     * so a not-yet-loaded flow displays the safer download-mode label.
+     */
+    val streamingEnabled: StateFlow<Boolean> =
+        streamingPreference.enabled
+            .stateIn(
+                scope = viewModelScope,
+                started = SharingStarted.WhileSubscribed(5_000),
+                initialValue = false,
+            )
+
+    /**
+     * Persist the user's choice between Online (streaming) and Offline
+     * (download) mode. Hoisted from the Sync-tab segmented toggle so the
+     * user can flip modes without leaving the Sync screen.
+     */
+    fun setStreamingEnabled(enabled: Boolean) {
+        viewModelScope.launch {
+            streamingPreference.setEnabled(enabled)
+        }
+    }
+
     private val _uiState = MutableStateFlow(SyncUiState())
     val uiState: StateFlow<SyncUiState> = _uiState.asStateFlow()
 
@@ -175,6 +272,7 @@ class SyncViewModel @Inject constructor(
         observeYouTubePlaylists()
         observeUnmatchedCount()
         observeFlaggedCount()
+        observeSyncStatusCard()
     }
 
     // -- Public actions -------------------------------------------------------
@@ -280,6 +378,39 @@ class SyncViewModel @Inject constructor(
         viewModelScope.launch {
             syncPreferencesManager.setYoutubeSyncMode(mode)
         }
+    }
+
+    /** Refresh chip tapped for Spotify. If currently ACCUMULATE, confirm first
+     *  (Refresh deletes rotated-out downloads); if already REFRESH, no-op. */
+    fun onRequestSpotifyRefresh() {
+        if (_uiState.value.spotifySyncMode == SyncMode.ACCUMULATE) {
+            _uiState.update { it.copy(pendingRefreshSource = MusicSource.SPOTIFY) }
+        }
+    }
+
+    /** Refresh chip tapped for YouTube — see [onRequestSpotifyRefresh]. */
+    fun onRequestYoutubeRefresh() {
+        if (_uiState.value.youtubeSyncMode == SyncMode.ACCUMULATE) {
+            _uiState.update { it.copy(pendingRefreshSource = MusicSource.YOUTUBE) }
+        }
+    }
+
+    /** Confirm the pending Refresh switch — applies REFRESH to that source. */
+    fun confirmRefreshMode() {
+        val source = _uiState.value.pendingRefreshSource ?: return
+        viewModelScope.launch {
+            when (source) {
+                MusicSource.YOUTUBE -> syncPreferencesManager.setYoutubeSyncMode(SyncMode.REFRESH)
+                MusicSource.SPOTIFY -> syncPreferencesManager.setSpotifySyncMode(SyncMode.REFRESH)
+                MusicSource.LOCAL, MusicSource.BOTH -> Unit
+            }
+        }
+        _uiState.update { it.copy(pendingRefreshSource = null) }
+    }
+
+    /** Dismiss the dialog — keep the current (Accumulate) mode. */
+    fun cancelRefreshMode() {
+        _uiState.update { it.copy(pendingRefreshSource = null) }
     }
 
     /** Persists the user's choice for the studio-only Liked Songs filter. */
@@ -486,6 +617,63 @@ class SyncViewModel @Inject constructor(
         viewModelScope.launch {
             musicRepository.getFlaggedCount().collect { count ->
                 _uiState.update { it.copy(flaggedCount = count) }
+            }
+        }
+    }
+
+    /**
+     * Mirrors HomeViewModel's `syncStatusFlow` + `musicDataFlow` +
+     * `sourceCountsFlow` assembly that originally populated the
+     * SyncStatusCard at the top of the Home screen. The card now
+     * lives at the top of the Sync screen; this observer keeps it
+     * fed with the same flow shape so the relocation introduces no
+     * behavioural change.
+     *
+     * Inputs (all reactive):
+     *  - `observeLatestSync()` for last-sync timestamp + display status
+     *  - `getTrackCount()` for the "Tracks" stat
+     *  - `getSpotifyDownloadedCount()` / `getYouTubeDownloadedCount()`
+     *    for the per-source stats
+     *  - `librarySizeHolder.size` for storage (disk truth — the Room
+     *    `file_size_bytes` SUM is unreliable for legacy libraries)
+     */
+    private fun observeSyncStatusCard() {
+        val syncStatusFlow = musicRepository.observeLatestSync().map { latestSync ->
+            if (latestSync != null) {
+                SyncStatusInfo(
+                    lastSyncTime = latestSync.startedAt.toEpochMilli(),
+                    nextSyncTime = latestSync.completedAt?.toEpochMilli()?.plus(6 * 3_600_000L),
+                    state = latestSync.status,
+                    displayStatus = latestSync.toDisplayStatus(),
+                )
+            } else {
+                SyncStatusInfo(displayStatus = SyncDisplayStatus.Idle)
+            }
+        }
+
+        viewModelScope.launch {
+            combine(
+                syncStatusFlow,
+                musicRepository.getTrackCount(),
+                musicRepository.getSpotifyDownloadedCount(),
+                musicRepository.getYouTubeDownloadedCount(),
+                librarySizeHolder.size,
+            ) { base, trackCount, spotifyCount, youtubeCount, librarySize ->
+                base.copy(
+                    totalTracks = trackCount,
+                    spotifyTracks = spotifyCount,
+                    youTubeTracks = youtubeCount,
+                    storageUsedBytes = librarySize.totalBytes,
+                    flacTracks = librarySize.losslessFileCount,
+                    flacStorageBytes = librarySize.losslessBytes,
+                )
+            }.collect { status ->
+                _uiState.update {
+                    it.copy(
+                        syncStatus = status,
+                        hasEverSynced = status.lastSyncTime != null,
+                    )
+                }
             }
         }
     }

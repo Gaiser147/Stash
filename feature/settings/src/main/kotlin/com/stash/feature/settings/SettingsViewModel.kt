@@ -12,6 +12,7 @@ import com.stash.core.data.db.dao.TrackDao
 import com.stash.core.data.diagnostics.CrashFileStore
 import com.stash.core.data.prefs.DownloadNetworkPreference
 import com.stash.core.data.prefs.LikePreferences
+import com.stash.core.data.social.Destination
 import com.stash.core.data.prefs.QualityPreference
 import com.stash.core.data.prefs.StoragePreference
 import com.stash.core.data.prefs.ThemePreference
@@ -21,6 +22,7 @@ import com.stash.core.data.youtube.YouTubeScrobblerHealth
 import com.stash.core.data.youtube.YouTubeScrobblerState
 import com.stash.core.data.sync.workers.StashDiscoveryWorker
 import com.stash.core.data.sync.workers.TagEnrichmentWorker
+import com.stash.core.data.sync.NavidromeExportScheduler
 import com.stash.core.model.DownloadNetworkMode
 import dagger.hilt.android.qualifiers.ApplicationContext
 import com.stash.core.data.lastfm.LastFmApiClient
@@ -37,7 +39,20 @@ import com.stash.data.download.files.MoveLibraryState
 import com.stash.data.download.lossless.AggregatorRateLimiter
 import com.stash.data.download.lossless.LosslessQualityTier
 import com.stash.data.download.lossless.LosslessSourcePreferences
+import com.stash.data.download.lossless.arcod.ArcodCredentialStore
+import com.stash.data.download.lossless.qbdlx.QbdlxCredentialStore
+import com.stash.data.download.lossless.qbdlx.QbdlxTokenChoice
 import com.stash.data.download.lossless.qobuz.QobuzSource
+import com.stash.data.download.prefs.StreamingQualityPreferences
+import com.stash.data.download.export.NavidromeExportConfig
+import com.stash.data.download.export.NavidromeConnectionCheck
+import com.stash.data.download.export.NavidromeExportPreferences
+import com.stash.data.download.export.NavidromeIngestClient
+import com.stash.data.download.acquisition.MuseAcquisitionClient
+import com.stash.data.download.acquisition.MuseAcquisitionConfig
+import com.stash.data.download.acquisition.MuseAcquisitionConnectionCheck
+import com.stash.data.download.acquisition.MuseAcquisitionPreferences
+import com.stash.data.download.acquisition.MuseAcquisitionScheduler
 import com.stash.feature.settings.components.squidCaptchaStatus
 import com.stash.core.data.repository.MusicRepository
 import com.stash.core.model.QualityTier
@@ -49,6 +64,7 @@ import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.flatMapLatest
+import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
@@ -89,14 +105,24 @@ class SettingsViewModel @Inject constructor(
     private val youTubeHistoryScrobbler: YouTubeHistoryScrobbler,
     private val youTubeScrobblerState: YouTubeScrobblerState,
     private val losslessPrefs: LosslessSourcePreferences,
+    private val streamingQualityPrefs: StreamingQualityPreferences,
     private val losslessRateLimiter: AggregatorRateLimiter,
     private val qobuzSource: QobuzSource,
+    private val arcodCredentialStore: ArcodCredentialStore,
+    private val qbdlxCredentialStore: QbdlxCredentialStore,
     private val likePreferences: LikePreferences,
     private val trackDao: TrackDao,
     private val settingsDeepLinkController: com.stash.core.data.navigation.SettingsDeepLinkController,
     private val crashFileStore: CrashFileStore,
     private val streamingPreference: com.stash.core.data.prefs.StreamingPreference,
+    private val crossfadePreference: com.stash.core.data.prefs.CrossfadePreference,
     private val databaseBackupManager: DatabaseBackupManager,
+    private val navidromeExportPreferences: NavidromeExportPreferences,
+    private val navidromeExportScheduler: NavidromeExportScheduler,
+    private val navidromeIngestClient: NavidromeIngestClient,
+    private val museAcquisitionPreferences: MuseAcquisitionPreferences,
+    private val museAcquisitionScheduler: MuseAcquisitionScheduler,
+    private val museAcquisitionClient: MuseAcquisitionClient,
 ) : ViewModel() {
 
     /**
@@ -127,8 +153,137 @@ class SettingsViewModel @Inject constructor(
         }
     }
 
+    /**
+     * Live "stream on cellular" preference. Surfaced as a switch in the
+     * Settings Playback section; PlayerRepositoryImpl.buildMediaItemForTrack
+     * reads it via streamingPreference.streamOnCellular to refuse streams
+     * on metered networks when this is false (the default).
+     */
+    val streamOnCellular: kotlinx.coroutines.flow.StateFlow<Boolean> =
+        streamingPreference.streamOnCellular.stateIn(
+            scope = viewModelScope,
+            started = kotlinx.coroutines.flow.SharingStarted.WhileSubscribed(5_000),
+            initialValue = false,
+        )
+
+    /** Persist the cellular-streaming preference flip. */
+    fun onStreamOnCellularToggle(value: Boolean) {
+        if (value == streamOnCellular.value) return
+        viewModelScope.launch {
+            streamingPreference.setStreamOnCellular(value)
+        }
+    }
+
+    /**
+     * Test-only "Force YouTube fallback" toggle. When on,
+     * [StreamSourceRegistry] skips Kennyy/Squid and streams every track
+     * via YouTube — surfaced as a switch in the Diagnostics card so the
+     * lossless-down fallback path can be reproduced on demand.
+     */
+    val forceYouTubeFallback: kotlinx.coroutines.flow.StateFlow<Boolean> =
+        streamingPreference.forceYouTubeFallback.stateIn(
+            scope = viewModelScope,
+            started = kotlinx.coroutines.flow.SharingStarted.WhileSubscribed(5_000),
+            initialValue = false,
+        )
+
+    /** Persist the force-YouTube-fallback test toggle flip. */
+    fun setForceYouTubeFallback(v: Boolean) = viewModelScope.launch {
+        streamingPreference.setForceYouTubeFallback(v)
+    }
+
+    /** Test toggle: route streaming + downloads through ARCOD only. */
+    val forceArcodOnly: kotlinx.coroutines.flow.StateFlow<Boolean> =
+        streamingPreference.forceArcodOnly.stateIn(
+            scope = viewModelScope,
+            started = kotlinx.coroutines.flow.SharingStarted.WhileSubscribed(5_000),
+            initialValue = false,
+        )
+
+    /**
+     * Test-only "Stream via amz" toggle. When on, BOTH the streaming and
+     * lossless-download registries route through the amz (Amazon Music)
+     * source only — used to exercise the amz source on demand.
+     */
+    val forceAmzOnly: kotlinx.coroutines.flow.StateFlow<Boolean> =
+        streamingPreference.forceAmzOnly.stateIn(
+            scope = viewModelScope,
+            started = kotlinx.coroutines.flow.SharingStarted.WhileSubscribed(5_000),
+            initialValue = false,
+        )
+
+    val forceQbdlxOnly: kotlinx.coroutines.flow.StateFlow<Boolean> =
+        streamingPreference.forceQbdlxOnly.stateIn(
+            scope = viewModelScope,
+            started = kotlinx.coroutines.flow.SharingStarted.WhileSubscribed(5_000),
+            initialValue = false,
+        )
+
+    /** Persist the force-qbdlx-only test toggle flip. */
+    fun setForceQbdlxOnly(v: Boolean) = viewModelScope.launch {
+        streamingPreference.setForceQbdlxOnly(v)
+    }
+
+    /** Persist the force-arcod-only test toggle flip. */
+    fun setForceArcodOnly(v: Boolean) = viewModelScope.launch {
+        streamingPreference.setForceArcodOnly(v)
+    }
+
+    /** Crossfade on/off — drives the Playback section toggle. Off by default. */
+    val crossfadeEnabled: kotlinx.coroutines.flow.StateFlow<Boolean> =
+        crossfadePreference.enabled.stateIn(
+            scope = viewModelScope,
+            started = kotlinx.coroutines.flow.SharingStarted.WhileSubscribed(5_000),
+            initialValue = false,
+        )
+
+    /** Crossfade fade duration in ms (clamped 1000–12000); drives the slider. */
+    val crossfadeDurationMs: kotlinx.coroutines.flow.StateFlow<Long> =
+        crossfadePreference.durationMs.stateIn(
+            scope = viewModelScope,
+            started = kotlinx.coroutines.flow.SharingStarted.WhileSubscribed(5_000),
+            initialValue = 6000L,
+        )
+
+    /** Persist the crossfade on/off flip. */
+    fun onCrossfadeToggle(enabled: Boolean) {
+        if (enabled == crossfadeEnabled.value) return
+        viewModelScope.launch { crossfadePreference.setEnabled(enabled) }
+    }
+
+    /** Persist the crossfade duration (clamped on write). */
+    fun onCrossfadeDurationChange(ms: Long) = viewModelScope.launch {
+        crossfadePreference.setDurationMs(ms)
+    }
+
+    /** Persist the force-amz-only test toggle flip. */
+    fun setForceAmzOnly(v: Boolean) = viewModelScope.launch {
+        streamingPreference.setForceAmzOnly(v)
+    }
+
     /** Internal mutable UI state that is combined with token-manager flows. */
     private val _localState = MutableStateFlow(LocalState())
+
+    /**
+     * True when every qbdlx token (pasted + pool) is dead — drives the
+     * Settings "expired, paste a fresh token" badge. The store exposes only a
+     * suspend `allDead()`, so we poll it on construction and after each paste
+     * (the only events that flip it). ponytail: poll-on-change, add a store
+     * Flow if another surface needs live updates.
+     *
+     * MUST be declared above the [init] block: Kotlin initializes properties
+     * top-to-bottom, and `init`'s refreshQbdlxExpired() writes to this field
+     * (synchronously, when allDead()'s DataStore read hits its cache) — a
+     * below-init declaration left it null → NPE opening Settings.
+     */
+    private val _qbdlxExpired = MutableStateFlow(false)
+    val qbdlxExpired: StateFlow<Boolean> = _qbdlxExpired
+
+    private val _qbdlxTokenChoices = MutableStateFlow<List<QbdlxTokenChoice>>(emptyList())
+    val qbdlxTokenChoices: StateFlow<List<QbdlxTokenChoice>> = _qbdlxTokenChoices
+
+    private val _qbdlxPinnedToken = MutableStateFlow<String?>(null)
+    val qbdlxPinnedToken: StateFlow<String?> = _qbdlxPinnedToken
 
     init {
         // Refresh on construction so the Diagnostics card shows the
@@ -137,6 +292,8 @@ class SettingsViewModel @Inject constructor(
         // Must follow _localState declaration: Kotlin initializes properties
         // top-to-bottom and refreshDiagnostics() writes to _localState.
         refreshDiagnostics()
+        refreshQbdlxExpired()
+        refreshQbdlxTokens()
     }
 
     /**
@@ -198,6 +355,14 @@ class SettingsViewModel @Inject constructor(
         autoSavedCountLast7Days,
         losslessPrefs.youtubeFallbackEnabled,
         stashMixPreference.enabled,
+        likePreferences.mirrorLikesSpotify,
+        likePreferences.mirrorLikesYtMusic,
+        arcodCredentialStore.accessToken,
+        streamingQualityPrefs.wifiTier,
+        streamingQualityPrefs.cellularTier,
+        streamingQualityPrefs.saveData,
+        navidromeExportPreferences.config,
+        museAcquisitionPreferences.config,
     ) { values ->
         @Suppress("UNCHECKED_CAST")
         val spotifyAuth = values[0] as AuthState
@@ -227,6 +392,14 @@ class SettingsViewModel @Inject constructor(
         val autoSavedCount7d = values[24] as Int
         val youtubeFallbackEnabled = values[25] as Boolean
         val stashMixesEnabled = values[26] as Boolean
+        val mirrorLikesSpotify = values[27] as Boolean
+        val mirrorLikesYtMusic = values[28] as Boolean
+        val arcodConnected = !(values[29] as String?).isNullOrBlank()
+        val streamingWifiTier = values[30] as LosslessQualityTier
+        val streamingCellularTier = values[31] as LosslessQualityTier
+        val streamingSaveData = values[32] as Boolean
+        val navidromeExport = values[33] as NavidromeExportConfig
+        val museAcquisition = values[34] as MuseAcquisitionConfig
 
         val lastFmState: LastFmAuthState = local.lastFmAuthOverride
             ?: when {
@@ -268,16 +441,46 @@ class SettingsViewModel @Inject constructor(
             squidWtfCaptchaCookie = squidWtfCaptchaCookie,
             squidCaptchaStatus = squidCaptchaStatus(squidWtfCaptchaCookie, lastKnownBadCookie),
             losslessQualityTier = losslessQualityTier,
+            streamingWifiTier = streamingWifiTier,
+            streamingCellularTier = streamingCellularTier,
+            streamingSaveData = streamingSaveData,
             autoSaveEnabled = autoSaveEnabled,
             autoSaveThreshold = autoSaveThreshold,
             heartDefaultStash = heartDefaultStash,
             heartDefaultSpotify = heartDefaultSpotify,
             heartDefaultYtMusic = heartDefaultYtMusic,
             autoSavedCountLast7Days = autoSavedCount7d,
+            mirrorLikesSpotify = mirrorLikesSpotify,
+            mirrorLikesYtMusic = mirrorLikesYtMusic,
+            arcodConnected = arcodConnected,
+            pendingMirrorWarning = local.pendingMirrorWarning,
             youtubeFallbackEnabled = youtubeFallbackEnabled,
             hasCrashReport = local.hasCrashReport,
             databaseBackupState = local.databaseBackupState,
             showImportConfirmation = local.showImportConfirmation,
+            navidromeExportEnabled = navidromeExport.enabled,
+            navidromeExportUrl = navidromeExport.serverUrl,
+            navidromeExportTokenConfigured = navidromeExport.tokenConfigured,
+            navidromeExportTokenError = navidromeExport.tokenDecryptionFailed,
+            navidromeExportWifiOnly = navidromeExport.wifiOnly,
+            navidromeExportChargingOnly = navidromeExport.chargingOnly,
+            navidromeExportLastAttemptAt = navidromeExport.lastAttemptAt,
+            navidromeExportLastSuccessAt = navidromeExport.lastSuccessAt,
+            navidromeExportLastResult = navidromeExport.lastResult,
+            navidromeExportConnectionChecking = local.navidromeExportConnectionChecking,
+            navidromeExportMessage = local.navidromeExportMessage,
+            museAcquisitionEnabled = museAcquisition.enabled,
+            museAcquisitionUrl = museAcquisition.serverUrl,
+            museAcquisitionTokenConfigured = museAcquisition.tokenConfigured,
+            museAcquisitionTokenError = museAcquisition.tokenDecryptionFailed,
+            museAcquisitionWifiOnly = museAcquisition.wifiOnly,
+            museAcquisitionChargingOnly = museAcquisition.chargingOnly,
+            museAcquisitionLastAttemptAt = museAcquisition.lastAttemptAt,
+            museAcquisitionLastSuccessAt = museAcquisition.lastSuccessAt,
+            museAcquisitionLastResult = museAcquisition.lastResult,
+            museAcquisitionPendingCount = museAcquisition.pendingCount,
+            museAcquisitionConnectionChecking = local.museAcquisitionConnectionChecking,
+            museAcquisitionMessage = local.museAcquisitionMessage,
         )
     }.stateIn(
         scope = viewModelScope,
@@ -882,6 +1085,35 @@ class SettingsViewModel @Inject constructor(
         }
     }
 
+    // -- ARCOD connect -------------------------------------------------------
+
+    /**
+     * Live "is ARCOD connected" flag, derived from the presence of a
+     * non-blank access token in [ArcodCredentialStore]. Drives the
+     * "Connect ARCOD" / "ARCOD — connected" row label. Also surfaced into
+     * [SettingsUiState.arcodConnected] via the main `combine`; exposed
+     * standalone for callers that only need this one bit.
+     */
+    val arcodConnected: StateFlow<Boolean> =
+        arcodCredentialStore.accessToken
+            .map { !it.isNullOrBlank() }
+            .stateIn(
+                scope = viewModelScope,
+                started = SharingStarted.WhileSubscribed(5_000),
+                initialValue = false,
+            )
+
+    /**
+     * Persists the Supabase session harvested from the ARCOD connect
+     * WebView's localStorage. The ARCOD source/interceptor read it back
+     * from [ArcodCredentialStore] reactively, so no further wiring is needed.
+     */
+    fun onArcodConnected(accessToken: String, refreshToken: String, expiresAtMs: Long) {
+        viewModelScope.launch {
+            arcodCredentialStore.save(accessToken, refreshToken, expiresAtMs)
+        }
+    }
+
     /**
      * Persists the user-pasted `captcha_verified_at` cookie value
      * for qobuz.squid.wtf. Empty / blank input clears the stored value.
@@ -892,6 +1124,68 @@ class SettingsViewModel @Inject constructor(
             losslessPrefs.setCaptchaCookieValue(value)
         }
     }
+
+    // -- qbdlx (direct-Qobuz lossless, 5th source) ---------------------------
+
+    /**
+     * Per-source enable toggle for qbdlx. Gates BOTH download and streaming
+     * (the source reads `qbdlxEnabledNow()` in both `isEnabled()` and
+     * `isEnabledForStreaming()`). Default true.
+     */
+    val qbdlxEnabled: StateFlow<Boolean> =
+        losslessPrefs.qbdlxEnabled.stateIn(
+            scope = viewModelScope,
+            started = SharingStarted.WhileSubscribed(5_000),
+            initialValue = true,
+        )
+
+    /** Persist the qbdlx enable flip. */
+    fun onQbdlxEnabledChange(enabled: Boolean) {
+        viewModelScope.launch { losslessPrefs.setQbdlxEnabled(enabled) }
+    }
+
+    /** Store (or clear, on blank) the user-pasted qbdlx token, then re-check expiry. */
+    fun onQbdlxTokenPaste(token: String) {
+        viewModelScope.launch {
+            qbdlxCredentialStore.setPastedToken(token.ifBlank { null })
+            _qbdlxExpired.value = qbdlxCredentialStore.allDead()
+            _qbdlxTokenChoices.value = qbdlxCredentialStore.poolForPicker()
+        }
+    }
+
+    private fun refreshQbdlxExpired() {
+        viewModelScope.launch { _qbdlxExpired.value = qbdlxCredentialStore.allDead() }
+    }
+
+    private fun refreshQbdlxTokens() {
+        viewModelScope.launch {
+            _qbdlxTokenChoices.value = qbdlxCredentialStore.poolForPicker()
+            _qbdlxPinnedToken.value = qbdlxCredentialStore.pinnedToken()
+        }
+    }
+
+    /** Pin a specific pool token (or null = Auto), then refresh the picker state. */
+    fun onQbdlxTokenPinned(token: String?) {
+        viewModelScope.launch {
+            qbdlxCredentialStore.setPinnedToken(token)
+            _qbdlxPinnedToken.value = qbdlxCredentialStore.pinnedToken()
+            _qbdlxTokenChoices.value = qbdlxCredentialStore.poolForPicker()
+        }
+    }
+
+    // -- Streaming quality (per-network tiers + Save Data) -------------------
+
+    /** Persist the lossless tier requested when streaming on Wi-Fi. */
+    fun onStreamingWifiTierChanged(tier: LosslessQualityTier) =
+        viewModelScope.launch { streamingQualityPrefs.setWifiTier(tier) }
+
+    /** Persist the lossless tier requested when streaming on cellular. */
+    fun onStreamingCellularTierChanged(tier: LosslessQualityTier) =
+        viewModelScope.launch { streamingQualityPrefs.setCellularTier(tier) }
+
+    /** Persist the master Save-Data streaming override. */
+    fun onStreamingSaveDataChanged(value: Boolean) =
+        viewModelScope.launch { streamingQualityPrefs.setSaveData(value) }
 
     /**
      * Clear the rate-limiter's circuit breaker for the squid.wtf
@@ -939,6 +1233,216 @@ class SettingsViewModel @Inject constructor(
         viewModelScope.launch { likePreferences.setHeartDefaultYtMusic(value) }
     }
 
+    // -- Navidrome export ---------------------------------------------------
+
+    fun onSaveNavidromeExportConnection(serverUrl: String, replacementToken: String) {
+        viewModelScope.launch {
+            runCatching { navidromeExportPreferences.saveConnection(serverUrl, replacementToken) }
+                .onSuccess {
+                    _localState.update { it.copy(navidromeExportMessage = "Navidrome connection saved.") }
+                }
+                .onFailure { error ->
+                    _localState.update {
+                        it.copy(navidromeExportMessage = error.message ?: "Could not save Navidrome connection.")
+                    }
+                }
+        }
+    }
+
+    fun onNavidromeExportEnabledChanged(enabled: Boolean) {
+        viewModelScope.launch {
+            runCatching { navidromeExportPreferences.setEnabled(enabled) }
+                .onFailure { error ->
+                    _localState.update {
+                        it.copy(navidromeExportMessage = error.message ?: "Configure Navidrome first.")
+                    }
+                }
+        }
+    }
+
+    fun onNavidromeExportWifiOnlyChanged(enabled: Boolean) {
+        viewModelScope.launch { navidromeExportPreferences.setWifiOnly(enabled) }
+    }
+
+    fun onNavidromeExportChargingOnlyChanged(enabled: Boolean) {
+        viewModelScope.launch { navidromeExportPreferences.setChargingOnly(enabled) }
+    }
+
+    fun onRunFullNavidromeExport() {
+        viewModelScope.launch {
+            runCatching {
+                navidromeExportScheduler.enqueueFullExport()
+                navidromeExportPreferences.recordQueued(
+                    NavidromeExportPreferences.RESULT_FULL_EXPORT_QUEUED,
+                )
+            }
+                .onSuccess {
+                    _localState.update { it.copy(navidromeExportMessage = "Full Navidrome sync queued.") }
+                }
+                .onFailure {
+                    _localState.update { it.copy(navidromeExportMessage = "Could not queue Navidrome sync.") }
+                }
+        }
+    }
+
+    fun onTestNavidromeExportConnection() {
+        if (_localState.value.navidromeExportConnectionChecking) return
+        _localState.update {
+            it.copy(navidromeExportConnectionChecking = true, navidromeExportMessage = null)
+        }
+        viewModelScope.launch {
+            val result = navidromeIngestClient.checkConnection()
+            val message = when (result) {
+                NavidromeConnectionCheck.Verified -> "Connection verified: token and contract accepted."
+                NavidromeConnectionCheck.LegacyReachable ->
+                    "Endpoint reachable. This legacy server cannot validate the token before an export."
+                NavidromeConnectionCheck.AuthenticationFailed -> "Connection failed: the ingest token was rejected."
+                NavidromeConnectionCheck.Incompatible -> "Connection failed: incompatible ingest endpoint."
+                NavidromeConnectionCheck.Unreachable -> "Connection failed: endpoint could not be reached."
+                NavidromeConnectionCheck.NotConfigured -> "Configure the HTTPS endpoint and token first."
+            }
+            _localState.update {
+                it.copy(
+                    navidromeExportConnectionChecking = false,
+                    navidromeExportMessage = message,
+                )
+            }
+        }
+    }
+
+    fun onClearNavidromeExportConnection() {
+        viewModelScope.launch {
+            navidromeExportPreferences.clearConnection()
+            _localState.update { it.copy(navidromeExportMessage = "Navidrome connection removed.") }
+        }
+    }
+
+    fun onClearNavidromeExportMessage() {
+        _localState.update { it.copy(navidromeExportMessage = null) }
+    }
+
+    // -- Muse acquisition inbox --------------------------------------------
+
+    fun onSaveMuseAcquisitionConnection(serverUrl: String, replacementToken: String) {
+        viewModelScope.launch {
+            runCatching { museAcquisitionPreferences.saveConnection(serverUrl, replacementToken) }
+                .onSuccess {
+                    museAcquisitionScheduler.refreshSchedule()
+                    _localState.update { it.copy(museAcquisitionMessage = "Muse inbox connection saved.") }
+                }
+                .onFailure { error ->
+                    _localState.update {
+                        it.copy(museAcquisitionMessage = error.message ?: "Could not save Muse inbox connection.")
+                    }
+                }
+        }
+    }
+
+    fun onMuseAcquisitionEnabledChanged(enabled: Boolean) {
+        viewModelScope.launch {
+            runCatching {
+                museAcquisitionPreferences.setEnabled(enabled)
+                museAcquisitionScheduler.refreshSchedule()
+            }.onFailure { error ->
+                _localState.update {
+                    it.copy(museAcquisitionMessage = error.message ?: "Configure the Muse inbox first.")
+                }
+            }
+        }
+    }
+
+    fun onMuseAcquisitionWifiOnlyChanged(enabled: Boolean) {
+        viewModelScope.launch {
+            museAcquisitionPreferences.setWifiOnly(enabled)
+            museAcquisitionScheduler.refreshSchedule()
+        }
+    }
+
+    fun onMuseAcquisitionChargingOnlyChanged(enabled: Boolean) {
+        viewModelScope.launch {
+            museAcquisitionPreferences.setChargingOnly(enabled)
+            museAcquisitionScheduler.refreshSchedule()
+        }
+    }
+
+    fun onRunMuseAcquisitionNow() {
+        viewModelScope.launch {
+            runCatching { museAcquisitionScheduler.enqueueNow() }
+                .onSuccess {
+                    _localState.update { it.copy(museAcquisitionMessage = "Muse inbox check queued.") }
+                }
+                .onFailure {
+                    _localState.update { it.copy(museAcquisitionMessage = "Could not queue Muse inbox check.") }
+                }
+        }
+    }
+
+    fun onTestMuseAcquisitionConnection() {
+        if (_localState.value.museAcquisitionConnectionChecking) return
+        _localState.update {
+            it.copy(museAcquisitionConnectionChecking = true, museAcquisitionMessage = null)
+        }
+        viewModelScope.launch {
+            val result = museAcquisitionClient.checkConnection()
+            val message = when (result) {
+                MuseAcquisitionConnectionCheck.Verified -> "Connection verified: token and contract accepted."
+                MuseAcquisitionConnectionCheck.AuthenticationFailed -> "Connection failed: token rejected."
+                MuseAcquisitionConnectionCheck.Incompatible -> "Connection failed: incompatible Muse endpoint."
+                MuseAcquisitionConnectionCheck.Unreachable -> "Connection failed: endpoint unreachable."
+                MuseAcquisitionConnectionCheck.NotConfigured -> "Configure the private HTTPS endpoint first."
+            }
+            _localState.update {
+                it.copy(
+                    museAcquisitionConnectionChecking = false,
+                    museAcquisitionMessage = message,
+                )
+            }
+        }
+    }
+
+    fun onClearMuseAcquisitionConnection() {
+        viewModelScope.launch {
+            museAcquisitionPreferences.clearConnection()
+            museAcquisitionScheduler.refreshSchedule()
+            _localState.update { it.copy(museAcquisitionMessage = "Muse inbox connection removed.") }
+        }
+    }
+
+    fun onClearMuseAcquisitionMessage() {
+        _localState.update { it.copy(museAcquisitionMessage = null) }
+    }
+
+    /**
+     * v0.9.52 like-mirroring. Enabling a mirror requires the explicit
+     * "I understand" ack — the pref is only written on confirm (see
+     * [onMirrorWarningConfirmed]); disabling is immediate, no dialog.
+     */
+    fun onMirrorToggleRequested(destination: Destination, enable: Boolean) {
+        if (!enable) {
+            viewModelScope.launch { setMirrorPref(destination, false) }
+            return
+        }
+        _localState.update { it.copy(pendingMirrorWarning = destination) }
+    }
+
+    fun onMirrorWarningConfirmed() {
+        val destination = _localState.value.pendingMirrorWarning ?: return
+        _localState.update { it.copy(pendingMirrorWarning = null) }
+        viewModelScope.launch { setMirrorPref(destination, true) }
+    }
+
+    fun onMirrorWarningDismissed() {
+        _localState.update { it.copy(pendingMirrorWarning = null) }
+    }
+
+    private suspend fun setMirrorPref(destination: Destination, value: Boolean) {
+        when (destination) {
+            Destination.SPOTIFY -> likePreferences.setMirrorLikesSpotify(value)
+            Destination.YT_MUSIC -> likePreferences.setMirrorLikesYtMusic(value)
+            Destination.STASH -> Unit // local likes are always on; not a mirror target
+        }
+    }
+
     // -- Internal state -------------------------------------------------------
 
     /**
@@ -983,6 +1487,16 @@ class SettingsViewModel @Inject constructor(
          * "Share latest crash report" button + render its subtitle.
          */
         val hasCrashReport: Boolean = false,
+        /**
+         * v0.9.52: non-null while the like-mirroring "I understand" warning
+         * dialog is showing for that destination. The pref is only written
+         * on confirm, so dismissing leaves mirroring off.
+         */
+        val pendingMirrorWarning: Destination? = null,
+        val navidromeExportConnectionChecking: Boolean = false,
+        val navidromeExportMessage: String? = null,
+        val museAcquisitionConnectionChecking: Boolean = false,
+        val museAcquisitionMessage: String? = null,
     )
 
     // -- Diagnostics ----------------------------------------------------------

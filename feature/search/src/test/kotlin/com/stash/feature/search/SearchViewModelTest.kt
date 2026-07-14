@@ -16,13 +16,16 @@ import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.asSharedFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.test.StandardTestDispatcher
 import kotlinx.coroutines.test.advanceTimeBy
 import kotlinx.coroutines.test.advanceUntilIdle
 import kotlinx.coroutines.test.resetMain
+import kotlinx.coroutines.test.runCurrent
 import kotlinx.coroutines.test.runTest
 import kotlinx.coroutines.test.setMain
 import org.junit.After
+import kotlinx.coroutines.flow.first
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertTrue
 import org.junit.Before
@@ -245,6 +248,39 @@ class SearchViewModelTest {
         }
     }
 
+    @Test
+    fun `tappedTrackId emits on tap and clears after playFromStream returns`() = runTest {
+        val gate = CompletableDeferred<StreamRoutingResult>()
+        val playerRepo = mock<PlayerRepository> {
+            onBlocking { playFromStream(any()) } doSuspendableAnswer { gate.await() }
+        }
+        val streamingPref = mock<StreamingPreference> {
+            onBlocking { current() } doReturn true
+        }
+        val vm = newVm(
+            playerRepository = playerRepo,
+            streamingPreference = streamingPref,
+        )
+
+        val emissions = mutableListOf<Long?>()
+        val collectJob = backgroundScope.launch {
+            vm.tappedTrackId.collect { emissions.add(it) }
+        }
+
+        val item = sampleTrack()
+        vm.onResultTap(item)
+        runCurrent()
+
+        val expectedId = item.videoId.hashCode().toLong()
+        assertTrue(expectedId in emissions)
+
+        gate.complete(StreamRoutingResult.Item(mock()))
+        runCurrent()
+        assertEquals(null, emissions.last())
+
+        collectJob.cancel()
+    }
+
     // ------------------------------------------------------------------
     // Helpers
     // ------------------------------------------------------------------
@@ -257,6 +293,9 @@ class SearchViewModelTest {
         streamingPreference: StreamingPreference = mock {
             onBlocking { current() } doReturn false
         },
+        recentSearchesStore: RecentSearchesStore = mock {
+            on { recent } doReturn kotlinx.coroutines.flow.flowOf(emptyList())
+        },
     ): SearchViewModel = SearchViewModel(
         api = api,
         prefetcher = prefetcher,
@@ -264,6 +303,7 @@ class SearchViewModelTest {
         losslessPrefetcher = mock(),
         playerRepository = playerRepository,
         streamingPreference = streamingPreference,
+        recentSearchesStore = recentSearchesStore,
     )
 
     private fun sampleTrack(): TrackItem = TrackItem(
@@ -288,5 +328,100 @@ class SearchViewModelTest {
         on { downloadingIds } doReturn MutableStateFlow<Set<String>>(emptySet()).asStateFlow()
         on { downloadedIds } doReturn MutableStateFlow<Set<String>>(emptySet()).asStateFlow()
         on { previewLoadingId } doReturn MutableStateFlow<String?>(null).asStateFlow()
+        on { userPlaylists } doReturn kotlinx.coroutines.flow.flowOf(emptyList())
     }
+
+    // ------------------------------------------------------------------
+    // Recent searches: record on commit, NOT on keystroke
+    // ------------------------------------------------------------------
+
+    @Test
+    fun `onQueryChanged does not record a recent search`() = runTest {
+        val store = mock<RecentSearchesStore> {
+            on { recent } doReturn kotlinx.coroutines.flow.flowOf(emptyList())
+        }
+        val vm = newVm(recentSearchesStore = store)
+
+        vm.onQueryChanged("beatles")
+        advanceUntilIdle()
+
+        verifyBlocking(store, never()) { record(any()) }
+    }
+
+    @Test
+    fun `onSearchCommitted records the trimmed query`() = runTest {
+        val store = mock<RecentSearchesStore> {
+            on { recent } doReturn kotlinx.coroutines.flow.flowOf(emptyList())
+        }
+        val vm = newVm(recentSearchesStore = store)
+
+        vm.onQueryChanged("  beatles  ")
+        vm.onSearchCommitted()
+        advanceUntilIdle()
+
+        verifyBlocking(store) {
+            record(RecentSearch(RecentSearch.Type.QUERY, "beatles"))
+        }
+    }
+
+    @Test
+    fun `opening an artist profile records an artist entry with avatar`() = runTest {
+        // The reported bug: search an artist, open the profile, back out —
+        // nothing was saved, because artist taps were pure navigation.
+        val store = mock<RecentSearchesStore> {
+            on { recent } doReturn kotlinx.coroutines.flow.flowOf(emptyList())
+        }
+        val vm = newVm(recentSearchesStore = store)
+
+        vm.onArtistOpened(id = "UC123", name = "Lil Wayne", avatarUrl = "https://img/w.jpg")
+        advanceUntilIdle()
+
+        verifyBlocking(store) {
+            record(
+                RecentSearch(
+                    type = RecentSearch.Type.ARTIST,
+                    text = "Lil Wayne",
+                    thumbnailUrl = "https://img/w.jpg",
+                    artistId = "UC123",
+                ),
+            )
+        }
+    }
+
+    @Test
+    fun `tapping a track result records a track entry with thumbnail`() = runTest {
+        val store = mock<RecentSearchesStore> {
+            on { recent } doReturn kotlinx.coroutines.flow.flowOf(emptyList())
+        }
+        val vm = newVm(recentSearchesStore = store)
+
+        vm.onResultTap(sampleTrack().copy(thumbnailUrl = "https://img/t.jpg"))
+        advanceUntilIdle()
+
+        verifyBlocking(store) {
+            record(
+                RecentSearch(
+                    type = RecentSearch.Type.TRACK,
+                    text = "Hit Song",
+                    subtitle = "Hit Artist",
+                    thumbnailUrl = "https://img/t.jpg",
+                ),
+            )
+        }
+    }
+
+    @Test
+    fun `onSearchCommitted with blank query records nothing`() = runTest {
+        val store = mock<RecentSearchesStore> {
+            on { recent } doReturn kotlinx.coroutines.flow.flowOf(emptyList())
+        }
+        val vm = newVm(recentSearchesStore = store)
+
+        vm.onQueryChanged("   ")
+        vm.onSearchCommitted()
+        advanceUntilIdle()
+
+        verifyBlocking(store, never()) { record(any()) }
+    }
+
 }
