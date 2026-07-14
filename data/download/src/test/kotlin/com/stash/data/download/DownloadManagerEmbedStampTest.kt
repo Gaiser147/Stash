@@ -122,6 +122,7 @@ class DownloadManagerEmbedStampTest {
     @Test
     fun `lossless success path stamps metadata_embedded_at with non-zero timestamp`() = runTest {
         val track = stubTrack()
+        coEvery { trackDao.getById(track.id) } returns null
         val tempDir = File.createTempFile("tmp", "").apply { delete(); mkdirs() }
         coEvery { fileOrganizer.getTempDir() } returns tempDir
 
@@ -172,6 +173,7 @@ class DownloadManagerEmbedStampTest {
     @Test
     fun `lossless success path remains Success when stamp DAO call throws`() = runTest {
         val track = stubTrack()
+        coEvery { trackDao.getById(track.id) } returns null
         val tempDir = File.createTempFile("tmp", "").apply { delete(); mkdirs() }
         coEvery { fileOrganizer.getTempDir() } returns tempDir
 

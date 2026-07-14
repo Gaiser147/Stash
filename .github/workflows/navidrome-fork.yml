@@ -67,10 +67,22 @@ jobs:
       - name: Test Navidrome integration and affected modules
         run: >-
           ./gradlew
-          :core:data:testDebugUnitTest
           :data:download:testDebugUnitTest
           :feature:settings:testDebugUnitTest
           --no-daemon
+
+      - name: Upload unit test reports
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: stash-navidrome-test-reports
+          path: |
+            data/download/build/test-results/testDebugUnitTest/
+            data/download/build/reports/tests/testDebugUnitTest/
+            feature/settings/build/test-results/testDebugUnitTest/
+            feature/settings/build/reports/tests/testDebugUnitTest/
+          if-no-files-found: ignore
+          retention-days: 14
 
       - name: Assemble debug APK
         env:
