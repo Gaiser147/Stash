@@ -121,6 +121,19 @@ val lastFmExtraApiKeys: String =
 val lastFmProxyUrl: String =
     localProperties.getProperty("lastfm.proxyUrl") ?: System.getenv("LASTFM_PROXY_URL").orEmpty()
 
+// ── Muse companion default endpoint ────────────────────────────────────────
+//
+// Prefills the Muse "connect" screen so a fresh install only has to tap
+// "Koppeln" and approve in Discord — no typing the HTTPS address. Overridable
+// per build via local.properties (`muse.defaultEndpoint=https://host`) or the
+// MUSE_DEFAULT_ENDPOINT env var; empty falls back to the current manual-entry
+// behavior. Must be a bare https origin (no path/query) — MuseEndpoint.normalize
+// rejects anything else at runtime.
+val museDefaultEndpoint: String =
+    localProperties.getProperty("muse.defaultEndpoint")
+        ?: System.getenv("MUSE_DEFAULT_ENDPOINT")
+        ?: "https://learnwithclawdbot.com"
+
 android {
     namespace = "com.stash.app"
     compileSdk = 35
@@ -157,6 +170,11 @@ android {
         // `com.stash.core.common.constants.StashConstants.STREAMING_ENGINE_ENABLED`
         // — keep both in sync (Task 23 flips both at once).
         buildConfigField("Boolean", "STREAMING_ENGINE_ENABLED", "true")
+        // Muse companion default endpoint. Prefills the connect screen; the
+        // feature-module-facing mirror lives at
+        // `com.stash.core.common.constants.StashConstants.MUSE_DEFAULT_ENDPOINT`
+        // — keep both in sync.
+        buildConfigField("String", "MUSE_DEFAULT_ENDPOINT", "\"$museDefaultEndpoint\"")
         // The current sp_dc/Web Player connector is intentionally absent from
         // the regular community channel. It remains available only to the
         // private legacy/lab build until a separate policy/security gate passes.

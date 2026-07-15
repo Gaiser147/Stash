@@ -38,4 +38,19 @@ object StashConstants {
      * streaming-related Hilt wiring in `StashApplication` stays inert.
      */
     const val STREAMING_ENGINE_ENABLED = true
+
+    /**
+     * Muse companion default endpoint — feature-module-visible mirror of
+     * `com.stash.app.BuildConfig.MUSE_DEFAULT_ENDPOINT`.
+     *
+     * Prefills the Muse connect screen so a fresh install only taps "Koppeln"
+     * and approves in Discord instead of typing the HTTPS address. The
+     * canonical value is the app module's BuildConfig field (overridable per
+     * build via `local.properties`/env); this constant carries the same default
+     * for `:feature:muse`, which does not depend on `:app`. Keep both in sync.
+     *
+     * Must be a bare https origin (no path/query) — `MuseEndpoint.normalize`
+     * rejects anything else. Blank disables prefill (manual entry only).
+     */
+    const val MUSE_DEFAULT_ENDPOINT = "https://learnwithclawdbot.com"
 }

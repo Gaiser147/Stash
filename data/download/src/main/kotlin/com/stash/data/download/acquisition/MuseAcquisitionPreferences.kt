@@ -107,6 +107,25 @@ class MuseAcquisitionPreferences @Inject constructor(
         }
     }
 
+    /**
+     * Store an acquisition connection delivered automatically over Companion
+     * pairing. Unlike [saveConnection] this accepts the device-bound token
+     * format (not the 32-char manual inbox token) and does not auto-enable
+     * scheduling: the user still turns on "Automatic request checks" explicitly.
+     */
+    suspend fun saveFromCompanion(serverUrl: String, deliveredToken: String) {
+        val normalized = requireNotNull(MuseAcquisitionEndpoint.normalize(serverUrl)) {
+            "Muse delivered an invalid acquisition endpoint."
+        }
+        val token = deliveredToken.trim()
+        require(token.isNotEmpty()) { "Muse delivered an empty acquisition token." }
+        context.museAcquisitionDataStore.edit {
+            it[Keys.serverUrl] = normalized
+            it[Keys.encryptedToken] = encryptToken(token)
+            it[Keys.lastResult] = RESULT_CONFIGURATION_SAVED
+        }
+    }
+
     suspend fun clearConnection() {
         context.museAcquisitionDataStore.edit {
             it[Keys.enabled] = false
