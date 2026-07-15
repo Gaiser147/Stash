@@ -101,6 +101,10 @@ internal data class MusePairingPairedResponse(
     val accessTokenExpiresAt: String,
     val refreshToken: String,
     val refreshTokenExpiresAt: String,
+    // Optional per-device acquisition credential. Older Muse servers omit both
+    // fields; ignoreUnknownKeys keeps this backward compatible.
+    val acquisitionToken: String? = null,
+    val acquisitionEndpoint: String? = null,
 )
 
 internal sealed interface MusePairingPollResult {

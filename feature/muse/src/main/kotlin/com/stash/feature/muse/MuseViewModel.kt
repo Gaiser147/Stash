@@ -3,6 +3,7 @@ package com.stash.feature.muse
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import android.net.Uri
+import com.stash.core.common.constants.StashConstants
 import dagger.hilt.android.lifecycle.HiltViewModel
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Job
@@ -444,7 +445,11 @@ internal class MuseViewModel @Inject constructor(
             else -> MuseConnectionStage.UNCONFIGURED
         }
         return copy(
-            endpointDraft = endpointDraft.ifBlank { stored.endpoint.orEmpty() },
+            // Prefill the connect field: stored endpoint first, otherwise the
+            // build's default so a fresh install only taps "Koppeln".
+            endpointDraft = endpointDraft
+                .ifBlank { stored.endpoint.orEmpty() }
+                .ifBlank { StashConstants.MUSE_DEFAULT_ENDPOINT },
             endpoint = stored.endpoint,
             connectionStage = stage,
             pairing = stored.pendingPairing?.let { MusePairingUi(it.pairingCode, it.expiresAt) },

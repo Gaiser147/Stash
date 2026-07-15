@@ -2,6 +2,7 @@ package com.stash.feature.muse
 
 import android.content.Context
 import android.os.Build
+import com.stash.core.common.AcquisitionTokenSink
 import dagger.hilt.android.qualifiers.ApplicationContext
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.emitAll
@@ -23,6 +24,7 @@ internal class MuseCompanionRepository @Inject constructor(
     private val credentials: MuseCredentialStore,
     private val identity: MuseDeviceIdentity,
     private val manifestAdapter: MusePrivateManifestAdapter,
+    private val acquisitionTokenSink: AcquisitionTokenSink,
 ) {
     private val refreshMutex = Mutex()
     private val json = Json { encodeDefaults = true; explicitNulls = false }
@@ -94,8 +96,26 @@ internal class MuseCompanionRepository @Inject constructor(
                 is MusePairingPollResult.Paired -> {
                     validatePairedResponse(result.response)
                     credentials.savePaired(endpoint, result.response)
+                    adoptAcquisitionToken(result.response)
                 }
             }
+        }
+    }
+
+    /**
+     * If Muse delivered a device-bound acquisition token in the pairing
+     * response, hand it to the acquisition store so the request inbox works
+     * without the user copying a token by hand. Failures here must not fail the
+     * pairing itself — the remote-control credential is already saved.
+     */
+    private suspend fun adoptAcquisitionToken(response: MusePairingPairedResponse) {
+        val token = response.acquisitionToken?.trim().orEmpty()
+        if (token.isEmpty()) {
+            return
+        }
+
+        runCatching {
+            acquisitionTokenSink.acceptCompanionAcquisitionToken(response.acquisitionEndpoint, token)
         }
     }
 
