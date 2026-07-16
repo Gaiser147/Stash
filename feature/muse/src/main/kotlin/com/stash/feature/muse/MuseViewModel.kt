@@ -84,15 +84,36 @@ internal class MuseViewModel @Inject constructor(
     private var spotifyStatusJob: Job? = null
     private var preparedImport: MusePreparedManifest? = null
     private var visible = false
+    private var defaultEndpointAttempted = false
 
     init {
         viewModelScope.launch {
             repository.storedState.collectLatest { stored ->
                 mutableState.update { previous -> previous.fromStored(stored) }
+                autoConfigureDefaultEndpoint(stored)
                 restartForegroundIfNeeded()
                 restartPairingPollIfNeeded()
                 refreshSpotifyImportStatusIfNeeded()
             }
+        }
+    }
+
+    /**
+     * Persist the build's default endpoint on first launch so a fresh install
+     * lands directly in READY_TO_PAIR — one tap on "Koppeln" instead of the
+     * save-then-pair two-step that made pairing look broken.
+     */
+    private fun autoConfigureDefaultEndpoint(stored: MuseStoredState) {
+        if (defaultEndpointAttempted ||
+            stored.endpoint != null ||
+            stored.credential != null ||
+            StashConstants.MUSE_DEFAULT_ENDPOINT.isBlank()
+        ) {
+            return
+        }
+        defaultEndpointAttempted = true
+        viewModelScope.launch {
+            runCatching { repository.configureEndpoint(StashConstants.MUSE_DEFAULT_ENDPOINT) }
         }
     }
 
@@ -121,6 +142,10 @@ internal class MuseViewModel @Inject constructor(
     }
 
     fun startPairing() = runBusy {
+        // Self-healing: a typed-but-unsaved address must never block pairing.
+        if (state.value.endpoint == null && state.value.endpointDraft.isNotBlank()) {
+            repository.configureEndpoint(state.value.endpointDraft)
+        }
         repository.createPairing()
         mutableState.update {
             it.copy(message = "Code in Discord unter /music → Geräte bestätigen.")

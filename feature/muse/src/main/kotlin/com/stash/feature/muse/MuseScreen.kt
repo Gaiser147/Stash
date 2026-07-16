@@ -252,8 +252,6 @@ private fun MuseScreenContent(
             }
         }
 
-        item { InvitationOnlyNotice() }
-
         state.message?.let { message ->
             item { NoticeCard(message, isError = false, onDismiss = viewModel::clearNotice) }
         }
@@ -329,29 +327,7 @@ private fun MuseScreenContent(
             }
         }
 
-        item {
-            ContractRoadmapCard()
-            Spacer(Modifier.height(8.dp))
-        }
-    }
-}
-
-@Composable
-private fun InvitationOnlyNotice() {
-    Card(
-        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.tertiaryContainer),
-    ) {
-        Row(Modifier.padding(14.dp), horizontalArrangement = Arrangement.spacedBy(12.dp)) {
-            Icon(Icons.Default.WarningAmber, contentDescription = null)
-            Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
-                Text("Einladungs-/Testbetrieb", fontWeight = FontWeight.SemiBold)
-                Text(
-                    "Der aktuelle v1-Server bestätigt den Android-Schlüssel erst bei authentifizierten " +
-                        "Folgeanfragen. Die zusätzliche signierte Pairing-Challenge ist vor Produktion erforderlich.",
-                    style = MaterialTheme.typography.bodySmall,
-                )
-            }
-        }
+        item { Spacer(Modifier.height(8.dp)) }
     }
 }
 
@@ -362,39 +338,44 @@ private fun PairingSetupCard(
     onSaveEndpoint: () -> Unit,
     onStartPairing: () -> Unit,
 ) {
+    var showServerField by remember { mutableStateOf(false) }
     Card {
         Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
-            Text("Muse verbinden", style = MaterialTheme.typography.titleLarge)
+            Text("Mit Muse verbinden", style = MaterialTheme.typography.titleLarge)
             Text(
-                "Trage die HTTPS-Adresse deines Muse-Gateways ein. Stash enthält absichtlich keinen " +
-                    "voreingestellten Produktionsserver.",
+                "Ein Tipp erzeugt einen Kopplungs-Code, den du danach in Discord unter " +
+                    "/music → Geräte bestätigst.",
                 style = MaterialTheme.typography.bodyMedium,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
-            OutlinedTextField(
-                value = state.endpointDraft,
-                onValueChange = onEndpointChanged,
+            Button(
+                onClick = onStartPairing,
                 modifier = Modifier.fillMaxWidth(),
-                label = { Text("Muse HTTPS-Adresse") },
-                placeholder = { Text("https://music.example.net") },
-                singleLine = true,
-                enabled = !state.busy,
-                keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Uri),
-            )
-            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                enabled = !state.busy && (state.endpoint != null || state.endpointDraft.isNotBlank()),
+            ) {
+                if (state.busy) CircularProgressIndicator(Modifier.size(18.dp), strokeWidth = 2.dp)
+                else Icon(Icons.Default.Link, contentDescription = null)
+                Spacer(Modifier.size(8.dp))
+                Text("Verbinden & Code holen")
+            }
+            TextButton(onClick = { showServerField = !showServerField }) {
+                Text(if (showServerField) "Server verbergen" else "Server ändern")
+            }
+            if (showServerField) {
+                OutlinedTextField(
+                    value = state.endpointDraft,
+                    onValueChange = onEndpointChanged,
+                    modifier = Modifier.fillMaxWidth(),
+                    label = { Text("Muse HTTPS-Adresse") },
+                    placeholder = { Text("https://music.example.net") },
+                    singleLine = true,
+                    enabled = !state.busy,
+                    keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Uri),
+                )
                 OutlinedButton(
                     onClick = onSaveEndpoint,
                     enabled = !state.busy && state.endpointDraft.isNotBlank(),
                 ) { Text("Adresse speichern") }
-                Button(
-                    onClick = onStartPairing,
-                    enabled = !state.busy && state.endpoint != null,
-                ) {
-                    if (state.busy) CircularProgressIndicator(Modifier.size(18.dp), strokeWidth = 2.dp)
-                    else Icon(Icons.Default.Link, contentDescription = null)
-                    Spacer(Modifier.size(8.dp))
-                    Text("Koppeln")
-                }
             }
         }
     }
@@ -418,7 +399,17 @@ private fun PairingCodeCard(state: MuseUiState, onCancel: () -> Unit) {
                     fontWeight = FontWeight.Bold,
                 )
             }
-            Text("/music → Geräte · gültig bis ${pairing.expiresAt}")
+            Text(
+                "1. In Discord /music öffnen\n" +
+                    "2. System → Geräte → Rolle wählen\n" +
+                    "3. Diesen Code eingeben (Leerzeichen egal)",
+                style = MaterialTheme.typography.bodyMedium,
+            )
+            Text(
+                "Gültig bis ${formatPairingExpiry(pairing.expiresAt)}",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
             Row(verticalAlignment = Alignment.CenterVertically) {
                 CircularProgressIndicator(Modifier.size(18.dp), strokeWidth = 2.dp)
                 Spacer(Modifier.size(8.dp))
@@ -428,6 +419,13 @@ private fun PairingCodeCard(state: MuseUiState, onCancel: () -> Unit) {
         }
     }
 }
+
+/** ISO timestamp → local "HH:mm" so the expiry is readable at a glance. */
+private fun formatPairingExpiry(iso: String): String = runCatching {
+    java.time.Instant.parse(iso)
+        .atZone(java.time.ZoneId.systemDefault())
+        .format(java.time.format.DateTimeFormatter.ofPattern("HH:mm"))
+}.getOrDefault(iso)
 
 @Composable
 private fun PlaybackTargetSelector(
@@ -855,20 +853,6 @@ private fun PermissionHint(snapshot: MusePlayerResponse) {
             style = MaterialTheme.typography.bodySmall,
             color = MaterialTheme.colorScheme.tertiary,
         )
-    }
-}
-
-@Composable
-private fun ContractRoadmapCard() {
-    Card(colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant)) {
-        Column(Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
-            Text("Noch nicht Teil des stabilen Serververtrags", fontWeight = FontWeight.SemiBold)
-            Text(
-                "Muse-Suche/Browse, Queue-Hinzufügen, Autoplay-Anzeige und Queue-Handoff " +
-                    "werden erst aktiviert, wenn die entsprechenden Serverrouten verfügbar sind.",
-                style = MaterialTheme.typography.bodySmall,
-            )
-        }
     }
 }
 
