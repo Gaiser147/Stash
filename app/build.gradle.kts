@@ -141,8 +141,8 @@ android {
         applicationId = if (isCommunityBuild) "com.gaiser147.stash" else "com.stash.app"
         minSdk = 26
         targetSdk = 35
-        versionCode = 112
-        versionName = "0.9.75-muse.1"
+        versionCode = 113
+        versionName = "0.9.75-muse.2"
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
         manifestPlaceholders["appLabel"] = "Stash"
         // AppAuth redirect scheme removed -- Spotify now uses sp_dc cookie auth
