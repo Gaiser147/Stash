@@ -15,6 +15,7 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.text.selection.SelectionContainer
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.AllInclusive
 import androidx.compose.material.icons.filled.CheckCircle
 import androidx.compose.material.icons.filled.DeleteOutline
 import androidx.compose.material.icons.filled.Devices
@@ -302,6 +303,7 @@ private fun MuseScreenContent(
                                 onVolume = viewModel::setVolume,
                                 onRepeatSong = viewModel::toggleRepeatSong,
                                 onRepeatQueue = viewModel::toggleRepeatQueue,
+                                onAutoplay = viewModel::toggleAutoplay,
                                 onStop = { showStopConfirmation = true },
                             )
                         }
@@ -506,6 +508,7 @@ private fun DiscordPlayerCard(
     onVolume: (Int) -> Unit,
     onRepeatSong: () -> Unit,
     onRepeatQueue: () -> Unit,
+    onAutoplay: () -> Unit,
     onStop: () -> Unit,
 ) {
     val snapshot = state.snapshot
@@ -635,6 +638,15 @@ private fun DiscordPlayerCard(
                     enabled = canControl,
                     label = { Text("Queue") },
                     leadingIcon = { Icon(Icons.Default.Repeat, contentDescription = null) },
+                )
+                // Only offered while the server reports autoplay as available;
+                // it is a per-voice-session feature behind its own gate.
+                FilterChip(
+                    selected = snapshot.player.autoplay.active,
+                    onClick = onAutoplay,
+                    enabled = canControl && snapshot.player.autoplay.available,
+                    label = { Text("Auto") },
+                    leadingIcon = { Icon(Icons.Default.AllInclusive, contentDescription = null) },
                 )
                 OutlinedButton(onClick = onStop, enabled = canControl) {
                     Icon(Icons.Default.Stop, contentDescription = null)

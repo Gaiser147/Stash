@@ -184,6 +184,7 @@ internal class MuseViewModel @Inject constructor(
     fun stop() = perform(MuseRemoteAction.stop())
     fun toggleRepeatSong() = state.value.snapshot?.let { perform(MuseRemoteAction.repeatSong(!it.player.repeatSong)) }
     fun toggleRepeatQueue() = state.value.snapshot?.let { perform(MuseRemoteAction.repeatQueue(!it.player.repeatQueue)) }
+    fun toggleAutoplay() = state.value.snapshot?.let { perform(MuseRemoteAction.autoplay(!it.player.autoplay.active)) }
     fun shuffle() = perform(MuseRemoteAction.shuffle())
     fun clearQueue() = perform(MuseRemoteAction.clearQueue())
     fun undoQueueChange() = perform(MuseRemoteAction.undoQueueChange())
