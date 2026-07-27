@@ -80,3 +80,4 @@ spike/*.png
 spike/*.flac
 spike/*.txt
 spike/*.xml
+.kotlin/

@@ -113,6 +113,18 @@ internal sealed interface MusePairingPollResult {
     data class Paired(val response: MusePairingPairedResponse) : MusePairingPollResult
 }
 
+/**
+ * Whether the device-bound acquisition credential delivered with a pairing was
+ * stored successfully. A failure leaves remote control working, but the request
+ * inbox then needs manual configuration — so it must stay visible instead of
+ * being swallowed.
+ */
+internal sealed interface MuseAcquisitionAdoption {
+    data object None : MuseAcquisitionAdoption
+    data object Adopted : MuseAcquisitionAdoption
+    data class Failed(val reason: String) : MuseAcquisitionAdoption
+}
+
 @Serializable
 internal data class MuseRefreshRequest(
     val contract: String = MUSE_COMPANION_CONTRACT,
