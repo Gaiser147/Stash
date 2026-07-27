@@ -4,11 +4,13 @@ import android.content.Context
 import android.os.Build
 import com.stash.core.common.AcquisitionTokenSink
 import dagger.hilt.android.qualifiers.ApplicationContext
+import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.emitAll
 import kotlinx.coroutines.flow.flow
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
+import kotlinx.coroutines.withContext
 import kotlinx.serialization.json.Json
 import java.time.Instant
 import java.time.format.DateTimeParseException
@@ -28,6 +30,15 @@ internal class MuseCompanionRepository @Inject constructor(
 ) {
     private val refreshMutex = Mutex()
     private val json = Json { encodeDefaults = true; explicitNulls = false }
+
+    /**
+     * Outcome of the most recent acquisition-credential adoption, so the Muse
+     * screen can tell the user whether the request inbox configured itself or
+     * still needs manual entry. Process-local and intentionally not persisted.
+     */
+    @Volatile
+    var lastAcquisitionAdoption: MuseAcquisitionAdoption = MuseAcquisitionAdoption.None
+        private set
 
     val storedState: Flow<MuseStoredState> = credentials.state
 
@@ -95,8 +106,13 @@ internal class MuseCompanionRepository @Inject constructor(
                 MusePairingPollResult.Expired -> credentials.clearPending()
                 is MusePairingPollResult.Paired -> {
                     validatePairedResponse(result.response)
-                    credentials.savePaired(endpoint, result.response)
+                    // Adopt the acquisition credential BEFORE savePaired: that
+                    // write flips the stored state to PAIRED, whose collector
+                    // cancels this very job (see MuseViewModel.restartPairingPollIfNeeded).
+                    // Running afterwards means the suspending sink call never
+                    // completes, which silently left the request inbox unconfigured.
                     adoptAcquisitionToken(result.response)
+                    credentials.savePaired(endpoint, result.response)
                 }
             }
         }
@@ -105,8 +121,12 @@ internal class MuseCompanionRepository @Inject constructor(
     /**
      * If Muse delivered a device-bound acquisition token in the pairing
      * response, hand it to the acquisition store so the request inbox works
-     * without the user copying a token by hand. Failures here must not fail the
-     * pairing itself — the remote-control credential is already saved.
+     * without the user copying a token by hand.
+     *
+     * Runs inside [NonCancellable] so a cancellation racing the pairing
+     * completion cannot abandon a half-adopted credential. A genuine failure
+     * must not abort the pairing — the remote control still works without the
+     * acquisition inbox — but it is reported instead of silently swallowed.
      */
     private suspend fun adoptAcquisitionToken(response: MusePairingPairedResponse) {
         val token = response.acquisitionToken?.trim().orEmpty()
@@ -114,8 +134,15 @@ internal class MuseCompanionRepository @Inject constructor(
             return
         }
 
-        runCatching {
-            acquisitionTokenSink.acceptCompanionAcquisitionToken(response.acquisitionEndpoint, token)
+        try {
+            withContext(NonCancellable) {
+                acquisitionTokenSink.acceptCompanionAcquisitionToken(response.acquisitionEndpoint, token)
+            }
+            lastAcquisitionAdoption = MuseAcquisitionAdoption.Adopted
+        } catch (error: Throwable) {
+            lastAcquisitionAdoption = MuseAcquisitionAdoption.Failed(
+                error.message ?: error::class.simpleName.orEmpty(),
+            )
         }
     }
 

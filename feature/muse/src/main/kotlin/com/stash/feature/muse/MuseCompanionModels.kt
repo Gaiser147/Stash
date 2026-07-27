@@ -113,6 +113,18 @@ internal sealed interface MusePairingPollResult {
     data class Paired(val response: MusePairingPairedResponse) : MusePairingPollResult
 }
 
+/**
+ * Whether the device-bound acquisition credential delivered with a pairing was
+ * stored successfully. A failure leaves remote control working, but the request
+ * inbox then needs manual configuration — so it must stay visible instead of
+ * being swallowed.
+ */
+internal sealed interface MuseAcquisitionAdoption {
+    data object None : MuseAcquisitionAdoption
+    data object Adopted : MuseAcquisitionAdoption
+    data class Failed(val reason: String) : MuseAcquisitionAdoption
+}
+
 @Serializable
 internal data class MuseRefreshRequest(
     val contract: String = MUSE_COMPANION_CONTRACT,
@@ -244,6 +256,20 @@ internal data class MuseSong(
     }
 }
 
+/**
+ * Session-scoped Navidrome autoplay state. Older Muse servers omit the object,
+ * so it defaults to unavailable rather than failing the whole snapshot.
+ */
+@Serializable
+internal data class MuseAutoplayState(
+    val available: Boolean = false,
+    val active: Boolean = false,
+    val queuedTrackCount: Int = 0,
+    val maxTrackCount: Int = 0,
+    val remainingTrackCount: Int = 0,
+    val lastResult: String = "never",
+)
+
 @Serializable
 internal data class MusePlayerState(
     val phase: String,
@@ -254,6 +280,7 @@ internal data class MusePlayerState(
     val repeatQueue: Boolean,
     val playerRevision: Long,
     val queueRevision: Long,
+    val autoplay: MuseAutoplayState = MuseAutoplayState(),
     val current: MuseSong? = null,
     val queue: List<MuseSong> = emptyList(),
     val queueLength: Int,

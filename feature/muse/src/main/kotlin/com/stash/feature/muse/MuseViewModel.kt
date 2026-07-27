@@ -184,6 +184,7 @@ internal class MuseViewModel @Inject constructor(
     fun stop() = perform(MuseRemoteAction.stop())
     fun toggleRepeatSong() = state.value.snapshot?.let { perform(MuseRemoteAction.repeatSong(!it.player.repeatSong)) }
     fun toggleRepeatQueue() = state.value.snapshot?.let { perform(MuseRemoteAction.repeatQueue(!it.player.repeatQueue)) }
+    fun toggleAutoplay() = state.value.snapshot?.let { perform(MuseRemoteAction.autoplay(!it.player.autoplay.active)) }
     fun shuffle() = perform(MuseRemoteAction.shuffle())
     fun clearQueue() = perform(MuseRemoteAction.clearQueue())
     fun undoQueueChange() = perform(MuseRemoteAction.undoQueueChange())
@@ -367,7 +368,7 @@ internal class MuseViewModel @Inject constructor(
                             return@launch
                         }
                         is MusePairingPollResult.Paired -> {
-                            mutableState.update { it.copy(message = "Muse-Gerät erfolgreich gekoppelt.") }
+                            mutableState.update { it.copy(message = pairedMessage()) }
                             return@launch
                         }
                     }
@@ -382,6 +383,21 @@ internal class MuseViewModel @Inject constructor(
                 }
             }
         }
+    }
+
+    /**
+     * Report whether the request inbox configured itself from the pairing. A
+     * failed adoption used to be invisible, leaving the user to wonder why
+     * uploads never started.
+     */
+    private fun pairedMessage(): String = when (val adoption = repository.lastAcquisitionAdoption) {
+        MuseAcquisitionAdoption.Adopted ->
+            "Muse-Gerät gekoppelt. Die Anfragen-Verbindung wurde automatisch eingerichtet."
+        is MuseAcquisitionAdoption.Failed ->
+            "Muse-Gerät gekoppelt, aber die Anfragen-Verbindung konnte nicht automatisch " +
+                "eingerichtet werden (${adoption.reason}). Trage sie unter Einstellungen → " +
+                "Konten & Sync → Muse-Anfragen manuell ein."
+        MuseAcquisitionAdoption.None -> "Muse-Gerät erfolgreich gekoppelt."
     }
 
     private fun refreshSpotifyImportStatusIfNeeded() {
