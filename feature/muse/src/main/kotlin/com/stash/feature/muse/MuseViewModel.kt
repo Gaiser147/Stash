@@ -185,6 +185,26 @@ internal class MuseViewModel @Inject constructor(
     fun toggleRepeatSong() = state.value.snapshot?.let { perform(MuseRemoteAction.repeatSong(!it.player.repeatSong)) }
     fun toggleRepeatQueue() = state.value.snapshot?.let { perform(MuseRemoteAction.repeatQueue(!it.player.repeatQueue)) }
     fun toggleAutoplay() = state.value.snapshot?.let { perform(MuseRemoteAction.autoplay(!it.player.autoplay.active)) }
+    fun setLiked(liked: Boolean) = perform(MuseRemoteAction.setLiked(liked))
+
+    /**
+     * Save the current track into a named collection. Rejects names the server
+     * would refuse anyway, so the user sees the reason immediately.
+     */
+    fun saveCurrent(rawName: String) {
+        val name = MuseRemoteAction.normalizeSaveName(rawName)
+        if (name == null) {
+            mutableState.update {
+                it.copy(
+                    error = "Der Name darf nicht leer sein und höchstens " +
+                        "${MuseRemoteAction.SAVE_NAME_MAX_LENGTH} Zeichen haben.",
+                )
+            }
+            return
+        }
+
+        perform(MuseRemoteAction.saveCurrent(name))
+    }
     fun shuffle() = perform(MuseRemoteAction.shuffle())
     fun clearQueue() = perform(MuseRemoteAction.clearQueue())
     fun undoQueueChange() = perform(MuseRemoteAction.undoQueueChange())

@@ -16,7 +16,10 @@ import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.text.selection.SelectionContainer
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.AllInclusive
+import androidx.compose.material.icons.filled.BookmarkAdd
 import androidx.compose.material.icons.filled.CheckCircle
+import androidx.compose.material.icons.filled.Favorite
+import androidx.compose.material.icons.filled.HeartBroken
 import androidx.compose.material.icons.filled.DeleteOutline
 import androidx.compose.material.icons.filled.Devices
 import androidx.compose.material.icons.filled.KeyboardArrowDown
@@ -114,6 +117,7 @@ private fun MuseScreenContent(
 ) {
     var showDisconnectConfirmation by remember { mutableStateOf(false) }
     var showStopConfirmation by remember { mutableStateOf(false) }
+    var showSaveCurrentDialog by remember { mutableStateOf(false) }
     var showClearConfirmation by remember { mutableStateOf(false) }
     var showImportIdentityConfirmation by remember { mutableStateOf(false) }
     var showSpotifyDisconnectConfirmation by remember { mutableStateOf(false) }
@@ -137,6 +141,16 @@ private fun MuseScreenContent(
             },
             dismissButton = {
                 TextButton(onClick = { showDisconnectConfirmation = false }) { Text("Abbrechen") }
+            },
+        )
+    }
+
+    if (showSaveCurrentDialog) {
+        SaveCurrentDialog(
+            onDismiss = { showSaveCurrentDialog = false },
+            onConfirm = { name ->
+                showSaveCurrentDialog = false
+                viewModel.saveCurrent(name)
             },
         )
     }
@@ -304,6 +318,8 @@ private fun MuseScreenContent(
                                 onRepeatSong = viewModel::toggleRepeatSong,
                                 onRepeatQueue = viewModel::toggleRepeatQueue,
                                 onAutoplay = viewModel::toggleAutoplay,
+                                onLike = viewModel::setLiked,
+                                onSaveCurrent = { showSaveCurrentDialog = true },
                                 onStop = { showStopConfirmation = true },
                             )
                         }
@@ -509,6 +525,8 @@ private fun DiscordPlayerCard(
     onRepeatSong: () -> Unit,
     onRepeatQueue: () -> Unit,
     onAutoplay: () -> Unit,
+    onLike: (Boolean) -> Unit,
+    onSaveCurrent: () -> Unit,
     onStop: () -> Unit,
 ) {
     val snapshot = state.snapshot
@@ -651,6 +669,33 @@ private fun DiscordPlayerCard(
                 OutlinedButton(onClick = onStop, enabled = canControl) {
                     Icon(Icons.Default.Stop, contentDescription = null)
                     Text("Stop")
+                }
+            }
+
+            // Track-scoped actions. Likes are a collective server preference,
+            // so the button always sends "like" -- the snapshot carries no
+            // per-user liked flag to toggle against.
+            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                OutlinedButton(
+                    onClick = { onLike(true) },
+                    enabled = canControl && snapshot.player.current != null,
+                ) {
+                    Icon(Icons.Default.Favorite, contentDescription = null)
+                    Text("Like")
+                }
+                OutlinedButton(
+                    onClick = { onLike(false) },
+                    enabled = canControl && snapshot.player.current != null,
+                ) {
+                    Icon(Icons.Default.HeartBroken, contentDescription = null)
+                    Text("Unlike")
+                }
+                OutlinedButton(
+                    onClick = onSaveCurrent,
+                    enabled = canControl && snapshot.player.current != null,
+                ) {
+                    Icon(Icons.Default.BookmarkAdd, contentDescription = null)
+                    Text("Sichern")
                 }
             }
 
@@ -915,6 +960,43 @@ private fun ConfirmationDialog(
         title = { Text(title) },
         text = { Text(body) },
         confirmButton = { Button(onClick = onConfirm) { Text(confirmLabel) } },
+        dismissButton = { TextButton(onClick = onDismiss) { Text("Abbrechen") } },
+    )
+}
+
+/**
+ * Ask for the collection name before saving the current track. The confirm
+ * button stays disabled until the name would pass the server's own check, so
+ * the user never trades a dialog for an opaque gateway rejection.
+ */
+@Composable
+private fun SaveCurrentDialog(
+    onDismiss: () -> Unit,
+    onConfirm: (String) -> Unit,
+) {
+    var name by remember { mutableStateOf("") }
+    val normalized = MuseRemoteAction.normalizeSaveName(name)
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text("Titel sichern") },
+        text = {
+            Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                Text("Unter welchem Namen soll der laufende Titel gespeichert werden?")
+                OutlinedTextField(
+                    value = name,
+                    onValueChange = { name = it },
+                    singleLine = true,
+                    label = { Text("Name") },
+                    isError = name.isNotEmpty() && normalized == null,
+                    supportingText = {
+                        Text("${name.length}/${MuseRemoteAction.SAVE_NAME_MAX_LENGTH}")
+                    },
+                )
+            }
+        },
+        confirmButton = {
+            Button(onClick = { onConfirm(name) }, enabled = normalized != null) { Text("Sichern") }
+        },
         dismissButton = { TextButton(onClick = onDismiss) { Text("Abbrechen") } },
     )
 }

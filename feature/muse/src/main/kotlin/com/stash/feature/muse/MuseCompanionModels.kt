@@ -342,6 +342,24 @@ internal data class MuseRemoteAction(
         fun repeatSong(enabled: Boolean) = player(if (enabled) "repeatSongEnable" else "repeatSongDisable")
         fun repeatQueue(enabled: Boolean) = player(if (enabled) "repeatQueueEnable" else "repeatQueueDisable")
         fun autoplay(enabled: Boolean) = player(if (enabled) "autoplayEnable" else "autoplayDisable")
+
+        /** Collective server like for the current track. */
+        fun setLiked(liked: Boolean) = player(
+            "setLiked",
+            JsonObject(mapOf("liked" to JsonPrimitive(liked))),
+        )
+
+        /**
+         * Save the current track into a named collection. The server normalizes
+         * to NFC and rejects control characters or names beyond
+         * [SAVE_NAME_MAX_LENGTH]; the UI mirrors that limit so the failure is
+         * caught before the request.
+         */
+        fun saveCurrent(name: String) = player(
+            "saveCurrent",
+            JsonObject(mapOf("name" to JsonPrimitive(name))),
+        )
+
         fun shuffle() = queue("shuffle")
         fun clearQueue() = queue("clearQueue")
         fun undoQueueChange() = queue("undoQueueChange")
@@ -368,6 +386,30 @@ internal data class MuseRemoteAction(
 
         private fun both(name: String) =
             MuseRemoteAction(name, needsPlayerRevision = true, needsQueueRevision = true)
+
+        /** Mirrors the server's `saveCurrent` name limit. */
+        const val SAVE_NAME_MAX_LENGTH = 80
+
+        /**
+         * Normalize a collection name the same way the server does, returning
+         * null when it would be rejected. Keeps the error in the UI instead of
+         * surfacing an opaque `invalid_action_arguments` from the gateway.
+         */
+        fun normalizeSaveName(raw: String): String? {
+            val name = java.text.Normalizer.normalize(raw, java.text.Normalizer.Form.NFC).trim()
+            if (name.isEmpty() || name.length > SAVE_NAME_MAX_LENGTH) return null
+            // Reject Unicode "other" category (control, format, surrogate, …).
+            if (name.any { Character.getType(it).let { t ->
+                    t == Character.CONTROL.toInt() || t == Character.FORMAT.toInt() ||
+                        t == Character.SURROGATE.toInt() || t == Character.PRIVATE_USE.toInt() ||
+                        t == Character.UNASSIGNED.toInt()
+                }
+            }) {
+                return null
+            }
+
+            return name
+        }
     }
 }
 
