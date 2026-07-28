@@ -138,6 +138,33 @@ internal class MuseCompanionApi @Inject constructor(
         return executeJson(request)
     }
 
+    /**
+     * Read-only library browsing. [segments] follow `library/…` and [query]
+     * carries search terms; the request proof covers path and query alike.
+     */
+    suspend fun library(
+        endpoint: String,
+        credential: MusePairedCredential,
+        segments: List<String>,
+        query: Map<String, String> = emptyMap(),
+    ): MuseLibraryResponse {
+        val request = signedRequest(
+            Request.Builder()
+                .url(
+                    MuseEndpoint.routeWithQuery(
+                        endpoint,
+                        listOf("guilds", credential.grant.guildId, "library") + segments,
+                        query,
+                    ),
+                )
+                .get(),
+            body = ByteArray(0),
+            proofToken = credential.accessToken,
+            bearerToken = credential.accessToken,
+        ).build()
+        return executeJson(request)
+    }
+
     suspend fun action(
         endpoint: String,
         credential: MusePairedCredential,

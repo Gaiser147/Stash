@@ -76,8 +76,20 @@ shows the private profile status and DELETE disconnects it before Stash erases
 the local profile identity. This surface has no acquisition/download action.
 
 The app deliberately does not invent client-only versions of missing server
-contracts. Search/Browse, enqueue/placement, Autoplay state and queue handoff
-remain visibly unavailable until Muse adds those routes/fields.
+contracts. **Queue handoff** — moving playback between the local Media3 player
+and Discord — remains visibly unavailable until Muse gains the routes for it.
+
+Autoplay, library search/browse and enqueue were in that list until 2026-07-28
+and are now implemented against real server contracts:
+
+- **Autoplay** uses the state the player snapshot already reported.
+- **Library search/browse** reads `GET /companion/v1/guilds/{guild}/library/…`
+  (search, albums, artists, playlists) under the `library:read` scope that
+  pairing has always granted. Responses carry only displayable fields plus a
+  stable `navidrome:song:<id>` reference — never a stream URL.
+- **Enqueue** submits that reference plus a placement (`end`, `next`, `now`).
+  The device never sends a song object: Muse resolves the reference against its
+  own library, so a paired phone cannot make the bot play an arbitrary URL.
 
 ## Production blockers
 

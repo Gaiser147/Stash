@@ -146,6 +146,16 @@ internal class MuseCompanionRepository @Inject constructor(
         }
     }
 
+    suspend fun searchLibrary(query: String): MuseLibraryResponse =
+        withAuthorizedRetry { endpoint, credential ->
+            api.library(endpoint, credential, listOf("search"), mapOf("q" to query))
+        }
+
+    suspend fun browseLibrary(segments: List<String>): MuseLibraryResponse =
+        withAuthorizedRetry { endpoint, credential ->
+            api.library(endpoint, credential, segments)
+        }
+
     suspend fun reconcile(): MusePlayerResponse = withAuthorizedRetry { endpoint, credential ->
         api.player(endpoint, credential)
     }
