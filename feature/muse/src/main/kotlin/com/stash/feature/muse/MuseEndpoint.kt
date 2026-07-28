@@ -26,4 +26,18 @@ internal object MuseEndpoint {
             segments.forEach(::addPathSegment)
         }.build()
     }
+
+    /**
+     * Same as [route] but with query parameters. The request proof signs the
+     * exact encoded path *and* query, so the parameters must be part of the URL
+     * before signing — which they are, since the proof is derived from the
+     * built request.
+     */
+    fun routeWithQuery(
+        endpoint: String,
+        segments: List<String>,
+        query: Map<String, String>,
+    ): HttpUrl = route(endpoint, *segments.toTypedArray()).newBuilder().apply {
+        query.forEach { (name, value) -> addQueryParameter(name, value) }
+    }.build()
 }

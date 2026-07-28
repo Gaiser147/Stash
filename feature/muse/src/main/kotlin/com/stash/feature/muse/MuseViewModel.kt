@@ -69,6 +69,13 @@ internal data class MuseUiState(
     val spotifyImportProfile: MuseSpotifyImportProfile? = null,
     val importPreview: MuseImportPreviewUi? = null,
     val importBusy: Boolean = false,
+    val libraryQuery: String = "",
+    val libraryBusy: Boolean = false,
+    val librarySongs: List<MuseLibrarySong> = emptyList(),
+    val libraryAlbums: List<MuseLibraryAlbum> = emptyList(),
+    val libraryPlaylists: List<MuseLibraryPlaylist> = emptyList(),
+    /** Breadcrumb of the album/playlist currently opened, empty at the root. */
+    val libraryTitle: String? = null,
 )
 
 @HiltViewModel
@@ -211,6 +218,70 @@ internal class MuseViewModel @Inject constructor(
     fun removeQueueEntry(entryId: String) = perform(MuseRemoteAction.remove(listOf(entryId)))
     fun moveQueueEntry(entryId: String, oneBasedPosition: Int) =
         perform(MuseRemoteAction.move(entryId, oneBasedPosition.coerceIn(1, 10_000)))
+
+    fun onLibraryQueryChanged(value: String) {
+        mutableState.update { it.copy(libraryQuery = value) }
+    }
+
+    /** Search the Navidrome library through Muse. */
+    fun searchLibrary() = runLibrary {
+        val query = state.value.libraryQuery.trim()
+        if (query.isEmpty()) return@runLibrary null
+        repository.searchLibrary(query).let { it to null }
+    }
+
+    /** Show the newest albums; the entry point when no search is active. */
+    fun browseAlbums() = runLibrary { repository.browseLibrary(listOf("albums")) to null }
+
+    fun browsePlaylists() = runLibrary { repository.browseLibrary(listOf("playlists")) to null }
+
+    fun openAlbum(album: MuseLibraryAlbum) = runLibrary {
+        repository.browseLibrary(listOf("albums", album.id)) to album.name
+    }
+
+    fun openArtist(artistId: String) = runLibrary {
+        repository.browseLibrary(listOf("artists", artistId)) to null
+    }
+
+    fun openPlaylist(playlist: MuseLibraryPlaylist) = runLibrary {
+        repository.browseLibrary(listOf("playlists", playlist.id)) to playlist.name
+    }
+
+    fun enqueue(song: MuseLibrarySong, placement: MuseQueuePlacement) {
+        perform(MuseRemoteAction.enqueue(song.songId, placement))
+        mutableState.update { it.copy(message = "${song.title} · ${placement.label}") }
+    }
+
+    /**
+     * Run a library read and fold the result into the visible state. Each call
+     * replaces the previous listing, so the section always shows one coherent
+     * result rather than a merge of several.
+     */
+    private fun runLibrary(block: suspend () -> Pair<MuseLibraryResponse, String?>?) {
+        viewModelScope.launch {
+            mutableState.update { it.copy(libraryBusy = true, error = null) }
+            try {
+                val result = block()
+                if (result != null) {
+                    val (response, title) = result
+                    mutableState.update {
+                        it.copy(
+                            librarySongs = response.songs,
+                            libraryAlbums = response.albums,
+                            libraryPlaylists = response.playlists,
+                            libraryTitle = title ?: response.album?.name ?: response.playlist?.name,
+                        )
+                    }
+                }
+            } catch (error: CancellationException) {
+                throw error
+            } catch (error: Throwable) {
+                mutableState.update { it.copy(error = error.toUserMessage()) }
+            } finally {
+                mutableState.update { it.copy(libraryBusy = false) }
+            }
+        }
+    }
 
     fun clearNotice() {
         mutableState.update { it.copy(message = null, error = null) }

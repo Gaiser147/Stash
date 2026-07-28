@@ -2,6 +2,7 @@ package com.stash.feature.muse
 
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -15,6 +16,7 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.text.selection.SelectionContainer
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.Album
 import androidx.compose.material.icons.filled.AllInclusive
 import androidx.compose.material.icons.filled.BookmarkAdd
 import androidx.compose.material.icons.filled.CheckCircle
@@ -29,6 +31,7 @@ import androidx.compose.material.icons.filled.Pause
 import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material.icons.filled.QueueMusic
 import androidx.compose.material.icons.filled.Refresh
+import androidx.compose.material.icons.filled.Search
 import androidx.compose.material.icons.filled.Repeat
 import androidx.compose.material.icons.filled.RepeatOne
 import androidx.compose.material.icons.filled.Shuffle
@@ -49,6 +52,8 @@ import androidx.compose.material3.FilterChip
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
+import androidx.compose.material3.LinearProgressIndicator
+import androidx.compose.material3.ListItem
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
@@ -333,6 +338,18 @@ private fun MuseScreenContent(
                                 onMove = viewModel::moveQueueEntry,
                             )
                         }
+                        MuseSection.LIBRARY -> item {
+                            LibraryCard(
+                                state = state,
+                                onQueryChanged = viewModel::onLibraryQueryChanged,
+                                onSearch = viewModel::searchLibrary,
+                                onBrowseAlbums = viewModel::browseAlbums,
+                                onBrowsePlaylists = viewModel::browsePlaylists,
+                                onOpenAlbum = viewModel::openAlbum,
+                                onOpenPlaylist = viewModel::openPlaylist,
+                                onEnqueue = viewModel::enqueue,
+                            )
+                        }
                         MuseSection.DEVICES -> item {
                             DeviceCard(
                                 state = state,
@@ -488,6 +505,7 @@ private fun MuseSectionSelector(selected: MuseSection, onSelected: (MuseSection)
                         when (section) {
                             MuseSection.PLAYER -> "Player"
                             MuseSection.QUEUE -> "Queue"
+                            MuseSection.LIBRARY -> "Suchen"
                             MuseSection.DEVICES -> "Gerät & Sync"
                         },
                     )
@@ -962,6 +980,122 @@ private fun ConfirmationDialog(
         confirmButton = { Button(onClick = onConfirm) { Text(confirmLabel) } },
         dismissButton = { TextButton(onClick = onDismiss) { Text("Abbrechen") } },
     )
+}
+
+/**
+ * Search and browse the Navidrome library through Muse. Results carry only an
+ * opaque `navidrome:song:<id>` reference; queuing sends that reference back and
+ * the server resolves it, so the app never handles a playback source.
+ */
+@Composable
+private fun LibraryCard(
+    state: MuseUiState,
+    onQueryChanged: (String) -> Unit,
+    onSearch: () -> Unit,
+    onBrowseAlbums: () -> Unit,
+    onBrowsePlaylists: () -> Unit,
+    onOpenAlbum: (MuseLibraryAlbum) -> Unit,
+    onOpenPlaylist: (MuseLibraryPlaylist) -> Unit,
+    onEnqueue: (MuseLibrarySong, MuseQueuePlacement) -> Unit,
+) {
+    val canQueue = state.snapshot?.permissions?.canWriteQueue ?: false
+    Card {
+        Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
+            Text("Bibliothek", style = MaterialTheme.typography.titleLarge)
+
+            OutlinedTextField(
+                value = state.libraryQuery,
+                onValueChange = onQueryChanged,
+                modifier = Modifier.fillMaxWidth(),
+                singleLine = true,
+                label = { Text("Titel oder Interpret") },
+                trailingIcon = {
+                    IconButton(onClick = onSearch, enabled = !state.libraryBusy) {
+                        Icon(Icons.Default.Search, contentDescription = "Suchen")
+                    }
+                },
+            )
+
+            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                OutlinedButton(onClick = onBrowseAlbums, enabled = !state.libraryBusy) {
+                    Text("Alben")
+                }
+                OutlinedButton(onClick = onBrowsePlaylists, enabled = !state.libraryBusy) {
+                    Text("Playlists")
+                }
+            }
+
+            if (state.libraryBusy) {
+                LinearProgressIndicator(Modifier.fillMaxWidth())
+            }
+
+            state.libraryTitle?.let {
+                Text(it, style = MaterialTheme.typography.titleMedium)
+            }
+
+            if (!canQueue && state.librarySongs.isNotEmpty()) {
+                Text(
+                    "Zum Hinzufügen fehlt diesem Gerät die Queue-Berechtigung.",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            }
+
+            state.libraryAlbums.forEach { album ->
+                ListItem(
+                    headlineContent = { Text(album.name) },
+                    supportingContent = {
+                        Text("${album.artist} · ${album.songCount} Titel")
+                    },
+                    leadingContent = { Icon(Icons.Default.Album, contentDescription = null) },
+                    modifier = Modifier.clickable { onOpenAlbum(album) },
+                )
+            }
+
+            state.libraryPlaylists.forEach { playlist ->
+                ListItem(
+                    headlineContent = { Text(playlist.name) },
+                    supportingContent = { Text("${playlist.songCount} Titel") },
+                    leadingContent = { Icon(Icons.Default.QueueMusic, contentDescription = null) },
+                    modifier = Modifier.clickable { onOpenPlaylist(playlist) },
+                )
+            }
+
+            state.librarySongs.forEach { song ->
+                Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                    ListItem(
+                        headlineContent = { Text(song.title) },
+                        supportingContent = {
+                            Text(
+                                listOfNotNull(song.artist, song.album)
+                                    .joinToString(" · ") + " · " + formatDuration(song.durationSeconds),
+                            )
+                        },
+                    )
+                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                        MuseQueuePlacement.entries.forEach { placement ->
+                            OutlinedButton(
+                                onClick = { onEnqueue(song, placement) },
+                                enabled = canQueue && !state.actionBusy,
+                            ) { Text(placement.label) }
+                        }
+                    }
+                }
+            }
+
+            if (!state.libraryBusy &&
+                state.librarySongs.isEmpty() &&
+                state.libraryAlbums.isEmpty() &&
+                state.libraryPlaylists.isEmpty()
+            ) {
+                Text(
+                    "Suche nach einem Titel oder öffne Alben bzw. Playlists.",
+                    style = MaterialTheme.typography.bodyMedium,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            }
+        }
+    }
 }
 
 /**

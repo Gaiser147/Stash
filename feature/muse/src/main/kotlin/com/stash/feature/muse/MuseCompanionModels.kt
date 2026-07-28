@@ -107,6 +107,66 @@ internal data class MusePairingPairedResponse(
     val acquisitionEndpoint: String? = null,
 )
 
+/**
+ * A track as the library routes expose it. [songId] is the opaque
+ * `navidrome:song:<id>` reference the server hands back to `enqueue`; the app
+ * never sees or sends a playback source.
+ */
+@Serializable
+/** Where a queued track lands, mirroring the server's placement values. */
+internal enum class MuseQueuePlacement(val wire: String, val label: String) {
+    END("end", "Ans Ende"),
+    NEXT("next", "Als Nächstes"),
+    NOW("now", "Jetzt abspielen"),
+}
+
+@Serializable
+internal data class MuseLibrarySong(
+    val songId: String,
+    val title: String,
+    val artist: String,
+    val album: String? = null,
+    val durationSeconds: Int = 0,
+    val thumbnailUrl: String? = null,
+)
+
+@Serializable
+internal data class MuseLibraryAlbum(
+    val id: String,
+    val name: String,
+    val artist: String,
+    val songCount: Int = 0,
+    val durationSeconds: Int = 0,
+    val year: Int? = null,
+)
+
+@Serializable
+internal data class MuseLibraryPlaylist(
+    val id: String,
+    val name: String,
+    val songCount: Int = 0,
+    val durationSeconds: Int = 0,
+)
+
+@Serializable
+internal data class MuseLibraryArtist(
+    val id: String,
+    val name: String,
+    val albumCount: Int = 0,
+)
+
+/** Every library route answers with a subset of these collections. */
+@Serializable
+internal data class MuseLibraryResponse(
+    val contract: String,
+    val songs: List<MuseLibrarySong> = emptyList(),
+    val albums: List<MuseLibraryAlbum> = emptyList(),
+    val playlists: List<MuseLibraryPlaylist> = emptyList(),
+    val album: MuseLibraryAlbum? = null,
+    val playlist: MuseLibraryPlaylist? = null,
+    val artist: MuseLibraryArtist? = null,
+)
+
 internal sealed interface MusePairingPollResult {
     data object Pending : MusePairingPollResult
     data object Expired : MusePairingPollResult
@@ -360,6 +420,21 @@ internal data class MuseRemoteAction(
             JsonObject(mapOf("name" to JsonPrimitive(name))),
         )
 
+        /**
+         * Queue a library track. Only the opaque reference travels — the
+         * server resolves it against its own library, so the app never
+         * describes what should play.
+         */
+        fun enqueue(songId: String, placement: MuseQueuePlacement) = queue(
+            "enqueue",
+            JsonObject(
+                mapOf(
+                    "songId" to JsonPrimitive(songId),
+                    "placement" to JsonPrimitive(placement.wire),
+                ),
+            ),
+        )
+
         fun shuffle() = queue("shuffle")
         fun clearQueue() = queue("clearQueue")
         fun undoQueueChange() = queue("undoQueueChange")
@@ -421,6 +496,7 @@ internal enum class MusePlaybackTarget {
 internal enum class MuseSection {
     PLAYER,
     QUEUE,
+    LIBRARY,
     DEVICES,
 }
 
