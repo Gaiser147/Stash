@@ -21,6 +21,7 @@ import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Radio
 import androidx.compose.material.icons.automirrored.filled.KeyboardArrowRight
+import androidx.compose.material.icons.automirrored.filled.PlaylistAdd
 import androidx.compose.material.icons.automirrored.filled.QueueMusic
 import androidx.compose.material.icons.filled.BookmarkBorder
 import androidx.compose.material.icons.filled.Download
@@ -69,6 +70,7 @@ import coil3.request.allowHardware
 import coil3.toBitmap
 import com.stash.core.model.RepeatMode
 import com.stash.core.model.isFlac
+import com.stash.core.ui.components.CreatePlaylistDialog
 import com.stash.core.ui.components.SaveToPlaylistSheet
 import com.stash.feature.nowplaying.ui.AmbientBackground
 import com.stash.feature.nowplaying.ui.GlowingProgressBar
@@ -97,6 +99,8 @@ fun NowPlayingScreen(
     val resolvingArtist by viewModel.resolvingArtist.collectAsStateWithLifecycle()
     val isDownloadingCurrent by viewModel.isDownloadingCurrent.collectAsStateWithLifecycle()
     val radioLabel by viewModel.radioSeedLabel.collectAsStateWithLifecycle()
+    val personalMixActive by viewModel.personalMixActive.collectAsStateWithLifecycle()
+    var showSaveMixDialog by remember { mutableStateOf(false) }
     var showQueue by remember { mutableStateOf(false) }
     var showSaveSheet by remember { mutableStateOf(false) }
     // "This song is wrong" dialog — shown when the flag icon is tapped.
@@ -163,6 +167,23 @@ fun NowPlayingScreen(
             onSeek = viewModel::onLyricsLineSeek,
             onRetry = viewModel::onLyricsRetry,
             onDismiss = viewModel::onDismissLyrics,
+        )
+    }
+
+    // Save the generated "Mix for you" queue as a playlist.
+    if (showSaveMixDialog) {
+        val suggested = remember {
+            "Mix for you · " + java.time.LocalDate.now()
+                .format(java.time.format.DateTimeFormatter.ofPattern("d MMM"))
+        }
+        CreatePlaylistDialog(
+            title = "Save mix as playlist",
+            initialName = suggested,
+            onConfirm = { name ->
+                viewModel.saveQueueAsPlaylist(name)
+                showSaveMixDialog = false
+            },
+            onDismiss = { showSaveMixDialog = false },
         )
     }
 
@@ -295,6 +316,8 @@ fun NowPlayingScreen(
                     radioActive = radioLabel != null,
                     onStartRadio = viewModel::startRadioFromCurrent,
                     onStopRadio = viewModel::stopRadio,
+                    personalMixActive = personalMixActive,
+                    onSaveMix = { showSaveMixDialog = true },
                     accentColor = uiState.vibrantColor,
                 )
 
@@ -498,6 +521,8 @@ private fun TopBar(
     radioActive: Boolean,
     onStartRadio: () -> Unit,
     onStopRadio: () -> Unit,
+    personalMixActive: Boolean,
+    onSaveMix: () -> Unit,
     accentColor: Color,
 ) {
     Row(
@@ -525,6 +550,18 @@ private fun TopBar(
                     imageVector = Icons.Default.Radio,
                     contentDescription = if (radioActive) "Stop radio" else "Start radio",
                     tint = if (radioActive) accentColor else Color.White,
+                    modifier = Modifier.size(24.dp),
+                )
+            }
+        }
+
+        // Save the generated "Mix for you" as a playlist — only while one plays.
+        if (hasTrack && personalMixActive) {
+            IconButton(onClick = onSaveMix) {
+                Icon(
+                    imageVector = Icons.AutoMirrored.Filled.PlaylistAdd,
+                    contentDescription = "Save mix as playlist",
+                    tint = accentColor,
                     modifier = Modifier.size(24.dp),
                 )
             }

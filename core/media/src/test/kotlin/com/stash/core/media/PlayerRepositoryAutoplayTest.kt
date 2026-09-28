@@ -1,7 +1,10 @@
 package com.stash.core.media
 
 import android.os.Looper
+import androidx.media3.common.C
 import androidx.media3.common.MediaItem
+import androidx.media3.common.Player
+import androidx.media3.common.Timeline
 import androidx.media3.session.MediaController
 import androidx.test.core.app.ApplicationProvider
 import com.stash.core.data.autoplay.AutoplayEngine
@@ -15,6 +18,7 @@ import com.stash.core.data.repository.MusicRepository
 import com.stash.core.media.streaming.ConnectivityMonitor
 import com.stash.core.media.streaming.StreamSourceRegistry
 import com.stash.core.media.streaming.StreamUrlCache
+import com.google.common.truth.Truth.assertThat
 import com.stash.core.model.Track
 import io.mockk.coEvery
 import io.mockk.coVerify
@@ -67,6 +71,26 @@ class PlayerRepositoryAutoplayTest {
         coEvery { engine.isEnabled() } returns true
         coEvery { engine.start(any(), any()) } returns session
         coEvery { engine.nextBatch(session, any(), any(), any()) } returns listOf(track(10), track(11))
+        // No timeline by default → growers use the logical queue count.
+        every { controller.currentTimeline } returns Timeline.EMPTY
+    }
+
+    /**
+     * A 10-item timeline whose shuffle order is [shuffleOrder] (timeline
+     * indices in play order); linear order is 0..9.
+     */
+    private fun stubTimeline(shuffle: Boolean, current: Int, shuffleOrder: List<Int> = (0..9).toList()) {
+        val timeline = mockk<Timeline>()
+        every { timeline.isEmpty } returns false
+        every { timeline.getNextWindowIndex(any(), Player.REPEAT_MODE_OFF, any()) } answers {
+            val idx = firstArg<Int>()
+            val order = if (thirdArg<Boolean>()) shuffleOrder else (0..9).toList()
+            val pos = order.indexOf(idx)
+            if (pos < 0 || pos + 1 >= order.size) C.INDEX_UNSET else order[pos + 1]
+        }
+        every { controller.currentTimeline } returns timeline
+        every { controller.shuffleModeEnabled } returns shuffle
+        every { controller.currentMediaItemIndex } returns current
     }
 
     private fun track(id: Long) = Track(id = id, title = "t$id", artist = "a$id", youtubeId = "v$id", isStreamable = true)
@@ -113,5 +137,60 @@ class PlayerRepositoryAutoplayTest {
         repo.growAutoplay()
 
         coVerify(exactly = 0) { engine.nextBatch(any(), any(), any(), any()) }
+    }
+
+    @Test fun `shuffle - no autoplay while playlist songs are still unplayed`() = runTest {
+        repo.setQueue((1L..10L).map(::track))
+        idleMain()
+        // Playing timeline index 9 (last in LINEAR order) but only 3rd in shuffle order.
+        stubTimeline(shuffle = true, current = 9, shuffleOrder = listOf(4, 2, 9, 0, 1, 3, 5, 6, 7, 8))
+
+        repo.growAutoplay()
+
+        coVerify(exactly = 0) { engine.nextBatch(any(), any(), any(), any()) }
+    }
+
+    @Test fun `shuffle - autoplay starts on the last unplayed song`() = runTest {
+        repo.setQueue((1L..10L).map(::track))
+        idleMain()
+        stubTimeline(shuffle = true, current = 8, shuffleOrder = listOf(4, 2, 9, 0, 1, 3, 5, 6, 7, 8))
+
+        repo.growAutoplay()
+
+        coVerify { engine.nextBatch(session, any(), any(), any()) }
+    }
+
+    @Test fun `linear - autoplay starts with fewer than two songs left`() = runTest {
+        repo.setQueue((1L..10L).map(::track))
+        idleMain()
+        stubTimeline(shuffle = false, current = 7)
+        repo.growAutoplay()
+        coVerify(exactly = 0) { engine.nextBatch(any(), any(), any(), any()) }
+
+        stubTimeline(shuffle = false, current = 8)
+        repo.growAutoplay()
+        coVerify { engine.nextBatch(session, any(), any(), any()) }
+    }
+
+    @Test fun `startPersonalMix plays the generated mix and flags it`() = runTest {
+        coEvery { engine.buildMix(any(), any(), any(), any()) } returns listOf(track(21), track(22), track(23))
+
+        val started = repo.startPersonalMix()
+
+        assertThat(started).isTrue()
+        assertThat(repo.personalMixActive.value).isTrue()
+        verify { controller.setMediaItems(match<List<MediaItem>> { it.size == 3 }, 0, 0L) }
+
+        // Any other queue replaces the mix.
+        repo.setQueue(listOf(track(1)))
+        assertThat(repo.personalMixActive.value).isFalse()
+    }
+
+    @Test fun `startPersonalMix reports failure when nothing could be built`() = runTest {
+        coEvery { engine.buildMix(any(), any(), any(), any()) } returns emptyList()
+
+        assertThat(repo.startPersonalMix()).isFalse()
+        assertThat(repo.personalMixActive.value).isFalse()
+        verify(exactly = 0) { controller.setMediaItems(any<List<MediaItem>>(), any<Int>(), any<Long>()) }
     }
 }

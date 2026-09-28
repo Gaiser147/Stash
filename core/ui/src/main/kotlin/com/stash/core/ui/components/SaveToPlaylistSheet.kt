@@ -154,18 +154,21 @@ fun SaveToPlaylistSheet(
 }
 
 /**
- * Simple dialog for naming a new playlist.
+ * Simple dialog for naming a new playlist. [initialName] pre-fills the field
+ * (e.g. a suggested name when saving a generated mix).
  */
 @Composable
 fun CreatePlaylistDialog(
     onConfirm: (String) -> Unit,
     onDismiss: () -> Unit,
+    title: String = "Create Playlist",
+    initialName: String = "",
 ) {
-    var name by remember { mutableStateOf("") }
+    var name by remember { mutableStateOf(initialName) }
 
     AlertDialog(
         onDismissRequest = onDismiss,
-        title = { Text("Create Playlist") },
+        title = { Text(title) },
         text = {
             OutlinedTextField(
                 value = name,

@@ -349,6 +349,28 @@ class HomeViewModel @Inject constructor(
     /**
      * Begins playback of the given track list starting at [index].
      */
+    private val _buildingPersonalMix = kotlinx.coroutines.flow.MutableStateFlow(false)
+    /** True while "Mix for you" is being generated — the hero card shows a spinner. */
+    val buildingPersonalMix: kotlinx.coroutines.flow.StateFlow<Boolean> = _buildingPersonalMix
+
+    /**
+     * "Mix for you": generate a queue from recent listening and play it.
+     * Single-flight — repeated taps while building are ignored.
+     */
+    fun startPersonalMix() {
+        if (_buildingPersonalMix.value) return
+        _buildingPersonalMix.value = true
+        viewModelScope.launch {
+            try {
+                if (!playerRepository.startPersonalMix()) {
+                    _userMessages.tryEmit("Not enough music yet to build a mix")
+                }
+            } finally {
+                _buildingPersonalMix.value = false
+            }
+        }
+    }
+
     fun playTrack(tracks: List<Track>, index: Int) {
         viewModelScope.launch {
             playerRepository.setQueue(tracks, index)

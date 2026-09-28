@@ -21,6 +21,13 @@ lives in [`docs/MUSE_COMPANION_ANDROID.md`](docs/MUSE_COMPANION_ANDROID.md).
   within three songs, a familiar opener and never two discoveries in a row.
   The discovery share is a Thompson-sampled Beta bandit that learns from finished
   or skipped discoveries and is persisted on the device.
+- Growth is counted in the real (shuffle-aware) play order. With shuffle on,
+  autoplay and radio only append on the last unplayed song, so new songs are
+  never mixed in among the playlist's own.
+- **Mix for you**: a highlighted card at the top of Home ("AUTO", auto-generated
+  from your listening) builds a 25-song queue from recent listening with the same
+  engine and plays it; autoplay continues it. Now Playing can save the running
+  mix as a playlist, and new songs get streamable stub rows.
 - `MixGenerator`'s taste signals now live in the shared `mix/TrackSignals`
   (behaviour unchanged).
 - Navidrome streaming is only designed, not built: see

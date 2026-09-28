@@ -285,4 +285,20 @@ interface ListeningEventDao {
         windowMs: Long,
         limit: Int = 200,
     ): List<TrackPlayCount>
+
+    /**
+     * The songs heard most recently, newest first, one row per track. Songs
+     * that were played to the end sort before ones that were only started,
+     * so a burst of skips doesn't become the seed of a new mix. Seeds
+     * [com.stash.core.data.autoplay.AutoplayEngine.buildMix].
+     */
+    @Query(
+        """
+        SELECT track_id FROM listening_events
+        GROUP BY track_id
+        ORDER BY MAX(completed_at IS NOT NULL) DESC, MAX(started_at) DESC
+        LIMIT :limit
+        """
+    )
+    suspend fun getRecentlyHeardTrackIds(limit: Int): List<Long>
 }

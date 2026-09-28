@@ -82,4 +82,16 @@ class AutoplayQueriesTest {
         assertEquals(setOf(1L, 2L, 3L), db.trackDao().getAllPlayable(includeStreamable = false).map { it.id }.toSet())
         assertEquals(setOf(1L, 2L, 3L, 4L), db.trackDao().getAllPlayable(includeStreamable = true).map { it.id }.toSet())
     }
+
+    @Test fun `recently heard puts finished songs first, newest first, one row per track`() = runTest {
+        val dao = db.listeningEventDao()
+        dao.insert(ListeningEventEntity(trackId = 1, startedAt = 100, completedAt = 150))
+        dao.insert(ListeningEventEntity(trackId = 2, startedAt = 200, completedAt = 250))
+        dao.insert(ListeningEventEntity(trackId = 3, startedAt = 300)) // started, never finished
+        dao.insert(ListeningEventEntity(trackId = 1, startedAt = 400, completedAt = 450))
+
+        assertEquals(listOf(1L, 2L, 3L), dao.getRecentlyHeardTrackIds(limit = 10))
+        assertEquals(listOf(1L), dao.getRecentlyHeardTrackIds(limit = 1))
+    }
 }
+

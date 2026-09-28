@@ -149,4 +149,27 @@ class AutoplayEngineTest {
         assertEquals(ListenOutcome.PLAYED, AutoplayEngine.classify(25_000, 40_000))
         assertEquals(ListenOutcome.COMPLETED, AutoplayEngine.classify(160_000, 0))
     }
+
+    @Test fun `buildMix seeds from recent listening and leaves the seeds out`() = runTest {
+        coEvery { listeningEventDao.getRecentlyHeardTrackIds(any()) } returns listOf(3L, 1L)
+        coEvery { trackDao.getByIds(any()) } answers {
+            val ids = firstArg<List<Long>>().toSet()
+            libraryRows.filter { it.id in ids }
+        }
+
+        val mix = engine.buildMix(includeStreamable = true, allowDiscovery = false, size = 8, random = Random(11))
+
+        assertEquals(8, mix.size)
+        assertTrue(mix.none { it.id == 1L || it.id == 3L })
+        assertEquals(mix.size, mix.map { it.id }.toSet().size)
+    }
+
+    @Test fun `buildMix still works without any listening history`() = runTest {
+        coEvery { listeningEventDao.getRecentlyHeardTrackIds(any()) } returns emptyList()
+
+        val mix = engine.buildMix(includeStreamable = false, allowDiscovery = true, size = 6, random = Random(12))
+
+        assertEquals(6, mix.size)
+    }
 }
+

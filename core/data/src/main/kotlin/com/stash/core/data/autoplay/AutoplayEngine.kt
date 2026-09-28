@@ -72,6 +72,28 @@ class AutoplayEngine @Inject constructor(
     }
 
     /**
+     * "Mix für mich": a ready-to-play queue of [size] songs built from what
+     * the user heard most recently, with the same rules as autoplay
+     * (familiar opener, artist spread, learned share of new songs). The
+     * seeds themselves are not part of the mix. Without any listening
+     * history the library's cold-start filler still yields a (more random)
+     * mix; an empty list means there is nothing playable at all.
+     */
+    suspend fun buildMix(
+        includeStreamable: Boolean,
+        allowDiscovery: Boolean,
+        size: Int = MIX_SIZE,
+        random: Random = Random(System.nanoTime()),
+    ): List<Track> {
+        val ids = listeningEventDao.getRecentlyHeardTrackIds(MIX_SEEDS)
+        val byId = if (ids.isEmpty()) emptyMap() else trackDao.getByIds(ids).associateBy { it.id }
+        // Oldest first: the session treats the end of its start queue as "just heard".
+        val seeds = ids.mapNotNull { byId[it]?.toDomain() }.asReversed()
+        val session = start(seeds, random)
+        return nextBatch(session, includeStreamable, allowDiscovery, size)
+    }
+
+    /**
      * The next [size] songs to append.
      *
      * @param includeStreamable library stream-only rows are playable now.
@@ -282,6 +304,10 @@ class AutoplayEngine @Inject constructor(
 
         /** Songs appended per grow. Small, so the next batch re-reads fresh feedback. */
         const val BATCH_SIZE = 4
+
+        /** Length of a "Mix für mich" and how many recent songs seed it. */
+        const val MIX_SIZE = 25
+        private const val MIX_SEEDS = 8
         private const val OVER_PROVISION = 3
 
         const val SEED_WINDOW = 5

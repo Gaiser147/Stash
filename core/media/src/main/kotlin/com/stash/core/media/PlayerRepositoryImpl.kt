@@ -5,6 +5,7 @@ import android.content.Context
 import android.net.Uri
 import android.os.Bundle
 import android.util.Log
+import androidx.media3.common.C
 import androidx.media3.common.MediaItem
 import androidx.media3.common.MediaMetadata
 import androidx.media3.common.PlaybackException
@@ -196,8 +197,7 @@ class PlayerRepositoryImpl @Inject constructor(
         scope.launch {
             playerState.collect { state ->
                 if (!radioActive) return@collect
-                val remaining = state.queue.size - state.currentIndex - 1
-                if (remaining in 0 until RADIO_GROW_THRESHOLD) growRadio()
+                if (nearTailInPlayOrder(state, RADIO_GROW_THRESHOLD)) growRadio()
             }
         }
 
@@ -209,8 +209,7 @@ class PlayerRepositoryImpl @Inject constructor(
             playerState.collect { state ->
                 if (autoplaySession == null || radioActive || libraryShuffleActive) return@collect
                 if (state.currentTrack == null || state.repeatMode != RepeatMode.OFF) return@collect
-                val remaining = state.queue.size - state.currentIndex - 1
-                if (remaining in 0 until AUTOPLAY_GROW_THRESHOLD && autoplayGrowJob?.isActive != true) {
+                if (nearTailInPlayOrder(state, AUTOPLAY_GROW_THRESHOLD) && autoplayGrowJob?.isActive != true) {
                     autoplayGrowJob = scope.launch { growAutoplay() }
                 }
             }
@@ -338,6 +337,13 @@ class PlayerRepositoryImpl @Inject constructor(
 
     @Volatile
     private var autoplayGrowJob: Job? = null
+
+    private val _personalMixActive = MutableStateFlow(false)
+    override val personalMixActive: StateFlow<Boolean> = _personalMixActive.asStateFlow()
+
+    /** Set only around [startPersonalMix]'s own setQueueInternal so that call doesn't clear the flag. */
+    @Volatile
+    private var startingPersonalMix = false
 
     /** Bumped on every arm/disarm so a slow [armAutoplay] can't resurrect a stale session. */
     @Volatile
@@ -818,6 +824,37 @@ class PlayerRepositoryImpl @Inject constructor(
     }
 
     /**
+     * True when fewer than [threshold] songs are left in the REAL play order.
+     *
+     * [PlayerState.currentIndex] is the position in the logical (unshuffled)
+     * queue, so with shuffle on it says nothing about what's left: the
+     * current song can be the second-to-last of the original order while
+     * most of the playlist is still unplayed. This walks the controller
+     * timeline in shuffle-aware order instead. Under shuffle the growers wait
+     * for the LAST unplayed song (threshold 1), because Media3 inserts
+     * appended items at random positions of the remaining shuffle order;
+     * waiting keeps new songs from being mixed in among the user's own.
+     * Falls back to the logical count when no timeline is available.
+     */
+    private fun nearTailInPlayOrder(state: PlayerState, threshold: Int): Boolean {
+        val controller = controllerDeferred
+        val timeline = controller?.currentTimeline
+        if (controller == null || timeline == null || timeline.isEmpty) {
+            return state.queue.size - state.currentIndex - 1 < threshold
+        }
+        val shuffle = controller.shuffleModeEnabled
+        val limit = if (shuffle) 1 else threshold
+        var idx = controller.currentMediaItemIndex
+        var upcoming = 0
+        while (upcoming < limit) {
+            idx = timeline.getNextWindowIndex(idx, Player.REPEAT_MODE_OFF, shuffle)
+            if (idx == C.INDEX_UNSET) break
+            upcoming++
+        }
+        return upcoming < limit
+    }
+
+    /**
      * Arms autoplay for a queue the user just started. Replaces any previous
      * session (a new queue is a new listening context). No-op without an
      * engine; the enabled toggle is checked at grow time so flipping it takes
@@ -841,8 +878,38 @@ class PlayerRepositoryImpl @Inject constructor(
     /** Ends any autoplay session and invalidates in-flight arms. Returns the new generation. */
     private fun disarmAutoplay(): Int {
         autoplaySession = null
+        // Any other queue, station or shuffle replaces a generated mix.
+        if (!startingPersonalMix) _personalMixActive.value = false
         return ++autoplayGeneration
     }
+
+    override suspend fun startPersonalMix(): Boolean {
+        val engine = autoplayEngine ?: return false
+        ensureController() ?: return false
+        val canStream = canStreamNow()
+        val mix = runCatching {
+            withContext(Dispatchers.Default) {
+                engine.buildMix(includeStreamable = canStream, allowDiscovery = canStream)
+            }
+        }.onFailure { Log.w(TAG, "personal mix failed", it) }.getOrDefault(emptyList())
+        if (mix.isEmpty()) return false
+        startingPersonalMix = true
+        try {
+            // Arms autoplay with the mix as its start queue, so it continues seamlessly.
+            setQueueInternal(mix, startIndex = 0, startPositionMs = 0L)
+        } finally {
+            startingPersonalMix = false
+        }
+        // Only claim the mix is playing if setQueue actually installed it.
+        val mixIds = mix.mapTo(HashSet()) { it.id }
+        _personalMixActive.value = currentQueueTracks.isNotEmpty() && currentQueueTracks.all { it.id in mixIds }
+        return _personalMixActive.value
+    }
+
+    /** Streaming allowed right now: online mode, connected, and cellular permitted if on cellular. */
+    private suspend fun canStreamNow(): Boolean =
+        streamingPreference.current() && connectivity.isConnected() &&
+            (!connectivity.isCellular() || streamingPreference.streamOnCellular.first())
 
     /**
      * Append the next autoplay batch. Single-flight via [autoplayGrowMutex];
@@ -858,10 +925,9 @@ class PlayerRepositoryImpl @Inject constructor(
             if (!engine.isEnabled()) return
             val controller = controllerDeferred ?: return
             val state = _playerState.value
-            if (state.queue.size - state.currentIndex - 1 >= AUTOPLAY_GROW_THRESHOLD) return
+            if (!nearTailInPlayOrder(state, AUTOPLAY_GROW_THRESHOLD)) return
 
-            val canStream = streamingPreference.current() && connectivity.isConnected() &&
-                (!connectivity.isCellular() || streamingPreference.streamOnCellular.first())
+            val canStream = canStreamNow()
             val batch = runCatching {
                 withContext(Dispatchers.Default) {
                     engine.nextBatch(session, includeStreamable = canStream, allowDiscovery = canStream)
