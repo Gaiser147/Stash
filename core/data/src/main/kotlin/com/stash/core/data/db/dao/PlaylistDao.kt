@@ -558,4 +558,42 @@ interface PlaylistDao {
         """
     )
     suspend fun getStreamableOrDoneTrackIdsForRecipe(recipeId: Long): List<Long>
+
+    /**
+     * Tracks that share a hand-curated playlist with any of [trackIds],
+     * counted by number of shared playlists. Liked Songs and Stash's own
+     * generated mixes are excluded (a library-wide bucket and our own
+     * output say nothing about which songs belong together), as are
+     * playlists larger than [maxPlaylistSize] for the same reason.
+     */
+    @Query(
+        """
+        SELECT pt2.track_id AS trackId, COUNT(DISTINCT pt2.playlist_id) AS shared
+        FROM playlist_tracks pt1
+        INNER JOIN playlist_tracks pt2
+            ON pt2.playlist_id = pt1.playlist_id
+           AND pt2.track_id != pt1.track_id
+           AND pt2.removed_at IS NULL
+        INNER JOIN playlists p ON p.id = pt1.playlist_id
+        WHERE pt1.track_id IN (:trackIds)
+          AND pt1.removed_at IS NULL
+          AND p.type NOT IN ('LIKED_SONGS', 'STASH_MIX')
+          AND p.id IN (
+              SELECT playlist_id FROM playlist_tracks
+              WHERE removed_at IS NULL
+              GROUP BY playlist_id
+              HAVING COUNT(*) <= :maxPlaylistSize
+          )
+        GROUP BY pt2.track_id
+        ORDER BY shared DESC
+        LIMIT :limit
+        """
+    )
+    suspend fun getCoPlaylistTracks(
+        trackIds: List<Long>,
+        maxPlaylistSize: Int = 300,
+        limit: Int = 200,
+    ): List<CoPlaylistCount>
+
+    data class CoPlaylistCount(val trackId: Long, val shared: Int)
 }

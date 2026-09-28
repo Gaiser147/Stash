@@ -116,6 +116,7 @@ class SettingsViewModel @Inject constructor(
     private val crashFileStore: CrashFileStore,
     private val streamingPreference: com.stash.core.data.prefs.StreamingPreference,
     private val crossfadePreference: com.stash.core.data.prefs.CrossfadePreference,
+    private val autoplayPreference: com.stash.core.data.prefs.AutoplayPreference,
     private val databaseBackupManager: DatabaseBackupManager,
     private val navidromeExportPreferences: NavidromeExportPreferences,
     private val navidromeExportScheduler: NavidromeExportScheduler,
@@ -227,6 +228,20 @@ class SettingsViewModel @Inject constructor(
     /** Persist the force-arcod-only test toggle flip. */
     fun setForceArcodOnly(v: Boolean) = viewModelScope.launch {
         streamingPreference.setForceArcodOnly(v)
+    }
+
+    /** Autoplay on/off — continue finished queues with similar songs. On by default. */
+    val autoplayEnabled: kotlinx.coroutines.flow.StateFlow<Boolean> =
+        autoplayPreference.enabled.stateIn(
+            scope = viewModelScope,
+            started = kotlinx.coroutines.flow.SharingStarted.WhileSubscribed(5_000),
+            initialValue = true,
+        )
+
+    /** Persist the autoplay on/off flip. */
+    fun onAutoplayToggle(enabled: Boolean) {
+        if (enabled == autoplayEnabled.value) return
+        viewModelScope.launch { autoplayPreference.setEnabled(enabled) }
     }
 
     /** Crossfade on/off — drives the Playback section toggle. Off by default. */

@@ -72,6 +72,7 @@ class SettingsViewModelTest {
         crashFileStore = mockk(relaxed = true),
         streamingPreference = mockk(relaxed = true),
         crossfadePreference = mockk(relaxed = true),
+        autoplayPreference = mockk(relaxed = true),
         databaseBackupManager = mockk(relaxed = true),
         navidromeExportPreferences = mockk(relaxed = true),
         navidromeExportScheduler = mockk(relaxed = true),

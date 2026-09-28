@@ -7,6 +7,25 @@ contract and operational detail for Muse acquisition live in
 [`docs/MUSE_ACQUISITION.md`](docs/MUSE_ACQUISITION.md). Android Companion detail
 lives in [`docs/MUSE_COMPANION_ANDROID.md`](docs/MUSE_COMPANION_ANDROID.md).
 
+## Autoplay (Spotify-style queue continuation): implemented
+
+- When a playlist, album, single song or search tap nears its end, the
+  `AutoplayEngine` (`core/data/.../autoplay/`) appends songs in batches of four.
+  Settings → Playback → Autoplay (default on).
+- Per batch: a recency-weighted session context (completions pull it closer,
+  early skips push it away), library candidates from listening transitions,
+  shared hand-made playlists, the Last.fm artist neighbourhood and session tags,
+  and online-only discoveries from Last.fm similar tracks and neighbour artists,
+  filtered against the library, the blocklist and repeatedly skipped songs.
+- Ranking: a weighted score with softmax (Gumbel) sampling, no artist repeat
+  within three songs, a familiar opener and never two discoveries in a row.
+  The discovery share is a Thompson-sampled Beta bandit that learns from finished
+  or skipped discoveries and is persisted on the device.
+- `MixGenerator`'s taste signals now live in the shared `mix/TrackSignals`
+  (behaviour unchanged).
+- Navidrome streaming is only designed, not built: see
+  [`docs/NAVIDROME_STREAMING.md`](docs/NAVIDROME_STREAMING.md).
+
 ## Muse Companion Android foundation: implemented, production-gated
 
 - The five-item bottom navigation now has a real top-level **Muse** destination;

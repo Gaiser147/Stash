@@ -255,4 +255,34 @@ interface ListeningEventDao {
         """
     )
     suspend fun getTopTracksByLocalPlays(sinceEpochMs: Long, limit: Int): List<TrackArtistTitle>
+
+    /**
+     * "After A you often play B": for every listen of a track in [trackIds]
+     * since [sinceMs], counts the OTHER tracks that started within
+     * [windowMs] afterwards. This is the personal, sequence-aware
+     * collaborative-filtering signal for
+     * [com.stash.core.data.autoplay.LibraryCandidateSource] — it captures
+     * listening habits (album runs, go-to follow-ups) that tags and
+     * artist similarity can't see.
+     */
+    @Query(
+        """
+        SELECT e2.track_id AS trackId, COUNT(*) AS plays
+        FROM listening_events e1
+        INNER JOIN listening_events e2
+            ON e2.started_at > e1.started_at
+           AND e2.started_at <= e1.started_at + :windowMs
+           AND e2.track_id != e1.track_id
+        WHERE e1.track_id IN (:trackIds) AND e1.started_at >= :sinceMs
+        GROUP BY e2.track_id
+        ORDER BY plays DESC
+        LIMIT :limit
+        """
+    )
+    suspend fun getTransitionsFrom(
+        trackIds: List<Long>,
+        sinceMs: Long,
+        windowMs: Long,
+        limit: Int = 200,
+    ): List<TrackPlayCount>
 }

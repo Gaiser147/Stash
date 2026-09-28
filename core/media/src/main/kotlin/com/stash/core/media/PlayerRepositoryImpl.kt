@@ -91,6 +91,9 @@ class PlayerRepositoryImpl @Inject constructor(
     private val trackDao: TrackDao,
     private val playbackResumer: PlaybackResumer,
     private val radioGenerator: com.stash.core.data.radio.RadioStationGenerator,
+    // Nullable with a default so existing tests that build the repository by
+    // hand keep compiling; Hilt always supplies the real engine.
+    private val autoplayEngine: com.stash.core.data.autoplay.AutoplayEngine? = null,
 ) : PlayerRepository {
 
     /**
@@ -198,6 +201,55 @@ class PlayerRepositoryImpl @Inject constructor(
             }
         }
 
+        // Autoplay grow watcher: when a normal queue is about to run out,
+        // append songs chosen by the AutoplayEngine. Launched (not awaited)
+        // so candidate generation never stalls state collection; the job
+        // handle keeps it single-flight.
+        scope.launch {
+            playerState.collect { state ->
+                if (autoplaySession == null || radioActive || libraryShuffleActive) return@collect
+                if (state.currentTrack == null || state.repeatMode != RepeatMode.OFF) return@collect
+                val remaining = state.queue.size - state.currentIndex - 1
+                if (remaining in 0 until AUTOPLAY_GROW_THRESHOLD && autoplayGrowJob?.isActive != true) {
+                    autoplayGrowJob = scope.launch { growAutoplay() }
+                }
+            }
+        }
+
+        // Autoplay feedback: report how far each song got (skip vs. finish)
+        // to the armed session so the next batch adapts. Only songs that
+        // started under the current session are reported.
+        scope.launch {
+            var heard: Track? = null
+            var heardSession: com.stash.core.data.autoplay.AutoplaySession? = null
+            var heardPos = 0L
+            var heardDur = 0L
+            currentPosition.collect { pos ->
+                val state = _playerState.value
+                val cur = state.currentTrack
+                if (cur?.id != heard?.id) {
+                    val prev = heard
+                    val prevSession = heardSession
+                    if (prev != null && prevSession != null && prevSession === autoplaySession) {
+                        val listened = heardPos
+                        val duration = heardDur
+                        scope.launch(Dispatchers.Default) {
+                            runCatching { autoplayEngine?.recordOutcome(prevSession, prev, listened, duration) }
+                                .onFailure { Log.w(TAG, "autoplay feedback failed", it) }
+                        }
+                    }
+                    heard = cur
+                    heardSession = autoplaySession
+                    heardPos = 0L
+                    heardDur = 0L
+                }
+                if (cur != null) {
+                    heardPos = maxOf(heardPos, pos)
+                    heardDur = if (state.durationMs > 0) state.durationMs else cur.durationMs
+                }
+            }
+        }
+
         // Next-track prefetch watcher. Whenever the player advances (currentIndex
         // changes), eagerly resolve currentQueueTracks[currentIndex+1] so its URL
         // is cached + the controller's MediaItem URI is refreshed BEFORE ExoPlayer
@@ -272,6 +324,24 @@ class PlayerRepositoryImpl @Inject constructor(
     override val radioSeedLabel: StateFlow<String?> = _radioSeedLabel.asStateFlow()
 
     private val radioGrowMutex = Mutex()
+
+    /**
+     * Autoplay state. A session is armed whenever the user starts a normal
+     * queue (playlist, album, single song) and continues it with similar
+     * songs once it nears its end. Mutually exclusive with radio and library
+     * shuffle, which have their own growers. Null = autoplay not armed.
+     */
+    @Volatile
+    private var autoplaySession: com.stash.core.data.autoplay.AutoplaySession? = null
+
+    private val autoplayGrowMutex = Mutex()
+
+    @Volatile
+    private var autoplayGrowJob: Job? = null
+
+    /** Bumped on every arm/disarm so a slow [armAutoplay] can't resurrect a stale session. */
+    @Volatile
+    private var autoplayGeneration: Int = 0
 
     /**
      * The LOGICAL playback queue — the user-intended track order. Since the
@@ -409,6 +479,8 @@ class PlayerRepositoryImpl @Inject constructor(
         radioActive = false
         radioSession = null
         _radioSeedLabel.value = null
+        // Re-armed for the new queue at the end of this function.
+        disarmAutoplay()
 
         val controller = ensureController() ?: return
         if (tracks.isEmpty()) return
@@ -442,6 +514,8 @@ class PlayerRepositoryImpl @Inject constructor(
         controller.play()
 
         Log.i(TAG, "setQueue: full timeline, ${items.size} items, start=$startInPlayable")
+
+        armAutoplay(playable)
 
         // Warm the next-up URL so auto-advance never waits on a cold resolve
         // (the placeholder path is the cold-jump fallback, not the happy path).
@@ -632,6 +706,7 @@ class PlayerRepositoryImpl @Inject constructor(
         radioActive = false
         radioSession = null
         _radioSeedLabel.value = null
+        disarmAutoplay()
         // Keep the logical queue in lockstep: all-downloaded tracks resolve
         // 1:1 into the timeline, but a stale logical list from an earlier
         // setQueue would otherwise hijack the queue display whenever the
@@ -659,6 +734,7 @@ class PlayerRepositoryImpl @Inject constructor(
         if (firstBatch.isEmpty()) return false
         radioSession = session
         radioActive = true
+        disarmAutoplay()
         // Only ONE grower may run: startRadio bypasses setQueueInternal (which is
         // what normally disarms library shuffle), so disarm it here explicitly —
         // otherwise both watchers append as the queue drains and library tracks
@@ -736,6 +812,63 @@ class PlayerRepositoryImpl @Inject constructor(
             val batch = radioGenerator.nextBatch(session)
             if (batch.isEmpty()) return
             // Streaming tracks → stash-resolve:// placeholders (see startRadio).
+            controller.addMediaItems(batch.map { it.toQueueMediaItem() })
+            currentQueueTracks = currentQueueTracks + batch
+        }
+    }
+
+    /**
+     * Arms autoplay for a queue the user just started. Replaces any previous
+     * session (a new queue is a new listening context). No-op without an
+     * engine; the enabled toggle is checked at grow time so flipping it takes
+     * effect on the current queue too.
+     */
+    private fun armAutoplay(queue: List<Track>) {
+        val engine = autoplayEngine ?: return
+        val generation = disarmAutoplay()
+        if (queue.isEmpty()) return
+        scope.launch {
+            val session = runCatching { engine.start(queue) }
+                .onFailure { Log.w(TAG, "autoplay arm failed", it) }
+                .getOrNull() ?: return@launch
+            // Another queue, a station or a library shuffle may have started meanwhile.
+            if (generation == autoplayGeneration && !radioActive && !libraryShuffleActive) {
+                autoplaySession = session
+            }
+        }
+    }
+
+    /** Ends any autoplay session and invalidates in-flight arms. Returns the new generation. */
+    private fun disarmAutoplay(): Int {
+        autoplaySession = null
+        return ++autoplayGeneration
+    }
+
+    /**
+     * Append the next autoplay batch. Single-flight via [autoplayGrowMutex];
+     * re-checks the tail under the lock so a burst of state emissions can't
+     * over-append. Discoveries (songs not in the library) are only requested
+     * when streaming is allowed on the current network. Internal as a test seam.
+     */
+    internal suspend fun growAutoplay() {
+        autoplayGrowMutex.withLock {
+            val engine = autoplayEngine ?: return
+            val session = autoplaySession ?: return
+            if (radioActive || libraryShuffleActive) return
+            if (!engine.isEnabled()) return
+            val controller = controllerDeferred ?: return
+            val state = _playerState.value
+            if (state.queue.size - state.currentIndex - 1 >= AUTOPLAY_GROW_THRESHOLD) return
+
+            val canStream = streamingPreference.current() && connectivity.isConnected() &&
+                (!connectivity.isCellular() || streamingPreference.streamOnCellular.first())
+            val batch = runCatching {
+                withContext(Dispatchers.Default) {
+                    engine.nextBatch(session, includeStreamable = canStream, allowDiscovery = canStream)
+                }
+            }.onFailure { Log.w(TAG, "autoplay batch failed", it) }.getOrDefault(emptyList())
+            // The user may have started something else while we were ranking.
+            if (batch.isEmpty() || autoplaySession !== session) return
             controller.addMediaItems(batch.map { it.toQueueMediaItem() })
             currentQueueTracks = currentQueueTracks + batch
         }
@@ -999,6 +1132,7 @@ class PlayerRepositoryImpl @Inject constructor(
             // queue display whenever this track happens to be in it.
             currentQueueTracks = listOf(track)
             playSingleMediaItem(result.mediaItem)
+            armAutoplay(listOf(track))
         }
         return result
     }
@@ -1075,6 +1209,8 @@ class PlayerRepositoryImpl @Inject constructor(
             // queue display falls back to the (one-item) timeline.
             currentQueueTracks = emptyList()
             playSingleMediaItem(result.mediaItem)
+            // Like a single-song tap: keep going with similar songs afterwards.
+            armAutoplay(listOf(transient.toDomain()))
         }
         return result
     }
@@ -1697,6 +1833,9 @@ class PlayerRepositoryImpl @Inject constructor(
         /** Auto-grow fires once the remaining queue tail drops below this many tracks. */
         private const val RADIO_GROW_THRESHOLD = 5
         private const val LIBRARY_SHUFFLE_GROW_THRESHOLD = 5
+
+        /** Autoplay appends once fewer than this many songs are left after the current one. */
+        private const val AUTOPLAY_GROW_THRESHOLD = 2
 
         /** How many tracks each grow appends. Big enough to outpace a fast-skipping user. */
         private const val LIBRARY_SHUFFLE_GROW_BATCH = 50

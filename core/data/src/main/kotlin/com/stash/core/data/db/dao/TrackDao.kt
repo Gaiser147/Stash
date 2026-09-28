@@ -1901,4 +1901,12 @@ interface TrackDao {
         """
     )
     suspend fun countOtherPlaylistsClaimingTrack(trackId: Long, excludePlaylistId: Long): Int
+
+    /**
+     * Every track Stash can play right now: downloaded, plus stream-only
+     * rows when [includeStreamable] (online mode). The autoplay engine's
+     * library candidate pool.
+     */
+    @Query("SELECT * FROM tracks WHERE is_downloaded = 1 OR (:includeStreamable AND is_streamable = 1)")
+    suspend fun getAllPlayable(includeStreamable: Boolean): List<TrackEntity>
 }
