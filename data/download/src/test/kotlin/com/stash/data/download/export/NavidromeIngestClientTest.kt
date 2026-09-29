@@ -100,6 +100,17 @@ class NavidromeIngestClientTest {
     }
 
     @Test
+    fun `a dead cover link is skipped instead of retried`() = runTest {
+        // The art CDN answers 404; nothing may be sent to the ingest server.
+        server.enqueue(MockResponse().setResponseCode(404))
+
+        assertThat(client.uploadCover(server.url("/cdn/art.jpg").toString(), "artist/album/cover.jpg"))
+            .isEqualTo(NavidromeUploadOutcome.SkippedNoSource)
+        assertThat(requireNotNull(server.takeRequest(3, TimeUnit.SECONDS)).path).isEqualTo("/cdn/art.jpg")
+        assertThat(server.requestCount).isEqualTo(1)
+    }
+
+    @Test
     fun `playlist upload hashes body and classifies server responses`() = runTest {
         val playlist = "#EXTM3U\nStash/artist/album/track.flac\n".toByteArray()
         server.enqueue(MockResponse().setResponseCode(503))

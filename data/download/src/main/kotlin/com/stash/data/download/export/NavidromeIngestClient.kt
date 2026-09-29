@@ -112,16 +112,18 @@ class NavidromeIngestClient @Inject constructor(
         withContext(Dispatchers.IO) {
             val endpoint = endpointAndToken() ?: return@withContext NavidromeUploadOutcome.Success
             if (artPathOrUrl.isNullOrBlank()) return@withContext NavidromeUploadOutcome.SkippedNoSource
+            // An unreadable or dead cover link (expired CDN URL, 404) won't heal
+            // by retrying, and the audio is what matters: skip, don't retry.
             val uploadFile = materializeArtwork(artPathOrUrl).getOrElse {
                 Log.w(TAG, "Could not materialize Navidrome cover source")
-                return@withContext NavidromeUploadOutcome.RetryableFailure
+                return@withContext NavidromeUploadOutcome.SkippedNoSource
             }
             val deleteWhenDone = uploadFile.parentFile == context.cacheDir &&
                 uploadFile.name.startsWith("navidrome_art_")
 
             try {
                 if (!uploadFile.exists() || uploadFile.length() <= 0) {
-                    return@withContext NavidromeUploadOutcome.RetryableFailure
+                    return@withContext NavidromeUploadOutcome.SkippedNoSource
                 }
                 val request = Request.Builder()
                     .url("${endpoint.baseUrl}/v1/covers/${encodePath(relativePath)}")

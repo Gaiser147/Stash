@@ -74,14 +74,15 @@ class NavidromeExportPreferencesTest {
         // this test because the DataStore singleton is bound to the first
         // test's Robolectric files dir, which the file check above reads.
         preferences.clearFullExportProgress()
-        assertThat(preferences.fullExportResumeAfter("https://a.example.test")).isEqualTo(Long.MIN_VALUE)
+        assertThat(preferences.fullExportProgress("https://a.example.test")).isEqualTo(NavidromeFullExportProgress())
 
-        preferences.saveFullExportProgress("https://a.example.test", 42L)
-        assertThat(preferences.fullExportResumeAfter("https://a.example.test")).isEqualTo(42L)
+        val progress = NavidromeFullExportProgress(afterTrackId = 42L, retryTrackIds = setOf(7L, 9L))
+        preferences.saveFullExportProgress("https://a.example.test", progress)
+        assertThat(preferences.fullExportProgress("https://a.example.test")).isEqualTo(progress)
         // Another server starts from the top.
-        assertThat(preferences.fullExportResumeAfter("https://b.example.test")).isEqualTo(Long.MIN_VALUE)
+        assertThat(preferences.fullExportProgress("https://b.example.test")).isEqualTo(NavidromeFullExportProgress())
 
         preferences.clearFullExportProgress()
-        assertThat(preferences.fullExportResumeAfter("https://a.example.test")).isEqualTo(Long.MIN_VALUE)
+        assertThat(preferences.fullExportProgress("https://a.example.test")).isEqualTo(NavidromeFullExportProgress())
     }
 }
