@@ -220,7 +220,11 @@ class PlayerRepositoryImpl @Inject constructor(
         // started under the current session are reported.
         scope.launch {
             var heard: Track? = null
-            var heardSession: com.stash.core.data.autoplay.AutoplaySession? = null
+            // The generation, not the session object: armAutoplay bumps the
+            // generation synchronously but assigns the session only after an
+            // async engine.start(), so capturing the session would miss the
+            // first song of every queue (often the only seed of a single tap).
+            var heardGeneration = -1
             var heardPos = 0L
             var heardDur = 0L
             currentPosition.collect { pos ->
@@ -228,17 +232,17 @@ class PlayerRepositoryImpl @Inject constructor(
                 val cur = state.currentTrack
                 if (cur?.id != heard?.id) {
                     val prev = heard
-                    val prevSession = heardSession
-                    if (prev != null && prevSession != null && prevSession === autoplaySession) {
+                    val prevSession = autoplaySession
+                    if (prev != null && prevSession != null && heardGeneration == autoplayGeneration) {
                         val listened = heardPos
                         val duration = heardDur
-                        scope.launch(Dispatchers.Default) {
+                        scope.launch(autoplaySessionDispatcher) {
                             runCatching { autoplayEngine?.recordOutcome(prevSession, prev, listened, duration) }
                                 .onFailure { Log.w(TAG, "autoplay feedback failed", it) }
                         }
                     }
                     heard = cur
-                    heardSession = autoplaySession
+                    heardGeneration = autoplayGeneration
                     heardPos = 0L
                     heardDur = 0L
                 }
@@ -344,6 +348,14 @@ class PlayerRepositoryImpl @Inject constructor(
     /** Set only around [startPersonalMix]'s own setQueueInternal so that call doesn't clear the flag. */
     @Volatile
     private var startingPersonalMix = false
+
+    /**
+     * Every read and write of an AutoplaySession (feedback, batch building,
+     * mix building) runs here, one at a time: the session's collections are
+     * plain, and a batch must see the skip that happened just before it.
+     */
+    @OptIn(kotlinx.coroutines.ExperimentalCoroutinesApi::class)
+    private val autoplaySessionDispatcher = Dispatchers.Default.limitedParallelism(1)
 
     /** Bumped on every arm/disarm so a slow [armAutoplay] can't resurrect a stale session. */
     @Volatile
@@ -888,7 +900,7 @@ class PlayerRepositoryImpl @Inject constructor(
         ensureController() ?: return false
         val canStream = canStreamNow()
         val mix = runCatching {
-            withContext(Dispatchers.Default) {
+            withContext(autoplaySessionDispatcher) {
                 engine.buildMix(includeStreamable = canStream, allowDiscovery = canStream)
             }
         }.onFailure { Log.w(TAG, "personal mix failed", it) }.getOrDefault(emptyList())
@@ -929,7 +941,7 @@ class PlayerRepositoryImpl @Inject constructor(
 
             val canStream = canStreamNow()
             val batch = runCatching {
-                withContext(Dispatchers.Default) {
+                withContext(autoplaySessionDispatcher) {
                     engine.nextBatch(session, includeStreamable = canStream, allowDiscovery = canStream)
                 }
             }.onFailure { Log.w(TAG, "autoplay batch failed", it) }.getOrDefault(emptyList())

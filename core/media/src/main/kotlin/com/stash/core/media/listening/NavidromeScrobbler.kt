@@ -73,7 +73,8 @@ class NavidromeScrobbler internal constructor(
     /** trackId → server song id; a cached miss expires so a later upload is picked up. */
     private val matches = ConcurrentHashMap<Long, Match>()
 
-    private data class Match(val songId: String?, val at: Long)
+    /** [account] scopes the cached id to one server + user; song ids differ between servers. */
+    private data class Match(val songId: String?, val at: Long, val account: String)
 
     /** Must be called once from Application.onCreate. */
     fun start() {
@@ -112,31 +113,51 @@ class NavidromeScrobbler internal constructor(
             runCatching { listeningEventDao.markAllNavidromeScrobbled() }
             return@withLock
         }
-        val pending = runCatching { listeningEventDao.pendingNavidromeScrobbles(BATCH) }.getOrElse { return@withLock }
-        for (event in pending) {
-            val track = trackDao.getById(event.trackId)
-            if (track == null) {
-                listeningEventDao.markNavidromeScrobbled(event.id)
-                continue
-            }
-            val outcome = runCatching {
-                val songId = songIdFor(config, track.id, track.artist, track.title, track.isrc, track.durationMs)
-                if (songId == null) {
-                    // Not on the server (yet). Keep it for a later upload, within limits.
-                    if (clock() - event.startedAt > GIVE_UP_AFTER_MS) listeningEventDao.markNavidromeScrobbled(event.id)
-                    return@runCatching
+        // Keyset paging: plays that must keep waiting (song not on the server
+        // yet) are stepped over, so they can't starve newer plays behind them.
+        var afterStartedAt = Long.MIN_VALUE
+        var afterId = Long.MIN_VALUE
+        while (true) {
+            val pending = runCatching {
+                listeningEventDao.pendingNavidromeScrobblesAfter(afterStartedAt, afterId, BATCH)
+            }.getOrElse { return@withLock }
+            if (pending.isEmpty()) return@withLock
+            for (event in pending) {
+                afterStartedAt = event.startedAt
+                afterId = event.id
+                val track = trackDao.getById(event.trackId)
+                if (track == null) {
+                    listeningEventDao.markNavidromeScrobbled(event.id)
+                    continue
                 }
-                client.scrobble(config, songId, event.startedAt, submission = true)
-                listeningEventDao.markNavidromeScrobbled(event.id)
-            }
-            val error = outcome.exceptionOrNull() ?: continue
-            // Wrong credentials or server unreachable: every further row would fail the same way.
-            if (error is SubsonicException && error.isPermanent) {
-                Log.w(TAG, "Navidrome rejected the account (code ${error.code}); reporting paused")
-            } else {
+                val outcome = runCatching {
+                    val songId = songIdFor(config, track.id, track.artist, track.title, track.isrc, track.durationMs)
+                    if (songId == null) {
+                        // Not on the server (yet). Keep it for a later upload, within limits.
+                        if (clock() - event.startedAt > GIVE_UP_AFTER_MS) listeningEventDao.markNavidromeScrobbled(event.id)
+                        return@runCatching
+                    }
+                    client.scrobble(config, songId, event.startedAt, submission = true)
+                    listeningEventDao.markNavidromeScrobbled(event.id)
+                }
+                val error = outcome.exceptionOrNull() ?: continue
+                if (error is SubsonicException && error.isPermanent) {
+                    // Wrong credentials: every further row would fail the same way.
+                    Log.w(TAG, "Navidrome rejected the account (code ${error.code}); reporting paused")
+                    return@withLock
+                }
+                if (error is SubsonicException) {
+                    // The server answered but refused this song (e.g. 70, id not found
+                    // after a rescan). Forget the cached id and move on; the next drain
+                    // looks the song up again.
+                    matches.remove(track.id)
+                    Log.d(TAG, "Navidrome refused song for track ${track.id}: ${error.message}")
+                    continue
+                }
+                // Network failure: the rest would fail too; retry on the next drain.
                 Log.d(TAG, "Navidrome unreachable, will retry: ${error.message}")
+                return@withLock
             }
-            return@withLock
         }
     }
 
@@ -149,11 +170,14 @@ class NavidromeScrobbler internal constructor(
         durationMs: Long,
     ): String? {
         val now = clock()
+        val account = config.serverUrl + "|" + config.username
         matches[trackId]?.let { cached ->
-            if (cached.songId != null || now - cached.at < MISS_TTL_MS) return cached.songId
+            if (cached.account == account && (cached.songId != null || now - cached.at < MISS_TTL_MS)) {
+                return cached.songId
+            }
         }
         val songId = client.findSong(config, artist, title, isrc, durationMs)?.id
-        matches[trackId] = Match(songId, now)
+        matches[trackId] = Match(songId, now, account)
         return songId
     }
 

@@ -64,15 +64,24 @@ class NavidromeServerPreferences @Inject constructor(
 
     suspend fun current(): NavidromeServerConfig = decode(context.navidromeServerDataStore.data.first())
 
-    /** A blank [replacementPassword] keeps the stored one (the UI never reads it back). */
+    /**
+     * A blank [replacementPassword] keeps the stored one (the UI never reads it
+     * back), but only for the same server: the Subsonic token is
+     * `md5(password + salt)` sent with the salt, which a different host could
+     * attack offline, so a new URL needs the password typed again.
+     */
     suspend fun saveConnection(serverUrl: String, username: String, replacementPassword: String) {
         val normalized = requireNotNull(NavidromeEndpoint.normalize(serverUrl)) {
             "Use an HTTPS server URL without credentials, query parameters, or a fragment."
         }
         val user = username.trim()
         require(user.isNotBlank()) { "A Navidrome username is required." }
-        val password = replacementPassword.ifBlank { current().password }
-        require(password.isNotBlank()) { "A Navidrome password is required." }
+        val existing = current()
+        val sameServer = NavidromeEndpoint.normalize(existing.serverUrl) == normalized
+        val password = replacementPassword.ifBlank { if (sameServer) existing.password else "" }
+        require(password.isNotBlank()) {
+            if (sameServer) "A Navidrome password is required." else "Enter the password again for the new server."
+        }
         val encrypted = Base64.encodeToString(
             encryption.encrypt(password.toByteArray(Charsets.UTF_8)),
             Base64.NO_WRAP,

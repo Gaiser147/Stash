@@ -42,7 +42,7 @@ class NavidromeScrobblerTest {
     }
 
     @Test fun `plays on the server are scrobbled with their start time and marked`() = runTest {
-        coEvery { dao.pendingNavidromeScrobbles(any()) } returns listOf(event(1, 10), event(2, 11))
+        coEvery { dao.pendingNavidromeScrobblesAfter(Long.MIN_VALUE, Long.MIN_VALUE, any()) } returns listOf(event(1, 10), event(2, 11))
         coEvery { trackDao.getById(10) } returns track(10)
         coEvery { trackDao.getById(11) } returns track(11)
         onServer(10, "s10")
@@ -58,7 +58,7 @@ class NavidromeScrobblerTest {
     }
 
     @Test fun `a song not on the server waits, then is dropped after the retry window`() = runTest {
-        coEvery { dao.pendingNavidromeScrobbles(any()) } returns listOf(
+        coEvery { dao.pendingNavidromeScrobblesAfter(Long.MIN_VALUE, Long.MIN_VALUE, any()) } returns listOf(
             event(1, 10, ageMs = 60_000),
             event(2, 11, ageMs = NavidromeScrobbler.GIVE_UP_AFTER_MS + 1),
         )
@@ -75,7 +75,7 @@ class NavidromeScrobblerTest {
     }
 
     @Test fun `an unreachable server stops the drain and keeps everything pending`() = runTest {
-        coEvery { dao.pendingNavidromeScrobbles(any()) } returns listOf(event(1, 10), event(2, 11))
+        coEvery { dao.pendingNavidromeScrobblesAfter(Long.MIN_VALUE, Long.MIN_VALUE, any()) } returns listOf(event(1, 10), event(2, 11))
         coEvery { trackDao.getById(any()) } answers { track(firstArg()) }
         coEvery { client.findSong(any(), any(), any(), any(), any()) } throws IOException("timeout")
 
@@ -86,7 +86,7 @@ class NavidromeScrobblerTest {
     }
 
     @Test fun `wrong credentials pause reporting without dropping plays`() = runTest {
-        coEvery { dao.pendingNavidromeScrobbles(any()) } returns listOf(event(1, 10))
+        coEvery { dao.pendingNavidromeScrobblesAfter(Long.MIN_VALUE, Long.MIN_VALUE, any()) } returns listOf(event(1, 10))
         coEvery { trackDao.getById(10) } returns track(10)
         coEvery { client.findSong(any(), any(), any(), any(), any()) } throws SubsonicException(40, "Wrong username or password")
 
@@ -100,15 +100,69 @@ class NavidromeScrobblerTest {
         scrobbler.drain(config.copy(password = ""))
 
         coVerify(exactly = 2) { dao.markAllNavidromeScrobbled() }
-        coVerify(exactly = 0) { dao.pendingNavidromeScrobbles(any()) }
+        coVerify(exactly = 0) { dao.pendingNavidromeScrobblesAfter(any(), any(), any()) }
     }
 
     @Test fun `a deleted track is skipped`() = runTest {
-        coEvery { dao.pendingNavidromeScrobbles(any()) } returns listOf(event(1, 99))
+        coEvery { dao.pendingNavidromeScrobblesAfter(Long.MIN_VALUE, Long.MIN_VALUE, any()) } returns listOf(event(1, 99))
         coEvery { trackDao.getById(99) } returns null
 
         scrobbler.drain(config)
 
         coVerify { dao.markNavidromeScrobbled(1) }
     }
+
+    @Test fun `plays waiting for an upload do not block newer plays behind them`() = runTest {
+        // A full page of misses (not on the server yet), then a play that is on the server.
+        val waiting = (1L..50L).map { event(it, 100 + it) }
+        coEvery { dao.pendingNavidromeScrobblesAfter(Long.MIN_VALUE, Long.MIN_VALUE, any()) } returns waiting
+        coEvery { dao.pendingNavidromeScrobblesAfter(waiting.last().startedAt, 50L, any()) } returns listOf(event(51, 10))
+        coEvery { trackDao.getById(any()) } answers { track(firstArg()) }
+        coEvery { client.findSong(any(), any(), any(), any(), any()) } returns null
+        onServer(10, "s10")
+        coEvery { client.scrobble(any(), any(), any(), any()) } returns Unit
+
+        scrobbler.drain(config)
+
+        coVerify { client.scrobble(config, "s10", any(), submission = true) }
+        coVerify { dao.markNavidromeScrobbled(51) }
+        coVerify(exactly = 0) { dao.markNavidromeScrobbled(1) }
+    }
+
+    @Test fun `a refused song id is looked up again instead of blocking the queue`() = runTest {
+        coEvery { dao.pendingNavidromeScrobblesAfter(Long.MIN_VALUE, Long.MIN_VALUE, any()) } returns listOf(event(1, 10), event(2, 11))
+        coEvery { trackDao.getById(any()) } answers { track(firstArg()) }
+        onServer(10, "stale")
+        onServer(11, "s11")
+        coEvery { client.scrobble(config, "stale", any(), any()) } throws SubsonicException(70, "Song not found")
+        coEvery { client.scrobble(config, "s11", any(), any()) } returns Unit
+
+        scrobbler.drain(config)
+        // The newer play still goes through in the same drain.
+        coVerify { dao.markNavidromeScrobbled(2) }
+        coVerify(exactly = 0) { dao.markNavidromeScrobbled(1) }
+
+        // Next drain re-runs search3 for the refused track instead of reusing "stale".
+        onServer(10, "fresh")
+        coEvery { dao.pendingNavidromeScrobblesAfter(Long.MIN_VALUE, Long.MIN_VALUE, any()) } returns listOf(event(1, 10))
+        coEvery { client.scrobble(config, "fresh", any(), any()) } returns Unit
+        scrobbler.drain(config)
+        coVerify { client.scrobble(config, "fresh", any(), submission = true) }
+        coVerify { dao.markNavidromeScrobbled(1) }
+    }
+
+    @Test fun `cached song ids are per account`() = runTest {
+        val other = config.copy(serverUrl = "https://other.example")
+        coEvery { dao.pendingNavidromeScrobblesAfter(Long.MIN_VALUE, Long.MIN_VALUE, any()) } returns listOf(event(1, 10))
+        coEvery { trackDao.getById(10) } returns track(10)
+        onServer(10, "s10")
+        coEvery { client.findSong(other, any(), any(), any(), any()) } returns SubsonicSong("o10", "Artist", "Song 10", 200, emptyList())
+        coEvery { client.scrobble(any(), any(), any(), any()) } returns Unit
+
+        scrobbler.drain(config)
+        scrobbler.drain(other)
+
+        coVerify { client.scrobble(other, "o10", any(), submission = true) }
+    }
 }
+

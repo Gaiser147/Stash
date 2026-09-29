@@ -316,6 +316,26 @@ interface ListeningEventDao {
     )
     suspend fun pendingNavidromeScrobbles(limit: Int = 50): List<ListeningEventEntity>
 
+    /**
+     * Keyset page of pending plays after ([afterStartedAt], [afterId]), in the same
+     * order as [pendingNavidromeScrobbles]. Lets the reporter walk past plays that
+     * have to keep waiting (song not on the server yet) instead of re-reading them.
+     */
+    @Query(
+        """
+        SELECT * FROM listening_events
+        WHERE nd_scrobbled = 0
+          AND (started_at > :afterStartedAt OR (started_at = :afterStartedAt AND id > :afterId))
+        ORDER BY started_at ASC, id ASC
+        LIMIT :limit
+        """
+    )
+    suspend fun pendingNavidromeScrobblesAfter(
+        afterStartedAt: Long,
+        afterId: Long,
+        limit: Int = 50,
+    ): List<ListeningEventEntity>
+
     @Query("UPDATE listening_events SET nd_scrobbled = 1 WHERE id = :eventId")
     suspend fun markNavidromeScrobbled(eventId: Long)
 

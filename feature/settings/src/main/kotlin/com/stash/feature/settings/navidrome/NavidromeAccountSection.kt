@@ -150,6 +150,9 @@ private fun NavidromeAccountDialog(
     var user by remember { mutableStateOf(initialUsername) }
     var password by remember { mutableStateOf("") }
     val urlValid = NavidromeEndpoint.normalize(url) != null
+    // The saved password only ever goes to the server it was entered for.
+    val canKeepPassword = passwordConfigured &&
+        NavidromeEndpoint.normalize(url) == NavidromeEndpoint.normalize(initialUrl)
     AlertDialog(
         onDismissRequest = onDismiss,
         title = { Text("Navidrome account") },
@@ -187,11 +190,11 @@ private fun NavidromeAccountDialog(
                     modifier = Modifier.fillMaxWidth(),
                     singleLine = true,
                     visualTransformation = PasswordVisualTransformation(),
-                    label = { Text(if (passwordConfigured) "New password (optional)" else "Password") },
-                    supportingText = if (passwordConfigured) {
-                        { Text("Leave blank to keep the saved password.") }
-                    } else {
-                        null
+                    label = { Text(if (canKeepPassword) "New password (optional)" else "Password") },
+                    supportingText = when {
+                        canKeepPassword -> { { Text("Leave blank to keep the saved password.") } }
+                        passwordConfigured -> { { Text("New server: enter the password again.") } }
+                        else -> null
                     },
                 )
             }
@@ -199,7 +202,7 @@ private fun NavidromeAccountDialog(
         confirmButton = {
             TextButton(
                 onClick = { onSave(url, user, password) },
-                enabled = urlValid && user.isNotBlank() && (passwordConfigured || password.isNotBlank()),
+                enabled = urlValid && user.isNotBlank() && (canKeepPassword || password.isNotBlank()),
             ) { Text("Save") }
         },
         dismissButton = { TextButton(onClick = onDismiss) { Text("Cancel") } },
