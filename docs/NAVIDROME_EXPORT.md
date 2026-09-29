@@ -58,6 +58,35 @@ The legacy slug layout can collide when artist, album, and title differ only by 
 
 This repository currently contains the Android client contract, not a production ingest-service implementation. End-to-end compatibility therefore requires validating the deployed service against the paths, headers, status handling, and filesystem layout above.
 
+## Reporting plays to Navidrome
+
+Separately from the upload connection, **Settings → Accounts & sync → Your Navidrome → Navidrome account**
+takes the user's own Navidrome login (HTTPS URL, username, password). With **Report plays to my server**
+on (the default once an account is saved), Stash calls the Subsonic `scrobble` endpoint:
+
+- `submission=false` when a song starts, so Navidrome shows it as now playing;
+- `submission=true` with the original start time once a play crosses the usual scrobble threshold.
+
+Navidrome counts the play and forwards it to the Last.fm or ListenBrainz accounts linked in Navidrome
+(Personal → Scrobbling). Stash itself holds no Last.fm credentials for this path.
+
+Songs are matched by ISRC, otherwise by canonical artist and title within ±5 s of duration; an exact title
+wins over a normalized one, so a live version doesn't take the studio version's play. Songs the server
+doesn't have yet (streamed, not uploaded) stay queued in `listening_events.nd_scrobbled` and are reported
+late, with the right time, once stash-ingest has uploaded them and Navidrome has scanned them. They are
+dropped after 14 days. Offline or unreachable, the queue waits; wrong credentials pause it without dropping
+plays. The password is encrypted like the ingest token and never read back. Plays recorded before this
+feature existed are not replayed.
+
+## Server notes
+
+- Navidrome 0.55+ ignores `ScanInterval`. Use `Scanner.Schedule` (for example `"@every 15m"`), and keep the file
+  watcher on (`Scanner.WatcherWait`), so files written by stash-ingest reach the index, and anything reading
+  from Navidrome such as the Muse bot, within seconds instead of never.
+- Stash requires HTTPS for both connections. Tailscale Funnel provides it without router changes:
+  `tailscale funnel --bg 4533` for Navidrome and `tailscale funnel --bg --https=8443 http://<ingest-host>:<port>`
+  for stash-ingest.
+
 ## Upgrading from the old fork build
 
 The previous fork defaulted export on, embedded a private endpoint, and stored the bearer token as plaintext preferences. The new implementation removes the hardcoded endpoint, defaults export off, and migrates a stored legacy token into encrypted storage when the preferences are first read. Because the old default URL was not necessarily persisted, re-enter the endpoint and explicitly enable export after upgrading.

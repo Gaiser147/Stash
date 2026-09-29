@@ -93,6 +93,9 @@ class StashApplication : Application(), Configuration.Provider {
     lateinit var lastFmScrobbler: LastFmScrobbler
 
     @Inject
+    lateinit var navidromeScrobbler: com.stash.core.media.listening.NavidromeScrobbler
+
+    @Inject
     lateinit var youTubeHistoryScrobbler: YouTubeHistoryScrobbler
 
     @Inject
@@ -419,6 +422,7 @@ class StashApplication : Application(), Configuration.Provider {
         // recorder just observes the player regardless of whether scrobbling is on.
         listeningRecorder.start()
         lastFmScrobbler.start()
+        navidromeScrobbler.start()
         youTubeHistoryScrobbler.start()
         autoSaveScrobbler.start()
 

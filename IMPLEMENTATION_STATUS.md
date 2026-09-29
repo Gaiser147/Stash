@@ -7,6 +7,14 @@ contract and operational detail for Muse acquisition live in
 [`docs/MUSE_ACQUISITION.md`](docs/MUSE_ACQUISITION.md). Android Companion detail
 lives in [`docs/MUSE_COMPANION_ANDROID.md`](docs/MUSE_COMPANION_ANDROID.md).
 
+## Navidrome play reporting: implemented
+
+- A separate Navidrome account (Subsonic token auth, password Tink-encrypted) reports now playing and
+  finished listens to the user's server, which forwards them to Last.fm / ListenBrainz.
+- The queue lives in `listening_events.nd_scrobbled` (DB v33). Songs not on the server yet wait up to
+  14 days for upload + scan, and are then reported with their original time.
+- See "Reporting plays to Navidrome" in [`docs/NAVIDROME_EXPORT.md`](docs/NAVIDROME_EXPORT.md).
+
 ## Autoplay (Spotify-style queue continuation): implemented
 
 - When a playlist, album, single song or search tap nears its end, the

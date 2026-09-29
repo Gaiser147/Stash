@@ -301,4 +301,29 @@ interface ListeningEventDao {
         """
     )
     suspend fun getRecentlyHeardTrackIds(limit: Int): List<Long>
+
+    /**
+     * Plays not yet reported to the user's Navidrome server, oldest first so
+     * the server's history keeps the real listening order.
+     */
+    @Query(
+        """
+        SELECT * FROM listening_events
+        WHERE nd_scrobbled = 0
+        ORDER BY started_at ASC
+        LIMIT :limit
+        """
+    )
+    suspend fun pendingNavidromeScrobbles(limit: Int = 50): List<ListeningEventEntity>
+
+    @Query("UPDATE listening_events SET nd_scrobbled = 1 WHERE id = :eventId")
+    suspend fun markNavidromeScrobbled(eventId: Long)
+
+    /** Count of plays waiting for Navidrome, for the Settings status line. */
+    @Query("SELECT COUNT(*) FROM listening_events WHERE nd_scrobbled = 0")
+    fun pendingNavidromeScrobbleCount(): Flow<Int>
+
+    /** Marks every pending play as handled (reporting switched off). */
+    @Query("UPDATE listening_events SET nd_scrobbled = 1 WHERE nd_scrobbled = 0")
+    suspend fun markAllNavidromeScrobbled()
 }
