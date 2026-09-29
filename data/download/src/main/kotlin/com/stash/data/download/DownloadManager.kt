@@ -181,6 +181,24 @@ class DownloadManager @Inject constructor(
     private suspend fun executeDownload(track: Track, preResolvedUrl: String?): TrackDownloadResult {
         emitProgress(track.id, 0f, DownloadStatus.MATCHING)
 
+        // Step -1: the song may already be on the phone at the exact path this
+        // download would commit to (a reinstall, or a second install pointed at
+        // the same library folder, whose database doesn't know the file). Reuse
+        // it instead of fetching it again. Only for tracks with no file yet:
+        // re-downloads (wrong version, retries of a known file) keep fetching.
+        if (!track.isDownloaded && track.filePath.isNullOrBlank()) {
+            val existing = runCatching {
+                fileOrganizer.findExistingTrackFile(track.artist, track.album.ifEmpty { null }, track.title)
+            }.getOrNull()?.takeIf(String::isNotBlank)
+            if (existing != null) {
+                Log.i(TAG, "Reusing file already on the device: ${track.artist} - ${track.title} → $existing")
+                lyricsFetchTrigger.enqueueFor(track.id)
+                enqueueNavidromeExport(track, existing)
+                emitProgress(track.id, 1f, DownloadStatus.COMPLETED)
+                return TrackDownloadResult.Success(existing)
+            }
+        }
+
         // Step 0: Lossless source attempt. Attempted whenever lossless
         // is enabled (or the track belongs to a Stash Mix), regardless
         // of whether the caller supplied a preResolvedUrl. Stash Mix

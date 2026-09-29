@@ -9,6 +9,7 @@ import java.io.ByteArrayOutputStream
 import java.io.File
 import java.security.MessageDigest
 import java.util.UUID
+import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.TimeUnit
 import javax.inject.Inject
 import javax.inject.Singleton
@@ -70,6 +71,9 @@ class NavidromeIngestClient @Inject constructor(
     private val prefs: NavidromeExportPreferences,
     private val httpClient: OkHttpClient,
 ) {
+    /** baseUrl → whether that server offers the upload pre-check. */
+    private val precheckSupport = ConcurrentHashMap<String, Boolean>()
+
     private val uploadHttpClient = httpClient.newBuilder()
         .readTimeout(2, TimeUnit.MINUTES)
         .writeTimeout(15, TimeUnit.MINUTES)
@@ -91,13 +95,19 @@ class NavidromeIngestClient @Inject constructor(
             if (!uploadFile.exists() || uploadFile.length() <= 0) {
                 return@withContext NavidromeUploadOutcome.RetryableFailure
             }
+            val sha = sha256(uploadFile)
+            val size = uploadFile.length()
+            val metadataValue = metadataHeader(metadata)
+            if (alreadyOnServer(endpoint, "files", relativePath, sha, size, metadataValue)) {
+                return@withContext NavidromeUploadOutcome.Success
+            }
             val request = Request.Builder()
                 .url("${endpoint.baseUrl}/v1/files/${encodePath(relativePath)}")
                 .put(FileRequestBody(uploadFile))
                 .authenticated(endpoint.token)
-                .header("X-Stash-Sha256", sha256(uploadFile))
-                .header("X-Stash-Size", uploadFile.length().toString())
-                .apply { metadataHeader(metadata)?.let { header("X-Stash-Metadata", it) } }
+                .header("X-Stash-Sha256", sha)
+                .header("X-Stash-Size", size.toString())
+                .apply { metadataValue?.let { header("X-Stash-Metadata", it) } }
                 .build()
             execute(request, "audio")
         } catch (_: Exception) {
@@ -125,12 +135,17 @@ class NavidromeIngestClient @Inject constructor(
                 if (!uploadFile.exists() || uploadFile.length() <= 0) {
                     return@withContext NavidromeUploadOutcome.SkippedNoSource
                 }
+                val sha = sha256(uploadFile)
+                val size = uploadFile.length()
+                if (alreadyOnServer(endpoint, "covers", relativePath, sha, size, metadata = null)) {
+                    return@withContext NavidromeUploadOutcome.Success
+                }
                 val request = Request.Builder()
                     .url("${endpoint.baseUrl}/v1/covers/${encodePath(relativePath)}")
                     .put(FileRequestBody(uploadFile))
                     .authenticated(endpoint.token)
-                    .header("X-Stash-Sha256", sha256(uploadFile))
-                    .header("X-Stash-Size", uploadFile.length().toString())
+                    .header("X-Stash-Sha256", sha)
+                    .header("X-Stash-Size", size.toString())
                     .build()
                 execute(request, "cover")
             } catch (_: Exception) {
@@ -232,6 +247,61 @@ class NavidromeIngestClient @Inject constructor(
         } catch (_: Exception) {
             NavidromeConnectionCheck.Unreachable
         }
+    }
+
+    /**
+     * Asks the server whether it already holds exactly this file (same path,
+     * hash and size, or matching tags) before streaming it. A reinstalled app
+     * or a full export re-offers the whole library, and without this every
+     * file was sent even when the server then answered already-present. Only
+     * a definite `200` skips the upload; anything else (older server, error,
+     * no network) falls back to the normal PUT, which stays the authority.
+     */
+    private fun alreadyOnServer(
+        endpoint: Endpoint,
+        route: String,
+        relativePath: String,
+        sha256: String,
+        size: Long,
+        metadata: String?,
+    ): Boolean {
+        if (!supportsPrecheck(endpoint)) return false
+        return runCatching {
+            val request = Request.Builder()
+                .url("${endpoint.baseUrl}/v1/$route/${encodePath(relativePath)}")
+                .head()
+                .authenticated(endpoint.token)
+                .header("X-Stash-Sha256", sha256)
+                .header("X-Stash-Size", size.toString())
+                .apply { metadata?.let { header("X-Stash-Metadata", it) } }
+                .build()
+            uploadHttpClient.newCall(request).execute().use { it.code == 200 }
+        }.getOrDefault(false)
+    }
+
+    /** Whether [endpoint] advertises `features.uploadPrecheck`; asked once per server and process. */
+    private fun supportsPrecheck(endpoint: Endpoint): Boolean {
+        precheckSupport[endpoint.baseUrl]?.let { return it }
+        val answer: Boolean? = runCatching {
+            val request = Request.Builder()
+                .url("${endpoint.baseUrl}/v1/capabilities")
+                .get()
+                .authenticated(endpoint.token)
+                .build()
+            uploadHttpClient.newCall(request).execute().use { response ->
+                when {
+                    response.isSuccessful -> JSONObject(readSmallResponse(response.body).orEmpty())
+                        .optJSONObject("features")
+                        ?.optBoolean("uploadPrecheck", false) == true
+                    // A definite "no such endpoint / not for you" from an older server.
+                    response.code in PERMANENT_STATUS_CODES -> false
+                    else -> null
+                }
+            }
+        }.getOrNull()
+        // Transient failures aren't remembered, so the next file asks again.
+        if (answer != null) precheckSupport[endpoint.baseUrl] = answer
+        return answer == true
     }
 
     private suspend fun endpointAndToken(requireEnabled: Boolean = true): Endpoint? {
