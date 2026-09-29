@@ -218,37 +218,26 @@ class PlayerRepositoryImpl @Inject constructor(
         // Autoplay feedback: report how far each song got (skip vs. finish)
         // to the armed session so the next batch adapts. Only songs that
         // started under the current session are reported.
+        // growAutoplay flushes the same way before ranking, so a batch never
+        // misses the skip that triggered it.
         scope.launch {
-            var heard: Track? = null
-            // The generation, not the session object: armAutoplay bumps the
-            // generation synchronously but assigns the session only after an
-            // async engine.start(), so capturing the session would miss the
-            // first song of every queue (often the only seed of a single tap).
-            var heardGeneration = -1
-            var heardPos = 0L
-            var heardDur = 0L
             currentPosition.collect { pos ->
                 val state = _playerState.value
                 val cur = state.currentTrack
-                if (cur?.id != heard?.id) {
-                    val prev = heard
-                    val prevSession = autoplaySession
-                    if (prev != null && prevSession != null && heardGeneration == autoplayGeneration) {
-                        val listened = heardPos
-                        val duration = heardDur
-                        scope.launch(autoplaySessionDispatcher) {
-                            runCatching { autoplayEngine?.recordOutcome(prevSession, prev, listened, duration) }
-                                .onFailure { Log.w(TAG, "autoplay feedback failed", it) }
+                val heard = heardTrack
+                if (cur?.id != heard?.track?.id) {
+                    // One queued flush at a time; it may wait behind a batch build.
+                    if (feedbackFlushQueued.compareAndSet(false, true)) {
+                        scope.launch(Dispatchers.Default) {
+                            autoplaySessionMutex.withLock {
+                                feedbackFlushQueued.set(false)
+                                flushAutoplayFeedbackLocked()
+                            }
                         }
                     }
-                    heard = cur
-                    heardGeneration = autoplayGeneration
-                    heardPos = 0L
-                    heardDur = 0L
-                }
-                if (cur != null) {
-                    heardPos = maxOf(heardPos, pos)
-                    heardDur = if (state.durationMs > 0) state.durationMs else cur.durationMs
+                } else if (heard != null && cur != null) {
+                    heard.positionMs = maxOf(heard.positionMs, pos)
+                    heard.durationMs = if (state.durationMs > 0) state.durationMs else cur.durationMs
                 }
             }
         }
@@ -278,7 +267,8 @@ class PlayerRepositoryImpl @Inject constructor(
         }
     }
 
-    private val _playerState = MutableStateFlow(PlayerState())
+    /** Internal as a test seam (autoplay feedback ordering). */
+    internal val _playerState = MutableStateFlow(PlayerState())
     override val playerState: StateFlow<PlayerState> = _playerState.asStateFlow()
 
     /**
@@ -350,12 +340,42 @@ class PlayerRepositoryImpl @Inject constructor(
     private var startingPersonalMix = false
 
     /**
-     * Every read and write of an AutoplaySession (feedback, batch building,
-     * mix building) runs here, one at a time: the session's collections are
-     * plain, and a batch must see the skip that happened just before it.
+     * Held for the whole of every AutoplaySession read or write (feedback and
+     * batch building), across suspension points: the session's collections
+     * are plain, and a batch must not pick an artist blocked mid-build.
      */
-    @OptIn(kotlinx.coroutines.ExperimentalCoroutinesApi::class)
-    private val autoplaySessionDispatcher = Dispatchers.Default.limitedParallelism(1)
+    private val autoplaySessionMutex = Mutex()
+
+    /** The song being heard, for autoplay feedback. Position fields are written by the position collector. */
+    private class HeardTrack(val track: Track, val generation: Int) {
+        @Volatile var positionMs = 0L
+        @Volatile var durationMs = 0L
+    }
+
+    @Volatile
+    private var heardTrack: HeardTrack? = null
+
+    private val feedbackFlushQueued = java.util.concurrent.atomic.AtomicBoolean(false)
+
+    /**
+     * If playback has moved past [heardTrack], report how far it got to the
+     * session and start tracking the current song. Idempotent; reads the
+     * current track itself, so late or repeated calls are harmless. The
+     * generation, not the session object, is captured: armAutoplay bumps it
+     * synchronously but assigns the session after an async engine.start(),
+     * so the first song of a queue is still reported. Call with
+     * [autoplaySessionMutex] held.
+     */
+    private suspend fun flushAutoplayFeedbackLocked() {
+        val current = _playerState.value.currentTrack
+        val prev = heardTrack
+        if (prev?.track?.id == current?.id) return
+        heardTrack = current?.let { HeardTrack(it, autoplayGeneration) }
+        if (prev == null || prev.generation != autoplayGeneration) return
+        val session = autoplaySession ?: return
+        runCatching { autoplayEngine?.recordOutcome(session, prev.track, prev.positionMs, prev.durationMs) }
+            .onFailure { Log.w(TAG, "autoplay feedback failed", it) }
+    }
 
     /** Bumped on every arm/disarm so a slow [armAutoplay] can't resurrect a stale session. */
     @Volatile
@@ -900,7 +920,8 @@ class PlayerRepositoryImpl @Inject constructor(
         ensureController() ?: return false
         val canStream = canStreamNow()
         val mix = runCatching {
-            withContext(autoplaySessionDispatcher) {
+            // buildMix ranks on its own private session, so it needs no session lock.
+            withContext(Dispatchers.Default) {
                 engine.buildMix(includeStreamable = canStream, allowDiscovery = canStream)
             }
         }.onFailure { Log.w(TAG, "personal mix failed", it) }.getOrDefault(emptyList())
@@ -941,8 +962,12 @@ class PlayerRepositoryImpl @Inject constructor(
 
             val canStream = canStreamNow()
             val batch = runCatching {
-                withContext(autoplaySessionDispatcher) {
-                    engine.nextBatch(session, includeStreamable = canStream, allowDiscovery = canStream)
+                withContext(Dispatchers.Default) {
+                    autoplaySessionMutex.withLock {
+                        // Report the song just left first, so this batch sees that skip.
+                        flushAutoplayFeedbackLocked()
+                        engine.nextBatch(session, includeStreamable = canStream, allowDiscovery = canStream)
+                    }
                 }
             }.onFailure { Log.w(TAG, "autoplay batch failed", it) }.getOrDefault(emptyList())
             // The user may have started something else while we were ranking.

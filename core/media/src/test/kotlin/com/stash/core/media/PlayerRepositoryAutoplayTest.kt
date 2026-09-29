@@ -19,9 +19,11 @@ import com.stash.core.media.streaming.ConnectivityMonitor
 import com.stash.core.media.streaming.StreamSourceRegistry
 import com.stash.core.media.streaming.StreamUrlCache
 import com.google.common.truth.Truth.assertThat
+import com.stash.core.model.PlayerState
 import com.stash.core.model.Track
 import io.mockk.coEvery
 import io.mockk.coVerify
+import io.mockk.coVerifyOrder
 import io.mockk.every
 import io.mockk.mockk
 import io.mockk.verify
@@ -170,6 +172,24 @@ class PlayerRepositoryAutoplayTest {
         stubTimeline(shuffle = false, current = 8)
         repo.growAutoplay()
         coVerify { engine.nextBatch(session, any(), any(), any()) }
+    }
+
+    @Test fun `a batch built right after a skip is ranked with that skip reported`() = runTest {
+        coEvery { engine.recordOutcome(any(), any(), any(), any()) } returns Unit
+        repo.setQueue(listOf(track(1), track(2)))
+        idleMain()
+        repo._playerState.value = PlayerState(currentTrack = track(1), queue = listOf(track(1), track(2)), currentIndex = 0)
+        repo.growAutoplay()
+
+        // Song 1 skipped; the grow for song 2 runs before the position collector notices.
+        repo._playerState.value = PlayerState(currentTrack = track(2), queue = listOf(track(1), track(2)), currentIndex = 1)
+        repo.growAutoplay()
+
+        coVerifyOrder {
+            engine.recordOutcome(session, match { it.id == 1L }, any(), any())
+            engine.nextBatch(session, any(), any(), any())
+        }
+        coVerify(exactly = 1) { engine.recordOutcome(any(), any(), any(), any()) }
     }
 
     @Test fun `startPersonalMix plays the generated mix and flags it`() = runTest {
