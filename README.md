@@ -5,7 +5,7 @@ APKs and is never merged.
 
 | File | Source commit | Package | Version |
 | --- | --- | --- | --- |
-| `stash-autoplay-preview-72fb440-arm64.apk` | `72fb440` (branch `claude/navidrome-recommendation-algorithm-8v758e`, PR #8): review fixes + **"Sync all now" to Navidrome runs in the foreground and resumes after a restart** — **newest** | `com.stash.app.preview` ("Stash Navidrome Preview") | 0.9.75-muse.1-navidrome-preview (112) |
+| `stash-autoplay-preview-4c1c5b1-arm64.apk` | `4c1c5b1` (branch `claude/navidrome-recommendation-algorithm-8v758e`, after PR #8): **Navidrome upload no longer re-sends songs after a failed cover; playlists are reached** — **newest** | `com.stash.app.preview` ("Stash Navidrome Preview") | 0.9.75-muse.1-navidrome-preview (112) |
 | `stash-autoplay-preview-73569f7-arm64.apk` | `73569f7` (branch `claude/navidrome-recommendation-algorithm-8v758e`, PR #8): adds **reporting plays to Navidrome** | `com.stash.app.preview` ("Stash Navidrome Preview") | 0.9.75-muse.1-navidrome-preview (112) |
 | `stash-autoplay-preview-ef08495-arm64.apk` | `ef08495` (branch `claude/navidrome-recommendation-algorithm-8v758e`, PR #8): adds **Mix for you** + shuffle fix | `com.stash.app.preview` ("Stash Navidrome Preview") | 0.9.75-muse.1-navidrome-preview (112) |
 | `stash-autoplay-preview-ef9854c-arm64.apk` | `ef9854c` (branch `claude/navidrome-recommendation-algorithm-8v758e`, PR #8) | `com.stash.app.preview` ("Stash Navidrome Preview") | 0.9.75-muse.1-navidrome-preview (112) |
@@ -14,7 +14,7 @@ APKs and is never merged.
   167 MiB, over GitHub's 100 MB file limit, and Git LFS is disabled for forks,
   so the x86 / x86_64 / armeabi-v7a native libraries were removed from the built
   APK and it was re-signed with the same key. No code was changed.
-- SHA-256 `stash-autoplay-preview-72fb440-arm64.apk`: `5d1f1c7354c55c45c436a373987fa405f790ba06606d1e67b25850b9c1bd593d`
+- SHA-256 `stash-autoplay-preview-4c1c5b1-arm64.apk`: `12f0a2f9a2d6db8de7f6c74a036d685808a5a9c7b281dd167352aa17084ed0f2`
 - SHA-256 `stash-autoplay-preview-73569f7-arm64.apk`: `493760faa8abe38266a23350b6b2a4363e45edde232c83e7ea6a85b2afe2de5a`
 - SHA-256 `stash-autoplay-preview-ef08495-arm64.apk`: `847c203f87fa8d8228c1fb4fb2ef1a2c5d6d92cc085b64d90a37da0d975f37ec`
 - SHA-256 (older build): `13bf8580f6c846f5b1900d2f5b71ae6a5cd537625d203e8a3c42943066863a0c`
