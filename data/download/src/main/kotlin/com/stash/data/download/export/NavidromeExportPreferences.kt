@@ -71,6 +71,8 @@ class NavidromeExportPreferences @Inject constructor(
         val lastAttemptAt = longPreferencesKey("last_attempt_at")
         val lastSuccessAt = longPreferencesKey("last_success_at")
         val lastResult = stringPreferencesKey("last_result")
+        val fullExportServer = stringPreferencesKey("full_export_server")
+        val fullExportAfterTrackId = longPreferencesKey("full_export_after_track_id")
     }
 
     val config: Flow<NavidromeExportConfig> = context.navidromeExportDataStore.data.map(::decode)
@@ -137,6 +139,33 @@ class NavidromeExportPreferences @Inject constructor(
         context.navidromeExportDataStore.edit {
             it[Keys.lastAttemptAt] = now
             it[Keys.lastResult] = RESULT_EXPORT_IN_PROGRESS
+        }
+    }
+
+    /**
+     * Resume point of a full export: tracks up to this id (in id order) were
+     * all sent to [serverUrl]. Android stops long background work and
+     * WorkManager restarts it, so without this every restart began again
+     * with the first song and the playlists at the end were never sent.
+     * A cursor saved for another server is ignored.
+     */
+    suspend fun fullExportResumeAfter(serverUrl: String): Long {
+        val prefs = context.navidromeExportDataStore.data.first()
+        if (prefs[Keys.fullExportServer] != serverUrl) return Long.MIN_VALUE
+        return prefs[Keys.fullExportAfterTrackId] ?: Long.MIN_VALUE
+    }
+
+    suspend fun saveFullExportProgress(serverUrl: String, afterTrackId: Long) {
+        context.navidromeExportDataStore.edit {
+            it[Keys.fullExportServer] = serverUrl
+            it[Keys.fullExportAfterTrackId] = afterTrackId
+        }
+    }
+
+    suspend fun clearFullExportProgress() {
+        context.navidromeExportDataStore.edit {
+            it.remove(Keys.fullExportServer)
+            it.remove(Keys.fullExportAfterTrackId)
         }
     }
 

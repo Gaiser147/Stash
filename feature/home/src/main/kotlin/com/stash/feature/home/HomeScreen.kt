@@ -136,6 +136,7 @@ fun HomeScreen(
     // truth; the chip itself early-returns to nothing while the build-
     // time kill-switch (StashConstants.STREAMING_ENGINE_ENABLED) is off.
     val streamingEnabled by viewModel.streamingEnabled.collectAsStateWithLifecycle()
+    val buildingPersonalMix by viewModel.buildingPersonalMix.collectAsStateWithLifecycle()
 
     // Bottom-sheet state for the playback-mode picker triggered by the
     // top-bar chip. The sheet is the chip's tap target — keeps the chip
@@ -304,6 +305,20 @@ fun HomeScreen(
                     modifier = Modifier.padding(horizontal = 16.dp),
                 )
             }
+        }
+
+        // ── Mix for you (autoplay engine, generated on tap) ──────────
+        // Deliberately ABOVE the synced Spotify/YouTube mixes and styled
+        // differently, so it reads as "made by Stash from your listening"
+        // rather than another imported playlist. Always shown.
+        item {
+            PersonalMixHeroCard(
+                building = buildingPersonalMix,
+                onClick = viewModel::startPersonalMix,
+                modifier = Modifier
+                    .padding(horizontal = 16.dp)
+                    .padding(top = 8.dp, bottom = 4.dp),
+            )
         }
 
         // ── Mixes (split by source, each with a Play All button) ─────
@@ -1559,6 +1574,109 @@ private fun CreateMixCard(
                 color = MaterialTheme.colorScheme.onSurface,
                 textAlign = androidx.compose.ui.text.style.TextAlign.Center,
             )
+        }
+    }
+}
+
+// ── Mix for you ──────────────────────────────────────────────────────────
+
+/**
+ * Hero card for the autoplay-engine "Mix for you". Visually distinct from
+ * the synced [DailyMixCard]s (full width, accent gradient, "AUTO" badge,
+ * sparkle glyph) so it's recognizable as generated from the user's own
+ * listening. Shows a spinner and ignores taps while the mix is building.
+ */
+@Composable
+private fun PersonalMixHeroCard(
+    building: Boolean,
+    onClick: () -> Unit,
+    modifier: Modifier = Modifier,
+) {
+    val accent = MaterialTheme.colorScheme.primary
+    val onAccent = MaterialTheme.colorScheme.onPrimary
+    val tertiary = MaterialTheme.colorScheme.tertiary
+
+    Box(
+        modifier = modifier
+            .fillMaxWidth()
+            .height(112.dp)
+            .clip(RoundedCornerShape(20.dp))
+            .background(
+                Brush.linearGradient(
+                    listOf(accent, tertiary.copy(alpha = 0.85f)),
+                ),
+            )
+            .clickable(enabled = !building, onClick = onClick)
+            .semantics { contentDescription = "Mix for you, auto-generated from your listening" },
+    ) {
+        // Oversized sparkle watermark on the right.
+        Text(
+            text = "\u2728",
+            fontSize = 72.sp,
+            modifier = Modifier
+                .align(Alignment.CenterEnd)
+                .padding(end = 12.dp)
+                .alpha(0.25f),
+        )
+        Row(
+            modifier = Modifier
+                .fillMaxSize()
+                .padding(horizontal = 18.dp, vertical = 14.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            Column(modifier = Modifier.weight(1f)) {
+                Surface(
+                    shape = RoundedCornerShape(6.dp),
+                    color = onAccent.copy(alpha = 0.18f),
+                ) {
+                    Text(
+                        text = "AUTO",
+                        style = MaterialTheme.typography.labelSmall,
+                        fontWeight = FontWeight.Bold,
+                        color = onAccent,
+                        modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp),
+                    )
+                }
+                Spacer(Modifier.height(6.dp))
+                Text(
+                    text = "Mix for you",
+                    fontFamily = SpaceGrotesk,
+                    fontWeight = FontWeight.Bold,
+                    fontSize = 22.sp,
+                    color = onAccent,
+                )
+                Text(
+                    text = if (building) "Building your mix\u2026"
+                        else "Auto-generated \u00b7 based on your listening",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = onAccent.copy(alpha = 0.85f),
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                )
+            }
+            Spacer(Modifier.width(12.dp))
+            Box(
+                modifier = Modifier
+                    .size(48.dp)
+                    .clip(CircleShape)
+                    .background(onAccent),
+                contentAlignment = Alignment.Center,
+            ) {
+                if (building) {
+                    CircularProgressIndicator(
+                        modifier = Modifier.size(22.dp),
+                        strokeWidth = 2.5.dp,
+                        color = accent,
+                    )
+                } else {
+                    Icon(
+                        imageVector = Icons.Filled.PlayArrow,
+                        contentDescription = null,
+                        tint = accent,
+                        modifier = Modifier.size(28.dp),
+                    )
+                }
+            }
         }
     }
 }

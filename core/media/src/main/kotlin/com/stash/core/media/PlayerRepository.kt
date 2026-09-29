@@ -183,6 +183,17 @@ interface PlayerRepository {
     /** Live label of the active station's seed (null when no station). */
     val radioSeedLabel: StateFlow<String?>
 
+    /**
+     * "Mix für mich": builds a ready-to-play queue from the user's recent
+     * listening (library songs plus, when streaming is allowed, new ones)
+     * and starts it. Autoplay continues it when it runs out.
+     * Returns false when there was nothing to build a mix from.
+     */
+    suspend fun startPersonalMix(): Boolean
+
+    /** True while the current queue is a generated "Mix für mich". */
+    val personalMixActive: StateFlow<Boolean>
+
     /** Toggle shuffle mode on/off. */
     suspend fun toggleShuffle()
 

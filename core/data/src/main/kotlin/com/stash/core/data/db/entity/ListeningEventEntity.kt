@@ -37,6 +37,7 @@ import androidx.room.PrimaryKey
         Index(value = ["started_at"]),
         Index(value = ["scrobbled"]),
         Index(value = ["yt_scrobbled"]),
+        Index(value = ["nd_scrobbled"]),
     ],
 )
 data class ListeningEventEntity(
@@ -67,6 +68,17 @@ data class ListeningEventEntity(
      */
     @ColumnInfo(name = "yt_scrobbled", defaultValue = "0")
     val ytScrobbled: Boolean = false,
+
+    /**
+     * v33: true once reported to the user's own Navidrome server via the
+     * Subsonic `scrobble` endpoint (which Navidrome forwards to Last.fm /
+     * ListenBrainz). Also set when the play is given up on: the song never
+     * appeared on the server within the retry window, or reporting is off.
+     * Rows that existed before v33 are marked true by the migration so
+     * enabling the feature doesn't replay the whole history.
+     */
+    @ColumnInfo(name = "nd_scrobbled", defaultValue = "0")
+    val ndScrobbled: Boolean = false,
 
     /**
      * v0.9.13: timestamp (epoch-millis) when the play crossed the

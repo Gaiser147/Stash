@@ -45,6 +45,7 @@ fun SettingsPlaybackScreen(
     val forceAmzOnly by viewModel.forceAmzOnly.collectAsStateWithLifecycle()
     val forceQbdlxOnly by viewModel.forceQbdlxOnly.collectAsStateWithLifecycle()
     val crossfadeEnabled by viewModel.crossfadeEnabled.collectAsStateWithLifecycle()
+    val autoplayEnabled by viewModel.autoplayEnabled.collectAsStateWithLifecycle()
     val crossfadeDurationMs by viewModel.crossfadeDurationMs.collectAsStateWithLifecycle()
 
     SettingsScaffold(title = "Playback", onBack = onBack, modifier = modifier) {
@@ -104,6 +105,24 @@ fun SettingsPlaybackScreen(
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
         }
+
+        // Autoplay works offline too (downloaded songs only), so it sits
+        // outside the streaming-engine gate like Crossfade.
+        SettingsSectionLabel("Autoplay")
+        SettingsGroupCard(
+            rows = listOf(
+                {
+                    SettingsToggleRow(
+                        title = "Autoplay",
+                        subtitle = "When a playlist, album or song ends, keep playing similar music — " +
+                            "mostly from your library, plus new songs when streaming is available. " +
+                            "Learns from what you skip and finish.",
+                        checked = autoplayEnabled,
+                        onCheckedChange = viewModel::onAutoplayToggle,
+                    )
+                },
+            ),
+        )
 
         // Crossfade applies to both streamed and downloaded tracks, so it sits
         // outside the streaming-engine gate.

@@ -7,6 +7,40 @@ contract and operational detail for Muse acquisition live in
 [`docs/MUSE_ACQUISITION.md`](docs/MUSE_ACQUISITION.md). Android Companion detail
 lives in [`docs/MUSE_COMPANION_ANDROID.md`](docs/MUSE_COMPANION_ANDROID.md).
 
+## Navidrome play reporting: implemented
+
+- A separate Navidrome account (Subsonic token auth, password Tink-encrypted) reports now playing and
+  finished listens to the user's server, which forwards them to Last.fm / ListenBrainz.
+- The queue lives in `listening_events.nd_scrobbled` (DB v33). Songs not on the server yet wait up to
+  14 days for upload + scan, and are then reported with their original time.
+- See "Reporting plays to Navidrome" in [`docs/NAVIDROME_EXPORT.md`](docs/NAVIDROME_EXPORT.md).
+
+## Autoplay (Spotify-style queue continuation): implemented
+
+- When a playlist, album, single song or search tap nears its end, the
+  `AutoplayEngine` (`core/data/.../autoplay/`) appends songs in batches of four.
+  Settings → Playback → Autoplay (default on).
+- Per batch: a recency-weighted session context (completions pull it closer,
+  early skips push it away), library candidates from listening transitions,
+  shared hand-made playlists, the Last.fm artist neighbourhood and session tags,
+  and online-only discoveries from Last.fm similar tracks and neighbour artists,
+  filtered against the library, the blocklist and repeatedly skipped songs.
+- Ranking: a weighted score with softmax (Gumbel) sampling, no artist repeat
+  within three songs, a familiar opener and never two discoveries in a row.
+  The discovery share is a Thompson-sampled Beta bandit that learns from finished
+  or skipped discoveries and is persisted on the device.
+- Growth is counted in the real (shuffle-aware) play order. With shuffle on,
+  autoplay and radio only append on the last unplayed song, so new songs are
+  never mixed in among the playlist's own.
+- **Mix for you**: a highlighted card at the top of Home ("AUTO", auto-generated
+  from your listening) builds a 25-song queue from recent listening with the same
+  engine and plays it; autoplay continues it. Now Playing can save the running
+  mix as a playlist, and new songs get streamable stub rows.
+- `MixGenerator`'s taste signals now live in the shared `mix/TrackSignals`
+  (behaviour unchanged).
+- Navidrome streaming is only designed, not built: see
+  [`docs/NAVIDROME_STREAMING.md`](docs/NAVIDROME_STREAMING.md).
+
 ## Muse Companion Android foundation: implemented, production-gated
 
 - The five-item bottom navigation now has a real top-level **Muse** destination;

@@ -76,6 +76,8 @@ class ListeningRecorderSkipTest {
         override suspend fun startRadio(seed: com.stash.core.data.radio.RadioSeed, keepCurrent: Boolean) = false
         override fun stopRadio() = Unit
         override val radioSeedLabel: StateFlow<String?> = MutableStateFlow(null)
+        override suspend fun startPersonalMix() = false
+        override val personalMixActive: StateFlow<Boolean> = MutableStateFlow(false)
         override suspend fun addNext(track: Track) = Unit
         override suspend fun addToQueue(track: Track) = Unit
         override suspend fun addToQueue(tracks: List<Track>) = Unit

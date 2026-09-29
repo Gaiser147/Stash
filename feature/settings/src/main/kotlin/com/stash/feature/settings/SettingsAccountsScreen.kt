@@ -227,6 +227,10 @@ fun SettingsAccountsScreen(
             )
         }
 
+        GlassCard {
+            com.stash.feature.settings.navidrome.NavidromeAccountSection()
+        }
+
         SettingsSectionLabel("Muse requests", beta = true)
 
         GlassCard {

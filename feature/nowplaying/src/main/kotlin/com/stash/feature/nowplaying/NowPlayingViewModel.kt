@@ -153,6 +153,33 @@ class NowPlayingViewModel @Inject constructor(
     /** Live label of the active radio station (null when no station). */
     val radioSeedLabel: StateFlow<String?> = playerRepository.radioSeedLabel
 
+    /** True while a generated "Mix for you" is playing — shows the save button. */
+    val personalMixActive: StateFlow<Boolean> = playerRepository.personalMixActive
+
+    /**
+     * Saves the queue as it currently stands (the mix plus anything autoplay
+     * appended) as a new playlist, in queue order. Songs not in the library
+     * yet get a streamable stub row via [MusicRepository.ensureTrackPersisted],
+     * so the playlist plays online and can be downloaded like any other.
+     */
+    fun saveQueueAsPlaylist(name: String) {
+        val tracks = playerRepository.playerState.value.queue
+        if (name.isBlank() || tracks.isEmpty()) return
+        viewModelScope.launch {
+            runCatching {
+                val playlistId = musicRepository.createPlaylist(name.trim())
+                for (track in tracks) {
+                    val id = musicRepository.ensureTrackPersisted(track)
+                    musicRepository.addTrackToPlaylist(id, playlistId)
+                }
+            }.onSuccess {
+                _userMessages.tryEmit("Saved “${name.trim()}” (${tracks.size} songs)")
+            }.onFailure {
+                _userMessages.tryEmit("Couldn't save the mix — try again")
+            }
+        }
+    }
+
     /** Start a song radio seeded from the currently-playing track. Streaming-only:
      *  a false return (streaming off/offline) surfaces a hint, not a dead tap. */
     fun startRadioFromCurrent() {

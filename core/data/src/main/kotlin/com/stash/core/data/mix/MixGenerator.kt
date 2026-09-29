@@ -9,8 +9,6 @@ import com.stash.core.data.db.entity.StashMixRecipeEntity
 import com.stash.core.data.db.entity.TrackEntity
 import javax.inject.Inject
 import javax.inject.Singleton
-import kotlin.math.ln
-import kotlin.math.pow
 import kotlin.random.Random
 
 /**
@@ -22,7 +20,7 @@ import kotlin.random.Random
  *
  * Every candidate track is assigned a score that linearly combines:
  *
- *  - **Affinity** (`buildAffinityMap`): in-Stash plays in the last 180
+ *  - **Affinity** (`TrackSignals.affinity`): in-Stash plays in the last 180
  *    days, log-normalized and exponentially decayed (30-day half-life),
  *    plus a Last.fm cross-source playcount supplement. Recipe's
  *    [StashMixRecipeEntity.affinityBias] shifts the weight:
@@ -30,19 +28,19 @@ import kotlin.random.Random
  *      - negative bias (−) → Rediscovery surfaces tracks you *have* liked
  *        but haven't played recently
  *
- *  - **Tag cosine** (`buildTagCosineMap`): cosine similarity between the
+ *  - **Tag cosine** (`TrackSignals.tagCosine`): cosine similarity between the
  *    track's tag-weight vector and the user's L2-normalized tag-affinity
  *    vector (computed from decayed listening history). Replaces the
  *    older "sum of include-tag weights" heuristic — every recipe now
  *    gets a tag-affinity signal, not just those with explicit tags.
  *
- *  - **Completion** (`buildCompletionMap`): completed-listen ratio over
+ *  - **Completion** (`TrackSignals.completion`): completed-listen ratio over
  *    the last 60 days. Tracks the user habitually finishes get a small
  *    boost; unknown tracks default to 0.5 (neutral).
  *
  *  - **Loved boost**: additive bonus for Last.fm-loved tracks.
  *
- *  - **Skip penalty** (`buildSkipPenaltyMap`): subtracted from the
+ *  - **Skip penalty** (`TrackSignals.skipPenalty`): subtracted from the
  *    score when a track's 14-day skip-rate is high (linear ramp from
  *    0.4, full penalty at 0.6+).
  *
@@ -70,38 +68,14 @@ class MixGenerator @Inject constructor(
     private val trackSkipEventDao: com.stash.core.data.db.dao.TrackSkipEventDao,
 ) {
 
+    /** Shared taste signals — same maths the autoplay engine ranks with. */
+    private val signals = TrackSignals(listeningEventDao, trackTagDao, trackSkipEventDao)
+
     companion object {
-        /** Recency window for affinity. Decay half-life is what controls "current"-ness. */
-        private const val AFFINITY_WINDOW_MS = 180L * 24 * 60 * 60 * 1000
-
-        /** Half-life of the affinity exponential decay, in milliseconds (30 days). */
-        private const val AFFINITY_HALF_LIFE_MS = 30L * 24 * 60 * 60 * 1000
-
-        /** Window for skip-rate computation. Shorter than affinity — skips age fast. */
-        private const val SKIP_WINDOW_MS = 14L * 24 * 60 * 60 * 1000
-
-        /** Window for completion-rate computation. */
-        private const val COMPLETION_WINDOW_MS = 60L * 24 * 60 * 60 * 1000
-
         private const val BASE_AFFINITY_WEIGHT = 0.40f      // was 0.50; tag-cosine takes some
         private const val BASE_TAG_WEIGHT      = 0.35f      // was 0.30
         private const val BASE_COMPLETION_W    = 0.10f      // NEW
         private const val LOVED_BOOST          = 0.5f       // additive, not weight
-        private const val SKIP_PENALTY_HEAVY   = 0.6f       // when skip-rate >= ramp
-        private const val SKIP_PENALTY_RAMP    = 0.6f       // skip-rate above which heavy penalty kicks in
-
-        /**
-         * Scalar applied to the Last.fm-user-playcount term INSIDE
-         * buildAffinityMap, before the outer BASE_AFFINITY_WEIGHT
-         * multiplication. Intentionally lower than parity with local
-         * plays — Last.fm playcount counts every scrobble across every
-         * service the user ever connected, so a single track with 200
-         * lifetime LFM plays shouldn't outweigh a 30-play in-Stash
-         * track from this month. Net effect: LFM contributes ~12% of
-         * the affinity weight (0.3 * 0.40), local contributes ~40%.
-         * Rebalance only after on-device data shows the bias is wrong.
-         */
-        private const val LFM_PLAYCOUNT_W      = 0.3f
         private const val SORT_JITTER          = 0.10f      // was 0.05; ~12% of nominal score range
     }
 
@@ -155,11 +129,11 @@ class MixGenerator @Inject constructor(
         if (pool.isEmpty()) return emptyList()
 
         // Step 6: score + sort.
-        val userVector = buildUserTagAffinityVector()
-        val affinityMap = buildAffinityMap(pool)
-        val tagCosineMap = buildTagCosineMap(pool, userVector)
-        val completionMap = buildCompletionMap(pool)
-        val skipPenaltyMap = buildSkipPenaltyMap(pool)
+        val userVector = signals.userTagVector()
+        val affinityMap = signals.affinity(pool)
+        val tagCosineMap = signals.tagCosine(pool, userVector)
+        val completionMap = signals.completion(pool)
+        val skipPenaltyMap = signals.skipPenalty(pool)
 
         val wAff = BASE_AFFINITY_WEIGHT + recipe.affinityBias * 0.3f
         val wTag = BASE_TAG_WEIGHT
@@ -222,105 +196,6 @@ class MixGenerator @Inject constructor(
     }
 
     /**
-     * Build per-track affinity scores in the range [0, 1]. Combines two
-     * signals:
-     *  - In-Stash plays in the last 180 days, log-normalized by the
-     *    library's max count and exponentially decayed by recency
-     *    (30-day half-life from [AFFINITY_HALF_LIFE_MS]).
-     *  - Last.fm cross-source playcount (only present after Last.fm
-     *    track-info enrichment) scaled by [LFM_PLAYCOUNT_W].
-     *
-     * Tracks the user has neither played in-Stash nor scrobbled to
-     * Last.fm get a zero entry (omitted from the map).
-     */
-    private suspend fun buildAffinityMap(pool: List<TrackEntity>): Map<Long, Float> {
-        val now = System.currentTimeMillis()
-        val since = now - AFFINITY_WINDOW_MS
-        val rows = listeningEventDao.getPlayCountsSinceWithLatest(since)
-        val poolIds = pool.mapTo(HashSet(pool.size)) { it.id }
-
-        if (rows.isEmpty() && pool.none { (it.lastfmUserPlaycount ?: 0) > 0 }) {
-            return emptyMap()
-        }
-
-        val maxPlays = (rows.maxOfOrNull { it.plays } ?: 1).coerceAtLeast(1)
-        val maxLfmPlays = pool.maxOfOrNull { it.lastfmUserPlaycount ?: 0 }?.coerceAtLeast(1) ?: 1
-
-        val byId = rows.associateBy { it.trackId }
-        val result = HashMap<Long, Float>(pool.size)
-        for (track in pool) {
-            if (track.id !in poolIds) continue
-            val row = byId[track.id]
-            // In-Stash plays with exponential decay
-            val localTerm = if (row != null) {
-                val logNorm = (ln(1f + row.plays.toFloat()) /
-                    ln(1f + maxPlays.toFloat())).coerceIn(0f, 1f)
-                val ageMs = (now - row.latestPlayedAt).coerceAtLeast(0)
-                val decay = 0.5f.pow(ageMs.toFloat() / AFFINITY_HALF_LIFE_MS)
-                logNorm * decay
-            } else 0f
-            // Last.fm cross-source playcount (only present after enrichment)
-            val lfmTerm = track.lastfmUserPlaycount?.let { lpc ->
-                (ln(1f + lpc.toFloat()) /
-                    ln(1f + maxLfmPlays.toFloat())).coerceIn(0f, 1f) * LFM_PLAYCOUNT_W
-            } ?: 0f
-            val combined = (localTerm + lfmTerm).coerceIn(0f, 1f)
-            if (combined > 0f) result[track.id] = combined
-        }
-        return result
-    }
-
-    /**
-     * v0.9.16: Build the L2-normalized user tag-affinity vector by
-     * weighting each track's tag vector by its (decayed) play weight
-     * and summing. Used as one half of the cosine-similarity scoring
-     * term against each candidate's own tag vector.
-     *
-     * Filters the `__untaggable__` sentinel rows that
-     * [com.stash.core.data.sync.workers.TagEnrichmentWorker] writes
-     * for tracks Last.fm couldn't tag.
-     */
-    private suspend fun buildUserTagAffinityVector(): Map<String, Float> {
-        val now = System.currentTimeMillis()
-        val since = now - AFFINITY_WINDOW_MS
-        val rows = listeningEventDao.getPlayCountsSinceWithLatest(since)
-        if (rows.isEmpty()) return emptyMap()
-
-        val plays = rows.map { row ->
-            val ageMs = (now - row.latestPlayedAt).coerceAtLeast(0)
-            val decay = 0.5f.pow(ageMs.toFloat() / AFFINITY_HALF_LIFE_MS)
-            val weight = ln(1f + row.plays.toFloat()) * decay
-            val tags = trackTagDao.getByTrack(row.trackId)
-                .filter { it.tag != "__untaggable__" }
-                .associate { it.tag.lowercase() to it.weight }
-            UserTagAffinity.PlayWithTags(weight = weight, tags = tags)
-        }
-        return UserTagAffinity.compute(plays)
-    }
-
-    /**
-     * v0.9.16: Per-candidate cosine similarity against the user's tag
-     * vector. Replaces the old "sum of include-tag weights" heuristic
-     * — now every recipe benefits from tag affinity, not just those
-     * with explicit include-tags.
-     */
-    private suspend fun buildTagCosineMap(
-        pool: List<TrackEntity>,
-        userVector: Map<String, Float>,
-    ): Map<Long, Float> {
-        if (userVector.isEmpty()) return emptyMap()
-        val result = HashMap<Long, Float>(pool.size)
-        for (track in pool) {
-            val tags = trackTagDao.getByTrack(track.id)
-                .filter { it.tag != "__untaggable__" }
-                .associate { it.tag.lowercase() to it.weight }
-            if (tags.isEmpty()) continue
-            result[track.id] = UserTagAffinity.cosine(tags, userVector)
-        }
-        return result
-    }
-
-    /**
      * v0.9.16: Top-N user tags ordered by tag-affinity weight. Used by
      * [com.stash.core.data.sync.workers.StashMixRefreshWorker] to drive
      * the TAG_GRAPH seed strategy.
@@ -336,7 +211,7 @@ class MixGenerator @Inject constructor(
      * stay empty until the user's library has any tag data.
      */
     suspend fun computeUserTopTags(limit: Int = 10): List<String> {
-        val vector = buildUserTagAffinityVector()
+        val vector = signals.userTagVector()
         if (vector.isNotEmpty()) {
             return vector.entries
                 .sortedByDescending { it.value }
@@ -349,48 +224,6 @@ class MixGenerator @Inject constructor(
             .take(limit)
             .map { it.tag }
             .toList()
-    }
-
-    /**
-     * v0.9.16: Per-track completion rate over the last 60 days. Tracks
-     * with no listening history get omitted (caller defaults to 0.5
-     * neutral so brand-new tracks aren't penalized).
-     */
-    private suspend fun buildCompletionMap(pool: List<TrackEntity>): Map<Long, Float> {
-        val since = System.currentTimeMillis() - COMPLETION_WINDOW_MS
-        val ids = pool.map { it.id }
-        if (ids.isEmpty()) return emptyMap()
-        val rows = listeningEventDao.getCompletionStatsSince(ids, since)
-        return rows.associate {
-            it.trackId to (it.completed.toFloat() / it.total.coerceAtLeast(1).toFloat())
-        }
-    }
-
-    /**
-     * v0.9.16: Per-track skip-rate penalty over the last 14 days.
-     * Tracks with fewer than 3 total encounters are excluded (not
-     * enough signal). Skip-rate >= [SKIP_PENALTY_RAMP] gets the
-     * shadow-block-grade [SKIP_PENALTY_HEAVY] penalty; skip-rate
-     * between 0.4 and the ramp gets a linear ramp so a track on
-     * its way out of rotation degrades smoothly instead of cliff-
-     * dropping.
-     */
-    private suspend fun buildSkipPenaltyMap(pool: List<TrackEntity>): Map<Long, Float> {
-        val since = System.currentTimeMillis() - SKIP_WINDOW_MS
-        val ids = pool.map { it.id }
-        if (ids.isEmpty()) return emptyMap()
-        val rows = trackSkipEventDao.getSkipStatsSince(ids, since)
-        return rows.mapNotNull { row ->
-            val total = row.skips + row.plays
-            if (total < 3) return@mapNotNull null  // not enough data
-            val rate = row.skips.toFloat() / total
-            val penalty = when {
-                rate >= SKIP_PENALTY_RAMP -> SKIP_PENALTY_HEAVY              // shadow-block-ish
-                rate >= 0.4f -> (rate - 0.4f) / 0.2f * 0.4f                   // linear ramp
-                else -> 0f
-            }
-            if (penalty > 0f) row.trackId to penalty else null
-        }.toMap()
     }
 
     /**

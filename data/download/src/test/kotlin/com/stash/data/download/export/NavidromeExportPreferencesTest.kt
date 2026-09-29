@@ -69,5 +69,19 @@ class NavidromeExportPreferencesTest {
         assertThat(unavailableToken.token).isEmpty()
         assertThat(unavailableToken.tokenConfigured).isFalse()
         assertThat(unavailableToken.tokenDecryptionFailed).isTrue()
+
+        // Full-export resume point: per server, cleared on completion. Kept in
+        // this test because the DataStore singleton is bound to the first
+        // test's Robolectric files dir, which the file check above reads.
+        preferences.clearFullExportProgress()
+        assertThat(preferences.fullExportResumeAfter("https://a.example.test")).isEqualTo(Long.MIN_VALUE)
+
+        preferences.saveFullExportProgress("https://a.example.test", 42L)
+        assertThat(preferences.fullExportResumeAfter("https://a.example.test")).isEqualTo(42L)
+        // Another server starts from the top.
+        assertThat(preferences.fullExportResumeAfter("https://b.example.test")).isEqualTo(Long.MIN_VALUE)
+
+        preferences.clearFullExportProgress()
+        assertThat(preferences.fullExportResumeAfter("https://a.example.test")).isEqualTo(Long.MIN_VALUE)
     }
 }

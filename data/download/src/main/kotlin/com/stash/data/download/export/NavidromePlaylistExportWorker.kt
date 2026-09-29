@@ -1,16 +1,21 @@
 package com.stash.data.download.export
 
 import android.content.Context
+import android.content.pm.ServiceInfo
 import androidx.hilt.work.HiltWorker
 import androidx.work.CoroutineWorker
+import androidx.work.ForegroundInfo
+import androidx.work.WorkManager
 import androidx.work.WorkerParameters
 import com.stash.core.data.db.dao.PlaylistDao
 import com.stash.core.data.db.dao.TrackDao
 import com.stash.core.data.db.entity.TrackEntity
+import com.stash.core.data.sync.SyncNotificationManager
 import com.stash.core.model.MusicSource
 import dagger.assisted.Assisted
 import dagger.assisted.AssistedInject
 import java.util.Locale
+import kotlinx.coroutines.CancellationException
 
 @HiltWorker
 class NavidromePlaylistExportWorker @AssistedInject constructor(
@@ -23,7 +28,10 @@ class NavidromePlaylistExportWorker @AssistedInject constructor(
     private val scheduler: NavidromeUploadScheduler,
     private val coverResolver: NavidromeCoverResolver,
     private val runtimeConstraints: NavidromeRuntimeConstraints,
+    private val notifications: SyncNotificationManager,
 ) : CoroutineWorker(appContext, params) {
+    override suspend fun getForegroundInfo(): ForegroundInfo = exportForegroundInfo("Preparing…", -1f)
+
     override suspend fun doWork(): Result {
         val config = prefs.current()
         if (!config.configured) return Result.success()
@@ -34,7 +42,12 @@ class NavidromePlaylistExportWorker @AssistedInject constructor(
         var retryableFailure = false
 
         if (fullExport) {
-            retryableFailure = exportDownloadedTracks(trackDao.getAllDownloaded(), stats)
+            // A full library pass takes far longer than the ~10 minutes Android
+            // grants background work, so run it as a foreground job. Starting a
+            // foreground service can be refused (e.g. from the background on
+            // Android 12+); the resume point below still makes progress then.
+            trySetForeground("Uploading your library…", -1f)
+            retryableFailure = exportDownloadedTracks(trackDao.getAllDownloaded(), stats, config.serverUrl)
         }
         if (exportPlaylistManifests(stats)) retryableFailure = true
 
@@ -49,6 +62,8 @@ class NavidromePlaylistExportWorker @AssistedInject constructor(
             stats.trackFailures == 0 &&
             stats.coverFailures == 0 &&
             stats.playlistFailures == 0
+        // Only a pass that reached every track and the playlists starts over next time.
+        if (fullExport && !retryableFailure) prefs.clearFullExportProgress()
         prefs.recordResult(
             result = if (successful) {
                 if (fullExport) "full_export_complete" else "playlist_export_complete"
@@ -60,11 +75,33 @@ class NavidromePlaylistExportWorker @AssistedInject constructor(
         return if (retryableFailure) Result.retry() else Result.success()
     }
 
-    private suspend fun exportDownloadedTracks(tracks: List<TrackEntity>, stats: ExportStats): Boolean {
+    /**
+     * Uploads every downloaded track in id order, resuming after the last
+     * track a previous (stopped) run got through. The resume point only
+     * advances over an unbroken run of handled tracks, so a track that hit
+     * a retryable failure is sent again on the retry.
+     */
+    private suspend fun exportDownloadedTracks(
+        tracks: List<TrackEntity>,
+        stats: ExportStats,
+        serverUrl: String,
+    ): Boolean {
         var retryableFailure = false
         val uploadedCovers = mutableSetOf<String>()
-        tracks.filter { it.isDownloaded && !it.filePath.isNullOrBlank() }.forEach { track ->
-            val filePath = track.filePath ?: return@forEach
+        val resumeAfter = prefs.fullExportResumeAfter(serverUrl)
+        val pending = tracks
+            .filter { it.isDownloaded && !it.filePath.isNullOrBlank() }
+            .sortedBy { it.id }
+        val todo = pending.filter { it.id > resumeAfter }
+        val alreadyDone = pending.size - todo.size
+        var lastHandledId: Long? = null
+        var savedId: Long? = null
+        todo.forEachIndexed { index, track ->
+            if (index % PROGRESS_EVERY == 0) {
+                val done = alreadyDone + index
+                trySetForeground("$done of ${pending.size} songs", done.toFloat() / pending.size)
+            }
+            val filePath = track.filePath ?: return@forEachIndexed
             val album = track.album.takeIf(String::isNotBlank)
             val relativePath = scheduler.relativePathForTrack(
                 track.artist,
@@ -101,9 +138,44 @@ class NavidromePlaylistExportWorker @AssistedInject constructor(
                     }
                 }
             }
+            if (!retryableFailure) {
+                lastHandledId = track.id
+                if (index % CHECKPOINT_EVERY == CHECKPOINT_EVERY - 1 || index == todo.lastIndex) {
+                    prefs.saveFullExportProgress(serverUrl, track.id)
+                    savedId = track.id
+                }
+            }
+        }
+        // The first retryable failure ends the unbroken run: resume right before it.
+        val resumePoint = lastHandledId
+        if (retryableFailure && resumePoint != null && resumePoint != savedId) {
+            prefs.saveFullExportProgress(serverUrl, resumePoint)
         }
         return retryableFailure
     }
+
+    /** Foreground promotion is best effort; a stop request (cancellation) is not swallowed. */
+    private suspend fun trySetForeground(text: String, progress: Float) {
+        try {
+            setForeground(exportForegroundInfo(text, progress))
+        } catch (e: CancellationException) {
+            throw e
+        } catch (_: Exception) {
+            // Refused (e.g. started from the background); the resume point covers restarts.
+        }
+    }
+
+    private fun exportForegroundInfo(text: String, progress: Float): ForegroundInfo =
+        ForegroundInfo(
+            SyncNotificationManager.NOTIFICATION_ID_NAVIDROME_EXPORT,
+            notifications.buildProgressNotification(
+                title = "Uploading to Navidrome",
+                text = text,
+                progress = progress,
+                cancelIntent = WorkManager.getInstance(applicationContext).createCancelPendingIntent(id),
+            ),
+            ServiceInfo.FOREGROUND_SERVICE_TYPE_DATA_SYNC,
+        )
 
     private suspend fun exportPlaylistManifests(stats: ExportStats): Boolean {
         var retryableFailure = false
@@ -187,5 +259,7 @@ class NavidromePlaylistExportWorker @AssistedInject constructor(
 
     companion object {
         const val KEY_FULL_EXPORT = "full_export"
+        private const val CHECKPOINT_EVERY = 10
+        private const val PROGRESS_EVERY = 5
     }
 }

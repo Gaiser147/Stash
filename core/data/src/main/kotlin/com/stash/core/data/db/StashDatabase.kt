@@ -79,7 +79,7 @@ import com.stash.core.data.db.entity.TrackTagEntity
         LastFmCacheEntity::class,
         SpotifyResolutionEntity::class,
     ],
-    version = 32,
+    version = 33,
     exportSchema = true,
 )
 @TypeConverters(Converters::class)
@@ -852,6 +852,24 @@ abstract class StashDatabase : RoomDatabase() {
                         attempts INTEGER NOT NULL DEFAULT 1
                     )
                     """.trimIndent()
+                )
+            }
+        }
+
+        /**
+         * v32 → v33: `listening_events.nd_scrobbled` for reporting plays to
+         * the user's Navidrome server. Existing rows are marked as already
+         * reported so turning the feature on only sends plays from now on.
+         */
+        val MIGRATION_32_33 = object : Migration(32, 33) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL(
+                    "ALTER TABLE listening_events ADD COLUMN nd_scrobbled INTEGER NOT NULL DEFAULT 0",
+                )
+                db.execSQL("UPDATE listening_events SET nd_scrobbled = 1")
+                db.execSQL(
+                    "CREATE INDEX IF NOT EXISTS index_listening_events_nd_scrobbled " +
+                        "ON listening_events (nd_scrobbled)",
                 )
             }
         }

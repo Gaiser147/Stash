@@ -255,4 +255,95 @@ interface ListeningEventDao {
         """
     )
     suspend fun getTopTracksByLocalPlays(sinceEpochMs: Long, limit: Int): List<TrackArtistTitle>
+
+    /**
+     * "After A you often play B": for every listen of a track in [trackIds]
+     * since [sinceMs], counts the OTHER tracks that started within
+     * [windowMs] afterwards. This is the personal, sequence-aware
+     * collaborative-filtering signal for
+     * [com.stash.core.data.autoplay.LibraryCandidateSource] — it captures
+     * listening habits (album runs, go-to follow-ups) that tags and
+     * artist similarity can't see.
+     */
+    @Query(
+        """
+        SELECT e2.track_id AS trackId, COUNT(*) AS plays
+        FROM listening_events e1
+        INNER JOIN listening_events e2
+            ON e2.started_at > e1.started_at
+           AND e2.started_at <= e1.started_at + :windowMs
+           AND e2.track_id != e1.track_id
+        WHERE e1.track_id IN (:trackIds) AND e1.started_at >= :sinceMs
+        GROUP BY e2.track_id
+        ORDER BY plays DESC
+        LIMIT :limit
+        """
+    )
+    suspend fun getTransitionsFrom(
+        trackIds: List<Long>,
+        sinceMs: Long,
+        windowMs: Long,
+        limit: Int = 200,
+    ): List<TrackPlayCount>
+
+    /**
+     * The songs heard most recently, newest first, one row per track. Songs
+     * that were played to the end sort before ones that were only started,
+     * so a burst of skips doesn't become the seed of a new mix. Seeds
+     * [com.stash.core.data.autoplay.AutoplayEngine.buildMix].
+     */
+    @Query(
+        """
+        SELECT track_id FROM listening_events
+        GROUP BY track_id
+        ORDER BY MAX(completed_at IS NOT NULL) DESC, MAX(started_at) DESC
+        LIMIT :limit
+        """
+    )
+    suspend fun getRecentlyHeardTrackIds(limit: Int): List<Long>
+
+    /**
+     * Plays not yet reported to the user's Navidrome server, oldest first so
+     * the server's history keeps the real listening order.
+     */
+    @Query(
+        """
+        SELECT * FROM listening_events
+        WHERE nd_scrobbled = 0
+        ORDER BY started_at ASC
+        LIMIT :limit
+        """
+    )
+    suspend fun pendingNavidromeScrobbles(limit: Int = 50): List<ListeningEventEntity>
+
+    /**
+     * Keyset page of pending plays after ([afterStartedAt], [afterId]), in the same
+     * order as [pendingNavidromeScrobbles]. Lets the reporter walk past plays that
+     * have to keep waiting (song not on the server yet) instead of re-reading them.
+     */
+    @Query(
+        """
+        SELECT * FROM listening_events
+        WHERE nd_scrobbled = 0
+          AND (started_at > :afterStartedAt OR (started_at = :afterStartedAt AND id > :afterId))
+        ORDER BY started_at ASC, id ASC
+        LIMIT :limit
+        """
+    )
+    suspend fun pendingNavidromeScrobblesAfter(
+        afterStartedAt: Long,
+        afterId: Long,
+        limit: Int = 50,
+    ): List<ListeningEventEntity>
+
+    @Query("UPDATE listening_events SET nd_scrobbled = 1 WHERE id = :eventId")
+    suspend fun markNavidromeScrobbled(eventId: Long)
+
+    /** Count of plays waiting for Navidrome, for the Settings status line. */
+    @Query("SELECT COUNT(*) FROM listening_events WHERE nd_scrobbled = 0")
+    fun pendingNavidromeScrobbleCount(): Flow<Int>
+
+    /** Marks every pending play as handled (reporting switched off). */
+    @Query("UPDATE listening_events SET nd_scrobbled = 1 WHERE nd_scrobbled = 0")
+    suspend fun markAllNavidromeScrobbled()
 }

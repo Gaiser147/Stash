@@ -41,6 +41,9 @@ class SyncNotificationManager @Inject constructor(
         /** Notification ID for the app update notification. */
         const val NOTIFICATION_ID_UPDATE = 9003
 
+        /** Notification ID for the Navidrome full-export foreground notification. */
+        const val NOTIFICATION_ID_NAVIDROME_EXPORT = 9005
+
         /**
          * Channel ID for lossless-source events that need user
          * attention — currently only the "captcha expired" prompt
