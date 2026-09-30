@@ -28,6 +28,9 @@ enum class AutoplayOrigin {
  * @property lastFmMatch Last.fm similar-track/artist match score. Discovery only.
  * @property skipPenalty long-term skip-rate penalty.
  * @property recentPenalty played in the last day — avoid instant repeats.
+ * @property flow how well it would follow what was just heard by sound
+ *   (tempo, loudness, brightness, key; see [AudioFlow]).
+ *   [AudioFlow.NEUTRAL] when either side hasn't been analysed.
  */
 data class AutoplayCandidate(
     val key: String,
@@ -42,6 +45,7 @@ data class AutoplayCandidate(
     val lastFmMatch: Float = 0f,
     val skipPenalty: Float = 0f,
     val recentPenalty: Float = 0f,
+    val flow: Float = AudioFlow.NEUTRAL,
 ) {
     /** Lowercased artist for spread / session-block comparisons. */
     val artistKey: String get() = artist.trim().lowercase()

@@ -310,6 +310,7 @@ class StashApplication : Application(), Configuration.Provider {
             }
         }
         YtDlpUpdateWorker.schedulePeriodicUpdate(this)
+        com.stash.data.download.export.NavidromeAudioFeaturesWorker.schedulePeriodic(this)
         UpdateCheckWorker.schedulePeriodicCheck(this)
 
         // Stash Mixes scheduling. Daily refresh for mix regeneration,

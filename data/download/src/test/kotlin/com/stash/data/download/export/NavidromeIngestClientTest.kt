@@ -146,6 +146,39 @@ class NavidromeIngestClientTest {
     }
 
     @Test
+    fun `audio features are paged and parsed, bad rows skipped`() = runTest {
+        server.enqueue(
+            MockResponse().setResponseCode(200).setBody(
+                """{"ok":true,"next":7,"features":[""" +
+                    """{"path":"a/b/one.opus","seq":5,"version":1,"bpm":124.5,"beat_confidence":0.8,""" +
+                    """"beat_regularity":0.9,"loudness_db":-9.2,"dynamics_db":6.1,"brightness_hz":2500.0,""" +
+                    """"onset_rate":3.2,"key":7,"mode":"minor","key_strength":0.66,"camelot":"6A"},""" +
+                    """{"path":"a/b/broken.opus","seq":6},""" +
+                    """{"path":"a/b/two.flac","seq":7,"bpm":90,"loudness_db":-14,"key":0,"mode":"major"}]}""",
+            ),
+        )
+
+        val page = requireNotNull(client.fetchAudioFeatures(after = 4))
+
+        assertThat(page.next).isEqualTo(7L)
+        assertThat(page.items.map { it.path }).containsExactly("a/b/one.opus", "a/b/two.flac").inOrder()
+        val one = page.items.first()
+        assertThat(one.bpm).isEqualTo(124.5f)
+        assertThat(one.pitchClass).isEqualTo(7)
+        assertThat(one.minor).isTrue()
+        assertThat(page.items[1].minor).isFalse()
+        val request = requireNotNull(server.takeRequest(3, TimeUnit.SECONDS))
+        assertThat(request.path).isEqualTo("/stash-ingest/v1/features?after=4&limit=500")
+        assertThat(request.getHeader("Authorization")).isEqualTo("Bearer dedicated-test-token")
+    }
+
+    @Test
+    fun `an older server without features gives null`() = runTest {
+        server.enqueue(MockResponse().setResponseCode(404).setBody("""{"ok":false,"error":"not found"}"""))
+        assertThat(client.fetchAudioFeatures(after = 0)).isNull()
+    }
+
+    @Test
     fun `a dead cover link is skipped instead of retried`() = runTest {
         // The art CDN answers 404; nothing may be sent to the ingest server.
         server.enqueue(MockResponse().setResponseCode(404))

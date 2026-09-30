@@ -59,6 +59,26 @@ data class NavidromeSyncSummary(
     val playlistFailures: Int,
 )
 
+/** One analysed file from `GET /v1/features`; [path] is relative to the Stash prefix. */
+data class RemoteAudioFeatures(
+    val path: String,
+    val seq: Long,
+    val version: Int,
+    val bpm: Float,
+    val beatConfidence: Float,
+    val beatRegularity: Float,
+    val loudnessDb: Float,
+    val dynamicsDb: Float,
+    val brightnessHz: Float,
+    val onsetRate: Float,
+    val pitchClass: Int,
+    val minor: Boolean,
+    val keyStrength: Float,
+)
+
+/** A page of [RemoteAudioFeatures]; [next] is the cursor for the following page. */
+data class AudioFeaturesPage(val items: List<RemoteAudioFeatures>, val next: Long)
+
 /**
  * Authenticated client for the versioned stash-ingest contract.
  *
@@ -200,6 +220,50 @@ class NavidromeIngestClient @Inject constructor(
                 Log.w(TAG, "Navidrome summary upload failed code=network_error")
                 NavidromeUploadOutcome.RetryableFailure
             }
+        }
+
+    /**
+     * The next page of server-side audio features after [after], or null when
+     * the server is unreachable, not configured, or doesn't analyse audio
+     * (older stash-ingest). Rows the app can't parse are skipped.
+     */
+    suspend fun fetchAudioFeatures(after: Long, limit: Int = FEATURES_PAGE): AudioFeaturesPage? =
+        withContext(Dispatchers.IO) {
+            val endpoint = endpointAndToken() ?: return@withContext null
+            runCatching {
+                val request = Request.Builder()
+                    .url("${endpoint.baseUrl}/v1/features?after=$after&limit=$limit")
+                    .get()
+                    .authenticated(endpoint.token)
+                    .build()
+                uploadHttpClient.newCall(request).execute().use { response ->
+                    if (!response.isSuccessful) return@use null
+                    val body = response.body?.string() ?: return@use null
+                    val json = JSONObject(body)
+                    val array = json.optJSONArray("features") ?: return@use null
+                    val items = (0 until array.length()).mapNotNull { i ->
+                        val o = array.optJSONObject(i) ?: return@mapNotNull null
+                        runCatching {
+                            RemoteAudioFeatures(
+                                path = o.getString("path"),
+                                seq = o.getLong("seq"),
+                                version = o.optInt("version", 1),
+                                bpm = o.getDouble("bpm").toFloat(),
+                                beatConfidence = o.optDouble("beat_confidence", 0.0).toFloat(),
+                                beatRegularity = o.optDouble("beat_regularity", 0.0).toFloat(),
+                                loudnessDb = o.getDouble("loudness_db").toFloat(),
+                                dynamicsDb = o.optDouble("dynamics_db", 0.0).toFloat(),
+                                brightnessHz = o.optDouble("brightness_hz", 0.0).toFloat(),
+                                onsetRate = o.optDouble("onset_rate", 0.0).toFloat(),
+                                pitchClass = o.getInt("key"),
+                                minor = o.optString("mode") == "minor",
+                                keyStrength = o.optDouble("key_strength", 0.0).toFloat(),
+                            )
+                        }.getOrNull()
+                    }
+                    AudioFeaturesPage(items, json.optLong("next", after))
+                }
+            }.getOrNull()
         }
 
     suspend fun checkConnection(): NavidromeConnectionCheck = withContext(Dispatchers.IO) {
@@ -452,6 +516,7 @@ class NavidromeIngestClient @Inject constructor(
         private const val TAG = "NavidromeIngestClient"
         private const val CONTRACT_VERSION = "1"
         private const val MAX_COVER_BYTES = 10L * 1024L * 1024L
+        private const val FEATURES_PAGE = 500
         private const val MAX_CONTROL_RESPONSE_BYTES = 64L * 1024L
         private val PERMANENT_STATUS_CODES = (400..499).filterNot { it == 408 || it == 429 }.toSet()
         private val COVER_EXTENSIONS = setOf("jpg", "jpeg", "png", "webp")

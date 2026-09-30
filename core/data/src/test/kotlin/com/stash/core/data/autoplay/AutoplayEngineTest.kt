@@ -1,6 +1,8 @@
 package com.stash.core.data.autoplay
 
+import com.stash.core.data.db.dao.AudioFeaturesDao
 import com.stash.core.data.db.dao.ListeningEventDao
+import com.stash.core.data.db.entity.AudioFeaturesEntity
 import com.stash.core.data.db.dao.TrackDao
 import com.stash.core.data.db.entity.TrackEntity
 import com.stash.core.data.lastfm.LastFmApiClient
@@ -32,8 +34,9 @@ class AutoplayEngineTest {
     private val preference: AutoplayPreference = mockk(relaxed = true)
     private val matcher = TrackMatcher()
 
+    private val audioFeatures: AudioFeaturesDao = mockk(relaxed = true)
     private val engine = AutoplayEngine(
-        trackDao, listeningEventDao, signals, library, discovery, lastFm, yt, matcher, preference,
+        trackDao, listeningEventDao, signals, library, discovery, lastFm, yt, matcher, preference, audioFeatures,
     )
 
     private val libraryRows = (1L..12L).map {
@@ -171,5 +174,34 @@ class AutoplayEngineTest {
 
         assertEquals(6, mix.size)
     }
-}
 
+    private fun features(trackId: Long, bpm: Float, loudness: Float, pitchClass: Int = 0) = AudioFeaturesEntity(
+        path = "p/$trackId", trackId = trackId, bpm = bpm, beatConfidence = 0.8f, beatRegularity = 0.9f,
+        loudnessDb = loudness, dynamicsDb = 6f, brightnessHz = 2500f, onsetRate = 3f,
+        pitchClass = pitchClass, minor = false, keyStrength = 0.7f, analyzerVersion = 1, seq = trackId,
+    )
+
+    @Test fun `the session's sound comes from what was heard and scores the candidates`() = runTest {
+        coEvery { audioFeatures.getByTrackIds(any()) } answers {
+            val ids = firstArg<Collection<Long>>()
+            listOf(features(1, 124f, -9f), features(2, 125f, -9.5f, pitchClass = 7), features(3, 82f, -20f, pitchClass = 6))
+                .filter { it.trackId in ids }
+        }
+        val session = engine.start(listOf(Track(id = 1, title = "Song 1", artist = "Artist 1")), Random(1))
+        engine.recordOutcome(session, Track(id = 1, title = "Song 1", artist = "Artist 1"), 200_000, 210_000)
+
+        val context = engine.buildContext(session, libraryRows.mapTo(HashSet()) { it.id }, online = false)
+        assertEquals(124f, context.lastAudio!!.bpm, 0.01f)
+
+        val scored = engine.withFlow(
+            context,
+            listOf(2L, 3L, 4L).map { id ->
+                AutoplayCandidate(key = "k$id", artist = "A$id", title = "T$id", origin = AutoplayOrigin.LIBRARY, track = libraryRows[(id - 1).toInt()])
+            },
+        ).associate { it.track!!.id to it.flow }
+        // Same tempo and loudness, a fifth away (Camelot neighbour) beats a slow, quiet song.
+        assertTrue("close ${scored[2]} vs far ${scored[3]}", scored.getValue(2L) > 0.8f && scored.getValue(3L) < 0.4f)
+        // Not analysed: neutral.
+        assertEquals(AudioFlow.NEUTRAL, scored.getValue(4L), 0f)
+    }
+}

@@ -81,6 +81,8 @@ class NavidromeExportPreferences @Inject constructor(
         val fullExportServer = stringPreferencesKey("full_export_server")
         val fullExportAfterTrackId = longPreferencesKey("full_export_after_track_id")
         val fullExportRetryIds = stringSetPreferencesKey("full_export_retry_track_ids")
+        val featuresServer = stringPreferencesKey("audio_features_server")
+        val featuresAfter = longPreferencesKey("audio_features_after_seq")
     }
 
     val config: Flow<NavidromeExportConfig> = context.navidromeExportDataStore.data.map(::decode)
@@ -181,6 +183,19 @@ class NavidromeExportPreferences @Inject constructor(
             it.remove(Keys.fullExportServer)
             it.remove(Keys.fullExportAfterTrackId)
             it.remove(Keys.fullExportRetryIds)
+        }
+    }
+
+    /** Paging cursor for `GET /v1/features` on [serverUrl]; 0 for another server. */
+    suspend fun audioFeaturesCursor(serverUrl: String): Long {
+        val prefs = context.navidromeExportDataStore.data.first()
+        return if (prefs[Keys.featuresServer] == serverUrl) prefs[Keys.featuresAfter] ?: 0L else 0L
+    }
+
+    suspend fun saveAudioFeaturesCursor(serverUrl: String, after: Long) {
+        context.navidromeExportDataStore.edit {
+            it[Keys.featuresServer] = serverUrl
+            it[Keys.featuresAfter] = after
         }
     }
 
