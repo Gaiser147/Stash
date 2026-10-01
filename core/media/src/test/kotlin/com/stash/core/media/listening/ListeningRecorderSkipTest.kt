@@ -77,6 +77,9 @@ class ListeningRecorderSkipTest {
         override fun stopRadio() = Unit
         override val radioSeedLabel: StateFlow<String?> = MutableStateFlow(null)
         override suspend fun startPersonalMix() = false
+        override suspend fun moreLikeThis() = false
+        override fun adoptExternalQueue(tracks: List<Track>, personalMix: Boolean) = Unit
+        override suspend fun queueItemsFor(tracks: List<Track>): List<androidx.media3.common.MediaItem> = emptyList()
         override val personalMixActive: StateFlow<Boolean> = MutableStateFlow(false)
         override suspend fun addNext(track: Track) = Unit
         override suspend fun addToQueue(track: Track) = Unit

@@ -136,6 +136,9 @@ class PlayerRepositoryImpl @Inject constructor(
 
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main)
 
+    /** Same "may stream now" rule the Android Auto browse tree uses. */
+    private val streamingGate = com.stash.core.media.streaming.StreamingGate(streamingPreference, connectivity)
+
     /**
      * Last-known queue/timeline sizes, mirrored out of [updateState] for
      * [CrashDiagnostics]. Plain volatiles (not controller reads) because the
@@ -915,6 +918,61 @@ class PlayerRepositoryImpl @Inject constructor(
         return ++autoplayGeneration
     }
 
+    override suspend fun queueItemsFor(tracks: List<Track>): List<MediaItem> =
+        withContext(Dispatchers.IO) { tracks.map { it.toQueueMediaItem() } }
+
+    override suspend fun moreLikeThis(): Boolean {
+        val engine = autoplayEngine ?: return false
+        val controller = ensureController() ?: return false
+        val current = _playerState.value.currentTrack ?: return false
+        val canStream = canStreamNow()
+        val generation = disarmAutoplay()
+        libraryShuffleActive = false
+        librarySnapshot = emptyList()
+        radioActive = false
+        radioSession = null
+        _radioSeedLabel.value = null
+        val (session, batch) = runCatching {
+            withContext(Dispatchers.Default) {
+                val session = engine.start(listOf(current))
+                session to engine.nextBatch(session, includeStreamable = canStream, allowDiscovery = canStream, size = MORE_LIKE_THIS_SIZE)
+            }
+        }.onFailure { Log.w(TAG, "more like this failed", it) }.getOrNull() ?: return false
+        if (batch.isEmpty() || generation != autoplayGeneration) return false
+        val items = queueItemsFor(batch)
+        // Linear order from here on, so "next" really is the next pick.
+        controller.shuffleModeEnabled = false
+        val index = controller.currentMediaItemIndex
+        val count = controller.mediaItemCount
+        if (index + 1 < count) controller.removeMediaItems(index + 1, count)
+        controller.addMediaItems(items)
+        currentQueueTracks = currentQueueTracks.take(index + 1) + batch
+        autoplaySession = session
+        Log.i(TAG, "more like this '${current.title}': ${batch.size} songs")
+        return true
+    }
+
+    override fun adoptExternalQueue(tracks: List<Track>, personalMix: Boolean) {
+        scope.launch {
+            // Same state reset as setQueueInternal, minus touching the player:
+            // the queue is already on it.
+            libraryShuffleActive = false
+            librarySnapshot = emptyList()
+            radioActive = false
+            radioSession = null
+            _radioSeedLabel.value = null
+            currentQueueTracks = tracks
+            startingPersonalMix = personalMix
+            try {
+                armAutoplay(tracks)
+            } finally {
+                startingPersonalMix = false
+            }
+            _personalMixActive.value = personalMix && tracks.isNotEmpty()
+            Log.i(TAG, "adopted external queue: ${tracks.size} tracks, mix=$personalMix")
+        }
+    }
+
     override suspend fun startPersonalMix(): Boolean {
         val engine = autoplayEngine ?: return false
         ensureController() ?: return false
@@ -940,9 +998,7 @@ class PlayerRepositoryImpl @Inject constructor(
     }
 
     /** Streaming allowed right now: online mode, connected, and cellular permitted if on cellular. */
-    private suspend fun canStreamNow(): Boolean =
-        streamingPreference.current() && connectivity.isConnected() &&
-            (!connectivity.isCellular() || streamingPreference.streamOnCellular.first())
+    private suspend fun canStreamNow(): Boolean = streamingGate.canStreamNow()
 
     /**
      * Append the next autoplay batch. Single-flight via [autoplayGrowMutex];
@@ -1939,6 +1995,9 @@ class PlayerRepositoryImpl @Inject constructor(
 
         /** Autoplay appends once fewer than this many songs are left after the current one. */
         private const val AUTOPLAY_GROW_THRESHOLD = 2
+
+        /** Songs queued by "More like this"; autoplay continues after them. */
+        private const val MORE_LIKE_THIS_SIZE = 15
 
         /** How many tracks each grow appends. Big enough to outpace a fast-skipping user. */
         private const val LIBRARY_SHUFFLE_GROW_BATCH = 50

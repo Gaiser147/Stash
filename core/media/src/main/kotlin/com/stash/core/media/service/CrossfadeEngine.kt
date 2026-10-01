@@ -55,11 +55,21 @@ class CrossfadeEngine(
     @Volatile private var transitioning = false
     fun isTransitioning(): Boolean = transitioning
 
+    /**
+     * The item whose fade was last aborted because it didn't start; the
+     * service hard-cuts into it instead of retrying the fade every tick.
+     */
+    @Volatile var abortedMediaId: String? = null
+        private set
+
     // ── Manual audio focus (shared across both players) ──────────────────────
     private var focusRequest: AudioFocusRequest? = null
     private var pausedForFocusLoss = false
 
     private val focusListener = AudioManager.OnAudioFocusChangeListener { change ->
+        // Every pause the user didn't ask for should be explainable from a log
+        // ("the car just stopped"): LOSS = another app took over for good.
+        android.util.Log.i("StashFocus", "audio focus change=$change paused=$pausedForFocusLoss")
         when (change) {
             AudioManager.AUDIOFOCUS_LOSS -> {
                 pausedForFocusLoss = false
@@ -174,6 +184,15 @@ class CrossfadeEngine(
             // Wait for the incoming to actually produce audio (bounded).
             var w = 0L
             while (!incoming.isPlaying && w < START_TIMEOUT_MS) { delay(STEP_MS); w += STEP_MS }
+            if (!incoming.isPlaying) {
+                // The next song didn't start (stream not reachable, decoder
+                // error). Fading into it would leave a silent master and
+                // playback "just stops"; abort instead and let the current
+                // song end and advance normally (a hard cut).
+                android.util.Log.w("Crossfade", "incoming did not start within ${START_TIMEOUT_MS}ms — aborting fade")
+                abortFade(outgoing, incoming)
+                return@launch
+            }
 
             var elapsed = 0L
             while (elapsed < fadeMs) {
@@ -231,6 +250,19 @@ class CrossfadeEngine(
         to.playbackParameters = from.playbackParameters
         if (history.isNotEmpty()) to.addMediaItems(0, history) // shifts `to`'s current index up
         if (future.isNotEmpty()) to.addMediaItems(future)
+    }
+
+    /** In-job abort (cancelTransition would cancel this very coroutine). */
+    private fun abortFade(outgoing: ExoPlayer, incoming: ExoPlayer) {
+        abortedMediaId = incoming.currentMediaItem?.mediaId
+        outgoing.volume = 1f
+        outgoing.pauseAtEndOfMediaItems = false
+        incoming.playWhenReady = false
+        incoming.stop()
+        incoming.clearMediaItems()
+        incoming.volume = 1f
+        transitionJob = null
+        transitioning = false
     }
 
     /** Abort a pending/in-flight fade and restore the master; spare is reset. */
