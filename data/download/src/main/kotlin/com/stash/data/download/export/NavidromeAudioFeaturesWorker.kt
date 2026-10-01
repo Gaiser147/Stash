@@ -6,7 +6,9 @@ import androidx.hilt.work.HiltWorker
 import androidx.work.Constraints
 import androidx.work.CoroutineWorker
 import androidx.work.ExistingPeriodicWorkPolicy
+import androidx.work.ExistingWorkPolicy
 import androidx.work.NetworkType
+import androidx.work.OneTimeWorkRequestBuilder
 import androidx.work.PeriodicWorkRequestBuilder
 import androidx.work.WorkManager
 import androidx.work.WorkerParameters
@@ -98,15 +100,30 @@ class NavidromeAudioFeaturesWorker @AssistedInject constructor(
         private const val UNIQUE_WORK_NAME = "navidrome-audio-features"
         private const val MAX_ROWS_PER_RUN = 20_000
 
-        /** Every 6 hours on any network; idempotent. */
+        private const val STARTUP_WORK_NAME = "navidrome-audio-features-startup"
+
+        /**
+         * Every 6 hours on any network, plus one run as soon as there is a
+         * network after app start: Android may hold a periodic job back for
+         * hours, and the fetch is incremental, so the extra run is cheap.
+         * Idempotent.
+         */
         fun schedulePeriodic(context: Context) {
-            val request = PeriodicWorkRequestBuilder<NavidromeAudioFeaturesWorker>(6, TimeUnit.HOURS)
-                .setConstraints(Constraints.Builder().setRequiredNetworkType(NetworkType.CONNECTED).build())
-                .build()
-            WorkManager.getInstance(context).enqueueUniquePeriodicWork(
+            val constraints = Constraints.Builder().setRequiredNetworkType(NetworkType.CONNECTED).build()
+            val workManager = WorkManager.getInstance(context)
+            workManager.enqueueUniquePeriodicWork(
                 UNIQUE_WORK_NAME,
                 ExistingPeriodicWorkPolicy.KEEP,
-                request,
+                PeriodicWorkRequestBuilder<NavidromeAudioFeaturesWorker>(6, TimeUnit.HOURS)
+                    .setConstraints(constraints)
+                    .build(),
+            )
+            workManager.enqueueUniqueWork(
+                STARTUP_WORK_NAME,
+                ExistingWorkPolicy.KEEP,
+                OneTimeWorkRequestBuilder<NavidromeAudioFeaturesWorker>()
+                    .setConstraints(constraints)
+                    .build(),
             )
         }
     }
