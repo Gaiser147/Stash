@@ -9,6 +9,7 @@ import java.io.ByteArrayOutputStream
 import java.io.File
 import java.security.MessageDigest
 import java.util.UUID
+import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.TimeUnit
 import javax.inject.Inject
 import javax.inject.Singleton
@@ -58,6 +59,26 @@ data class NavidromeSyncSummary(
     val playlistFailures: Int,
 )
 
+/** One analysed file from `GET /v1/features`; [path] is relative to the Stash prefix. */
+data class RemoteAudioFeatures(
+    val path: String,
+    val seq: Long,
+    val version: Int,
+    val bpm: Float,
+    val beatConfidence: Float,
+    val beatRegularity: Float,
+    val loudnessDb: Float,
+    val dynamicsDb: Float,
+    val brightnessHz: Float,
+    val onsetRate: Float,
+    val pitchClass: Int,
+    val minor: Boolean,
+    val keyStrength: Float,
+)
+
+/** A page of [RemoteAudioFeatures]; [next] is the cursor for the following page. */
+data class AudioFeaturesPage(val items: List<RemoteAudioFeatures>, val next: Long)
+
 /**
  * Authenticated client for the versioned stash-ingest contract.
  *
@@ -70,6 +91,9 @@ class NavidromeIngestClient @Inject constructor(
     private val prefs: NavidromeExportPreferences,
     private val httpClient: OkHttpClient,
 ) {
+    /** baseUrl → whether that server offers the upload pre-check. */
+    private val precheckSupport = ConcurrentHashMap<String, Boolean>()
+
     private val uploadHttpClient = httpClient.newBuilder()
         .readTimeout(2, TimeUnit.MINUTES)
         .writeTimeout(15, TimeUnit.MINUTES)
@@ -91,13 +115,19 @@ class NavidromeIngestClient @Inject constructor(
             if (!uploadFile.exists() || uploadFile.length() <= 0) {
                 return@withContext NavidromeUploadOutcome.RetryableFailure
             }
+            val sha = sha256(uploadFile)
+            val size = uploadFile.length()
+            val metadataValue = metadataHeader(metadata)
+            if (alreadyOnServer(endpoint, "files", relativePath, sha, size, metadataValue)) {
+                return@withContext NavidromeUploadOutcome.Success
+            }
             val request = Request.Builder()
                 .url("${endpoint.baseUrl}/v1/files/${encodePath(relativePath)}")
                 .put(FileRequestBody(uploadFile))
                 .authenticated(endpoint.token)
-                .header("X-Stash-Sha256", sha256(uploadFile))
-                .header("X-Stash-Size", uploadFile.length().toString())
-                .apply { metadataHeader(metadata)?.let { header("X-Stash-Metadata", it) } }
+                .header("X-Stash-Sha256", sha)
+                .header("X-Stash-Size", size.toString())
+                .apply { metadataValue?.let { header("X-Stash-Metadata", it) } }
                 .build()
             execute(request, "audio")
         } catch (_: Exception) {
@@ -112,23 +142,30 @@ class NavidromeIngestClient @Inject constructor(
         withContext(Dispatchers.IO) {
             val endpoint = endpointAndToken() ?: return@withContext NavidromeUploadOutcome.Success
             if (artPathOrUrl.isNullOrBlank()) return@withContext NavidromeUploadOutcome.SkippedNoSource
+            // An unreadable or dead cover link (expired CDN URL, 404) won't heal
+            // by retrying, and the audio is what matters: skip, don't retry.
             val uploadFile = materializeArtwork(artPathOrUrl).getOrElse {
                 Log.w(TAG, "Could not materialize Navidrome cover source")
-                return@withContext NavidromeUploadOutcome.RetryableFailure
+                return@withContext NavidromeUploadOutcome.SkippedNoSource
             }
             val deleteWhenDone = uploadFile.parentFile == context.cacheDir &&
                 uploadFile.name.startsWith("navidrome_art_")
 
             try {
                 if (!uploadFile.exists() || uploadFile.length() <= 0) {
-                    return@withContext NavidromeUploadOutcome.RetryableFailure
+                    return@withContext NavidromeUploadOutcome.SkippedNoSource
+                }
+                val sha = sha256(uploadFile)
+                val size = uploadFile.length()
+                if (alreadyOnServer(endpoint, "covers", relativePath, sha, size, metadata = null)) {
+                    return@withContext NavidromeUploadOutcome.Success
                 }
                 val request = Request.Builder()
                     .url("${endpoint.baseUrl}/v1/covers/${encodePath(relativePath)}")
                     .put(FileRequestBody(uploadFile))
                     .authenticated(endpoint.token)
-                    .header("X-Stash-Sha256", sha256(uploadFile))
-                    .header("X-Stash-Size", uploadFile.length().toString())
+                    .header("X-Stash-Sha256", sha)
+                    .header("X-Stash-Size", size.toString())
                     .build()
                 execute(request, "cover")
             } catch (_: Exception) {
@@ -185,6 +222,50 @@ class NavidromeIngestClient @Inject constructor(
             }
         }
 
+    /**
+     * The next page of server-side audio features after [after], or null when
+     * the server is unreachable, not configured, or doesn't analyse audio
+     * (older stash-ingest). Rows the app can't parse are skipped.
+     */
+    suspend fun fetchAudioFeatures(after: Long, limit: Int = FEATURES_PAGE): AudioFeaturesPage? =
+        withContext(Dispatchers.IO) {
+            val endpoint = endpointAndToken() ?: return@withContext null
+            runCatching {
+                val request = Request.Builder()
+                    .url("${endpoint.baseUrl}/v1/features?after=$after&limit=$limit")
+                    .get()
+                    .authenticated(endpoint.token)
+                    .build()
+                uploadHttpClient.newCall(request).execute().use { response ->
+                    if (!response.isSuccessful) return@use null
+                    val body = response.body?.string() ?: return@use null
+                    val json = JSONObject(body)
+                    val array = json.optJSONArray("features") ?: return@use null
+                    val items = (0 until array.length()).mapNotNull { i ->
+                        val o = array.optJSONObject(i) ?: return@mapNotNull null
+                        runCatching {
+                            RemoteAudioFeatures(
+                                path = o.getString("path"),
+                                seq = o.getLong("seq"),
+                                version = o.optInt("version", 1),
+                                bpm = o.getDouble("bpm").toFloat(),
+                                beatConfidence = o.optDouble("beat_confidence", 0.0).toFloat(),
+                                beatRegularity = o.optDouble("beat_regularity", 0.0).toFloat(),
+                                loudnessDb = o.getDouble("loudness_db").toFloat(),
+                                dynamicsDb = o.optDouble("dynamics_db", 0.0).toFloat(),
+                                brightnessHz = o.optDouble("brightness_hz", 0.0).toFloat(),
+                                onsetRate = o.optDouble("onset_rate", 0.0).toFloat(),
+                                pitchClass = o.getInt("key"),
+                                minor = o.optString("mode") == "minor",
+                                keyStrength = o.optDouble("key_strength", 0.0).toFloat(),
+                            )
+                        }.getOrNull()
+                    }
+                    AudioFeaturesPage(items, json.optLong("next", after))
+                }
+            }.getOrNull()
+        }
+
     suspend fun checkConnection(): NavidromeConnectionCheck = withContext(Dispatchers.IO) {
         val endpoint = endpointAndToken(requireEnabled = false)
             ?: return@withContext NavidromeConnectionCheck.NotConfigured
@@ -230,6 +311,61 @@ class NavidromeIngestClient @Inject constructor(
         } catch (_: Exception) {
             NavidromeConnectionCheck.Unreachable
         }
+    }
+
+    /**
+     * Asks the server whether it already holds exactly this file (same path,
+     * hash and size, or matching tags) before streaming it. A reinstalled app
+     * or a full export re-offers the whole library, and without this every
+     * file was sent even when the server then answered already-present. Only
+     * a definite `200` skips the upload; anything else (older server, error,
+     * no network) falls back to the normal PUT, which stays the authority.
+     */
+    private fun alreadyOnServer(
+        endpoint: Endpoint,
+        route: String,
+        relativePath: String,
+        sha256: String,
+        size: Long,
+        metadata: String?,
+    ): Boolean {
+        if (!supportsPrecheck(endpoint)) return false
+        return runCatching {
+            val request = Request.Builder()
+                .url("${endpoint.baseUrl}/v1/$route/${encodePath(relativePath)}")
+                .head()
+                .authenticated(endpoint.token)
+                .header("X-Stash-Sha256", sha256)
+                .header("X-Stash-Size", size.toString())
+                .apply { metadata?.let { header("X-Stash-Metadata", it) } }
+                .build()
+            uploadHttpClient.newCall(request).execute().use { it.code == 200 }
+        }.getOrDefault(false)
+    }
+
+    /** Whether [endpoint] advertises `features.uploadPrecheck`; asked once per server and process. */
+    private fun supportsPrecheck(endpoint: Endpoint): Boolean {
+        precheckSupport[endpoint.baseUrl]?.let { return it }
+        val answer: Boolean? = runCatching {
+            val request = Request.Builder()
+                .url("${endpoint.baseUrl}/v1/capabilities")
+                .get()
+                .authenticated(endpoint.token)
+                .build()
+            uploadHttpClient.newCall(request).execute().use { response ->
+                when {
+                    response.isSuccessful -> JSONObject(readSmallResponse(response.body).orEmpty())
+                        .optJSONObject("features")
+                        ?.optBoolean("uploadPrecheck", false) == true
+                    // A definite "no such endpoint / not for you" from an older server.
+                    response.code in PERMANENT_STATUS_CODES -> false
+                    else -> null
+                }
+            }
+        }.getOrNull()
+        // Transient failures aren't remembered, so the next file asks again.
+        if (answer != null) precheckSupport[endpoint.baseUrl] = answer
+        return answer == true
     }
 
     private suspend fun endpointAndToken(requireEnabled: Boolean = true): Endpoint? {
@@ -380,6 +516,7 @@ class NavidromeIngestClient @Inject constructor(
         private const val TAG = "NavidromeIngestClient"
         private const val CONTRACT_VERSION = "1"
         private const val MAX_COVER_BYTES = 10L * 1024L * 1024L
+        private const val FEATURES_PAGE = 500
         private const val MAX_CONTROL_RESPONSE_BYTES = 64L * 1024L
         private val PERMANENT_STATUS_CODES = (400..499).filterNot { it == 408 || it == 429 }.toSet()
         private val COVER_EXTENSIONS = setOf("jpg", "jpeg", "png", "webp")

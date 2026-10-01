@@ -76,32 +76,36 @@ class NavidromePlaylistExportWorker @AssistedInject constructor(
     }
 
     /**
-     * Uploads every downloaded track in id order, resuming after the last
-     * track a previous (stopped) run got through. The resume point only
-     * advances over an unbroken run of handled tracks, so a track that hit
-     * a retryable failure is sent again on the retry.
+     * Uploads every downloaded track in id order, continuing after the last
+     * track a previous (stopped) run attempted. A track that hits a
+     * retryable failure doesn't hold the resume point back (that made every
+     * restart re-send everything behind it); it goes into a retry set that
+     * the next run sends first-class. Returns whether any track still needs
+     * a retry.
      */
     private suspend fun exportDownloadedTracks(
         tracks: List<TrackEntity>,
         stats: ExportStats,
         serverUrl: String,
     ): Boolean {
-        var retryableFailure = false
         val uploadedCovers = mutableSetOf<String>()
-        val resumeAfter = prefs.fullExportResumeAfter(serverUrl)
+        val saved = prefs.fullExportProgress(serverUrl)
         val pending = tracks
             .filter { it.isDownloaded && !it.filePath.isNullOrBlank() }
             .sortedBy { it.id }
-        val todo = pending.filter { it.id > resumeAfter }
+        val todo = pending.filter { it.id > saved.afterTrackId || it.id in saved.retryTrackIds }
         val alreadyDone = pending.size - todo.size
-        var lastHandledId: Long? = null
-        var savedId: Long? = null
+        var cursor = saved.afterTrackId
+        // Retry ids of tracks that no longer exist are dropped here.
+        val pendingIds = pending.mapTo(HashSet()) { it.id }
+        val retry = saved.retryTrackIds.filterTo(HashSet()) { it in pendingIds }
         todo.forEachIndexed { index, track ->
             if (index % PROGRESS_EVERY == 0) {
                 val done = alreadyDone + index
                 trySetForeground("$done of ${pending.size} songs", done.toFloat() / pending.size)
             }
             val filePath = track.filePath ?: return@forEachIndexed
+            var trackNeedsRetry = false
             val album = track.album.takeIf(String::isNotBlank)
             val relativePath = scheduler.relativePathForTrack(
                 track.artist,
@@ -121,7 +125,7 @@ class NavidromePlaylistExportWorker @AssistedInject constructor(
                 NavidromeUploadOutcome.PermanentFailure -> stats.trackFailures++
                 NavidromeUploadOutcome.RetryableFailure -> {
                     stats.trackFailures++
-                    retryableFailure = true
+                    trackNeedsRetry = true
                 }
             }
 
@@ -134,24 +138,17 @@ class NavidromePlaylistExportWorker @AssistedInject constructor(
                     NavidromeUploadOutcome.PermanentFailure -> stats.coverFailures++
                     NavidromeUploadOutcome.RetryableFailure -> {
                         stats.coverFailures++
-                        retryableFailure = true
+                        trackNeedsRetry = true
                     }
                 }
             }
-            if (!retryableFailure) {
-                lastHandledId = track.id
-                if (index % CHECKPOINT_EVERY == CHECKPOINT_EVERY - 1 || index == todo.lastIndex) {
-                    prefs.saveFullExportProgress(serverUrl, track.id)
-                    savedId = track.id
-                }
+            if (trackNeedsRetry) retry += track.id else retry -= track.id
+            cursor = maxOf(cursor, track.id)
+            if (index % CHECKPOINT_EVERY == CHECKPOINT_EVERY - 1 || index == todo.lastIndex) {
+                prefs.saveFullExportProgress(serverUrl, NavidromeFullExportProgress(cursor, retry.toSet()))
             }
         }
-        // The first retryable failure ends the unbroken run: resume right before it.
-        val resumePoint = lastHandledId
-        if (retryableFailure && resumePoint != null && resumePoint != savedId) {
-            prefs.saveFullExportProgress(serverUrl, resumePoint)
-        }
-        return retryableFailure
+        return retry.isNotEmpty()
     }
 
     /** Foreground promotion is best effort; a stop request (cancellation) is not swallowed. */

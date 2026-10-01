@@ -7,6 +7,7 @@ import androidx.room.migration.Migration
 import androidx.sqlite.db.SupportSQLiteDatabase
 import com.stash.core.data.db.converter.Converters
 import com.stash.core.data.db.dao.ArtistProfileCacheDao
+import com.stash.core.data.db.dao.AudioFeaturesDao
 import com.stash.core.data.db.dao.DiscoveryQueueDao
 import com.stash.core.data.db.dao.DownloadQueueDao
 import com.stash.core.data.db.dao.LastFmCacheDao
@@ -23,6 +24,7 @@ import com.stash.core.data.db.dao.TrackDao
 import com.stash.core.data.db.dao.TrackSkipEventDao
 import com.stash.core.data.db.dao.TrackTagDao
 import com.stash.core.data.db.entity.ArtistProfileCacheEntity
+import com.stash.core.data.db.entity.AudioFeaturesEntity
 import com.stash.core.data.db.entity.DiscoveryQueueEntity
 import com.stash.core.data.db.entity.DownloadQueueEntity
 import com.stash.core.data.db.entity.LastFmCacheEntity
@@ -78,8 +80,9 @@ import com.stash.core.data.db.entity.TrackTagEntity
         LyricsEntity::class,
         LastFmCacheEntity::class,
         SpotifyResolutionEntity::class,
+        AudioFeaturesEntity::class,
     ],
-    version = 33,
+    version = 34,
     exportSchema = true,
 )
 @TypeConverters(Converters::class)
@@ -116,6 +119,8 @@ abstract class StashDatabase : RoomDatabase() {
     abstract fun lastFmCacheDao(): LastFmCacheDao
 
     abstract fun spotifyResolutionDao(): SpotifyResolutionDao
+
+    abstract fun audioFeaturesDao(): AudioFeaturesDao
 
 
     companion object {
@@ -870,6 +875,29 @@ abstract class StashDatabase : RoomDatabase() {
                 db.execSQL(
                     "CREATE INDEX IF NOT EXISTS index_listening_events_nd_scrobbled " +
                         "ON listening_events (nd_scrobbled)",
+                )
+            }
+        }
+
+        /**
+         * v33 → v34: `audio_features` — tempo, loudness, brightness and key
+         * measured by the user's stash-ingest server, keyed by upload path and
+         * linked to a track on the phone. Additive; nothing to backfill.
+         */
+        val MIGRATION_33_34 = object : Migration(33, 34) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL(
+                    "CREATE TABLE IF NOT EXISTS `audio_features` (" +
+                        "`path` TEXT NOT NULL, `track_id` INTEGER, `bpm` REAL NOT NULL, " +
+                        "`beat_confidence` REAL NOT NULL, `beat_regularity` REAL NOT NULL, " +
+                        "`loudness_db` REAL NOT NULL, `dynamics_db` REAL NOT NULL, " +
+                        "`brightness_hz` REAL NOT NULL, `onset_rate` REAL NOT NULL, " +
+                        "`pitch_class` INTEGER NOT NULL, `minor` INTEGER NOT NULL, " +
+                        "`key_strength` REAL NOT NULL, `analyzer_version` INTEGER NOT NULL, " +
+                        "`seq` INTEGER NOT NULL, PRIMARY KEY(`path`))",
+                )
+                db.execSQL(
+                    "CREATE INDEX IF NOT EXISTS `index_audio_features_track_id` ON `audio_features` (`track_id`)",
                 )
             }
         }

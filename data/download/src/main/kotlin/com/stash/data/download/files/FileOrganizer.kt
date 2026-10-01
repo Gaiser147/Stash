@@ -58,6 +58,43 @@ class FileOrganizer @Inject constructor(
         return File(dir, "$titleSlug.$format")
     }
 
+    /**
+     * The library file this track would be committed to, if one is already
+     * there: `artist/album/title.<ext>` in the current destination (internal
+     * or the SAF folder), non-empty, any audio format (FLAC preferred).
+     * Returns the path in the same form [commitDownload] would (absolute path
+     * or `content://` URI), or null. Read-only: creates no folders.
+     *
+     * Lets a download reuse a song that is already on the phone, e.g. after a
+     * reinstall or a second install pointed at the same folder, whose
+     * database doesn't know the files yet.
+     */
+    suspend fun findExistingTrackFile(artist: String, album: String?, title: String): String? {
+        val artistSlug = FileOrganizerSlugs.slugify(artist)
+        val albumSlug = if (!album.isNullOrBlank()) FileOrganizerSlugs.slugify(album) else "singles"
+        val titleSlug = FileOrganizerSlugs.slugify(title)
+        val externalTree = storagePreference.externalTreeUri.first()
+        return runCatching {
+            if (externalTree == null) {
+                val dir = File(musicDir, "$artistSlug/$albumSlug")
+                EXISTING_FORMATS.asSequence()
+                    .map { File(dir, "$titleSlug.$it") }
+                    .firstOrNull { it.isFile && it.length() > 0 }
+                    ?.absolutePath
+            } else {
+                val albumDir = DocumentFile.fromTreeUri(context, externalTree)
+                    ?.findFile(artistSlug)?.takeIf { it.isDirectory }
+                    ?.findFile(albumSlug)?.takeIf { it.isDirectory }
+                    ?: return@runCatching null
+                val byName = albumDir.listFiles().associateBy { it.name }
+                EXISTING_FORMATS.asSequence()
+                    .mapNotNull { byName["$titleSlug.$it"] }
+                    .firstOrNull { it.isFile && it.length() > 0 }
+                    ?.uri?.toString()
+            }
+        }.getOrNull()
+    }
+
     /** Temporary download directory inside the cache. Cleaned by the OS as needed. */
     fun getTempDir(): File = File(context.cacheDir, "downloads").also { it.mkdirs() }
 
@@ -152,6 +189,9 @@ class FileOrganizer @Inject constructor(
         private val LOSSLESS_EXTENSIONS = setOf(
             "flac", "alac", "wav", "ape", "tta", "wv", "aiff",
         )
+
+        /** Audio formats a committed download can have, best first. */
+        private val EXISTING_FORMATS = listOf("flac", "m4a", "opus", "mp3", "ogg", "webm", "aac", "wav")
     }
 
     /**

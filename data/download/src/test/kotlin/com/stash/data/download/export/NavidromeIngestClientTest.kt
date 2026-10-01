@@ -67,6 +67,8 @@ class NavidromeIngestClientTest {
 
     @Test
     fun `audio upload sends authenticated versioned idempotent contract`() = runTest {
+        // An older server without the pre-check: the file goes straight to a PUT.
+        server.enqueue(capabilities(precheck = false))
         server.enqueue(MockResponse().setResponseCode(201))
         val audio = File(context.cacheDir, "navidrome-contract-test.flac").apply {
             writeBytes("fixture-audio".toByteArray())
@@ -79,6 +81,8 @@ class NavidromeIngestClientTest {
         )
 
         assertThat(outcome).isEqualTo(NavidromeUploadOutcome.Success)
+        assertThat(requireNotNull(server.takeRequest(3, TimeUnit.SECONDS)).path)
+            .isEqualTo("/stash-ingest/v1/capabilities")
         val request = requireNotNull(server.takeRequest(3, TimeUnit.SECONDS))
         assertThat(request.method).isEqualTo("PUT")
         assertThat(request.path).isEqualTo("/stash-ingest/v1/files/artist/album/track.flac")
@@ -97,6 +101,92 @@ class NavidromeIngestClientTest {
         assertThat(metadata.getString("artist")).isEqualTo("Artist")
         assertThat(metadata.getString("album")).isEqualTo("Album")
         assertThat(metadata.getString("album_artist")).isEqualTo("Album Artist")
+    }
+
+    @Test
+    fun `a file the server already has is not sent`() = runTest {
+        server.enqueue(capabilities(precheck = true))
+        server.enqueue(MockResponse().setResponseCode(200)) // HEAD: already present
+        val audio = File(context.cacheDir, "navidrome-precheck-hit.flac").apply {
+            writeBytes("already-on-server".toByteArray())
+        }
+
+        val outcome = client.uploadFile(audio.absolutePath, "artist/album/hit.flac", metadata = null)
+
+        assertThat(outcome).isEqualTo(NavidromeUploadOutcome.Success)
+        server.takeRequest(3, TimeUnit.SECONDS) // capabilities
+        val head = requireNotNull(server.takeRequest(3, TimeUnit.SECONDS))
+        assertThat(head.method).isEqualTo("HEAD")
+        assertThat(head.path).isEqualTo("/stash-ingest/v1/files/artist/album/hit.flac")
+        assertThat(head.getHeader("Authorization")).isEqualTo("Bearer dedicated-test-token")
+        assertThat(head.getHeader("X-Stash-Sha256")).isEqualTo(sha256(audio.readBytes()))
+        assertThat(head.getHeader("X-Stash-Size")).isEqualTo(audio.length().toString())
+        assertThat(head.bodySize).isEqualTo(0L)
+        // No PUT followed.
+        assertThat(server.requestCount).isEqualTo(2)
+    }
+
+    @Test
+    fun `a file the server lacks is sent, and capabilities are asked only once`() = runTest {
+        server.enqueue(capabilities(precheck = true))
+        server.enqueue(MockResponse().setResponseCode(404)) // HEAD: upload needed
+        server.enqueue(MockResponse().setResponseCode(201)) // PUT
+        server.enqueue(MockResponse().setResponseCode(404)) // HEAD for the second file
+        server.enqueue(MockResponse().setResponseCode(201)) // PUT
+        val first = File(context.cacheDir, "navidrome-precheck-miss-1.flac").apply { writeBytes("one".toByteArray()) }
+        val second = File(context.cacheDir, "navidrome-precheck-miss-2.flac").apply { writeBytes("two".toByteArray()) }
+
+        assertThat(client.uploadFile(first.absolutePath, "a/b/one.flac", metadata = null))
+            .isEqualTo(NavidromeUploadOutcome.Success)
+        assertThat(client.uploadFile(second.absolutePath, "a/b/two.flac", metadata = null))
+            .isEqualTo(NavidromeUploadOutcome.Success)
+
+        val methods = (1..5).map { requireNotNull(server.takeRequest(3, TimeUnit.SECONDS)).method }
+        assertThat(methods).containsExactly("GET", "HEAD", "PUT", "HEAD", "PUT").inOrder()
+    }
+
+    @Test
+    fun `audio features are paged and parsed, bad rows skipped`() = runTest {
+        server.enqueue(
+            MockResponse().setResponseCode(200).setBody(
+                """{"ok":true,"next":7,"features":[""" +
+                    """{"path":"a/b/one.opus","seq":5,"version":1,"bpm":124.5,"beat_confidence":0.8,""" +
+                    """"beat_regularity":0.9,"loudness_db":-9.2,"dynamics_db":6.1,"brightness_hz":2500.0,""" +
+                    """"onset_rate":3.2,"key":7,"mode":"minor","key_strength":0.66,"camelot":"6A"},""" +
+                    """{"path":"a/b/broken.opus","seq":6},""" +
+                    """{"path":"a/b/two.flac","seq":7,"bpm":90,"loudness_db":-14,"key":0,"mode":"major"}]}""",
+            ),
+        )
+
+        val page = requireNotNull(client.fetchAudioFeatures(after = 4))
+
+        assertThat(page.next).isEqualTo(7L)
+        assertThat(page.items.map { it.path }).containsExactly("a/b/one.opus", "a/b/two.flac").inOrder()
+        val one = page.items.first()
+        assertThat(one.bpm).isEqualTo(124.5f)
+        assertThat(one.pitchClass).isEqualTo(7)
+        assertThat(one.minor).isTrue()
+        assertThat(page.items[1].minor).isFalse()
+        val request = requireNotNull(server.takeRequest(3, TimeUnit.SECONDS))
+        assertThat(request.path).isEqualTo("/stash-ingest/v1/features?after=4&limit=500")
+        assertThat(request.getHeader("Authorization")).isEqualTo("Bearer dedicated-test-token")
+    }
+
+    @Test
+    fun `an older server without features gives null`() = runTest {
+        server.enqueue(MockResponse().setResponseCode(404).setBody("""{"ok":false,"error":"not found"}"""))
+        assertThat(client.fetchAudioFeatures(after = 0)).isNull()
+    }
+
+    @Test
+    fun `a dead cover link is skipped instead of retried`() = runTest {
+        // The art CDN answers 404; nothing may be sent to the ingest server.
+        server.enqueue(MockResponse().setResponseCode(404))
+
+        assertThat(client.uploadCover(server.url("/cdn/art.jpg").toString(), "artist/album/cover.jpg"))
+            .isEqualTo(NavidromeUploadOutcome.SkippedNoSource)
+        assertThat(requireNotNull(server.takeRequest(3, TimeUnit.SECONDS)).path).isEqualTo("/cdn/art.jpg")
+        assertThat(server.requestCount).isEqualTo(1)
     }
 
     @Test
@@ -160,4 +250,8 @@ class NavidromeIngestClientTest {
     private fun sha256(bytes: ByteArray): String = MessageDigest.getInstance("SHA-256")
         .digest(bytes)
         .joinToString("") { "%02x".format(it.toInt() and 0xFF) }
+
+    private fun capabilities(precheck: Boolean) = MockResponse()
+        .setResponseCode(200)
+        .setBody("""{"ok":true,"contract":"1","features":{"uploadPrecheck":$precheck}}""")
 }

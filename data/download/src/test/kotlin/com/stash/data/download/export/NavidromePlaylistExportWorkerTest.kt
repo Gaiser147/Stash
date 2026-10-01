@@ -72,7 +72,7 @@ class NavidromePlaylistExportWorkerTest {
     @Test fun `a restarted export resumes after the last track it got through`() = runTest {
         // Unsorted on purpose: the resume point relies on id order.
         coEvery { trackDao.getAllDownloaded() } returns listOf(track(4), track(1), track(3), track(2))
-        coEvery { prefs.fullExportResumeAfter(server) } returns 2L
+        coEvery { prefs.fullExportProgress(server) } returns NavidromeFullExportProgress(afterTrackId = 2L)
         coEvery { ingest.uploadFile(any(), any(), any()) } returns NavidromeUploadOutcome.Success
 
         val result = worker().doWork()
@@ -82,15 +82,15 @@ class NavidromePlaylistExportWorkerTest {
         coVerify(exactly = 0) { ingest.uploadFile("/music/song2.opus", any(), any()) }
         coVerify { ingest.uploadFile("/music/song3.opus", any(), any()) }
         coVerify { ingest.uploadFile("/music/song4.opus", any(), any()) }
-        coVerify { prefs.saveFullExportProgress(server, 4L) }
+        coVerify { prefs.saveFullExportProgress(server, NavidromeFullExportProgress(4L, emptySet())) }
         coVerify { ingest.syncComplete(any()) }
         // Finished: the next full export starts from the top again.
         coVerify { prefs.clearFullExportProgress() }
     }
 
-    @Test fun `a retryable failure keeps the resume point before that track`() = runTest {
+    @Test fun `a retryable failure doesn't hold back the resume point, the track is retried alone`() = runTest {
         coEvery { trackDao.getAllDownloaded() } returns (1L..3L).map(::track)
-        coEvery { prefs.fullExportResumeAfter(server) } returns Long.MIN_VALUE
+        coEvery { prefs.fullExportProgress(server) } returns NavidromeFullExportProgress()
         coEvery { ingest.uploadFile(any(), any(), any()) } returns NavidromeUploadOutcome.Success
         coEvery { ingest.uploadFile("/music/song2.opus", any(), any()) } returns NavidromeUploadOutcome.RetryableFailure
 
@@ -100,9 +100,21 @@ class NavidromePlaylistExportWorkerTest {
         // Later tracks and the playlists are still sent in this run...
         coVerify { ingest.uploadFile("/music/song3.opus", any(), any()) }
         coVerify { ingest.syncComplete(any()) }
-        // ...but the retry starts again at song 2.
-        coVerify(exactly = 1) { prefs.saveFullExportProgress(any(), any()) }
-        coVerify { prefs.saveFullExportProgress(server, 1L) }
+        // ...the resume point moves past song 2, which is remembered for a retry.
+        coVerify { prefs.saveFullExportProgress(server, NavidromeFullExportProgress(3L, setOf(2L))) }
         coVerify(exactly = 0) { prefs.clearFullExportProgress() }
+    }
+
+    @Test fun `the retry run sends only the failed tracks, then finishes`() = runTest {
+        coEvery { trackDao.getAllDownloaded() } returns (1L..3L).map(::track)
+        coEvery { prefs.fullExportProgress(server) } returns NavidromeFullExportProgress(3L, setOf(2L))
+        coEvery { ingest.uploadFile(any(), any(), any()) } returns NavidromeUploadOutcome.Success
+
+        val result = worker().doWork()
+
+        assertThat(result).isEqualTo(ListenableWorker.Result.success())
+        coVerify(exactly = 1) { ingest.uploadFile(any(), any(), any()) }
+        coVerify { ingest.uploadFile("/music/song2.opus", any(), any()) }
+        coVerify { prefs.clearFullExportProgress() }
     }
 }

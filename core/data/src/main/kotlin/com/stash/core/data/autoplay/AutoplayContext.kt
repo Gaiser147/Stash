@@ -13,12 +13,18 @@ package com.stash.core.data.autoplay
  *   [0, 1]: seed artists by seed weight, Last.fm neighbours by
  *   `seed weight × match`. Session-blocked artists are absent.
  * @property recentArtists lowercased artists of the last songs, oldest first.
+ * @property lastAudio sound of the newest heard song with an analysis.
+ * @property audioTarget recency-weighted sound of the session (completed
+ *   songs count more; early skips don't count). Both null until songs with
+ *   server-side audio features have been heard.
  */
 data class AutoplayContext(
     val seeds: List<Seed>,
     val tagVector: Map<String, Float>,
     val artistWeights: Map<String, Float>,
     val recentArtists: List<String>,
+    val lastAudio: AudioProfile? = null,
+    val audioTarget: AudioProfile? = null,
 ) {
     /** [libraryId] is the `tracks` row id, null for songs not in the library. */
     data class Seed(

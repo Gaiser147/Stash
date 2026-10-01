@@ -10,12 +10,14 @@ import kotlin.random.Random
  *
  * ## Scoring
  * ```
- * score = 0.35·sessionSim + 0.25·affinity + 0.20·transition
- *       + 0.10·completion + 0.10·lastFmMatch
+ * score = 0.31·sessionSim + 0.22·affinity + 0.18·transition
+ *       + 0.09·completion + 0.08·lastFmMatch + 0.12·flow
  *       − skipPenalty − recentPenalty
  * ```
  * `sessionSim` dominates on purpose: autoplay should continue the mood of
- * what is playing *now*, with long-term taste as the tie-breaker.
+ * what is playing *now*, with long-term taste as the tie-breaker. `flow`
+ * adds how the song *sounds* next to the last one (tempo, loudness, key;
+ * [AudioFlow]); songs without an analysis get the neutral 0.5.
  *
  * ## Sampling
  * Picks are drawn by softmax sampling (Gumbel-top-k) at [TEMPERATURE]
@@ -34,11 +36,12 @@ import kotlin.random.Random
  */
 object AutoplayRanker {
 
-    const val W_SESSION = 0.35f
-    const val W_AFFINITY = 0.25f
-    const val W_TRANSITION = 0.20f
-    const val W_COMPLETION = 0.10f
-    const val W_LASTFM = 0.10f
+    const val W_SESSION = 0.31f
+    const val W_AFFINITY = 0.22f
+    const val W_TRANSITION = 0.18f
+    const val W_COMPLETION = 0.09f
+    const val W_LASTFM = 0.08f
+    const val W_FLOW = 0.12f
 
     /** Softmax temperature. Lower = greedier. Scores span roughly 0..1. */
     const val TEMPERATURE = 0.08f
@@ -51,7 +54,8 @@ object AutoplayRanker {
             W_AFFINITY * c.affinity +
             W_TRANSITION * c.transition +
             W_COMPLETION * c.completion +
-            W_LASTFM * c.lastFmMatch -
+            W_LASTFM * c.lastFmMatch +
+            W_FLOW * c.flow -
             c.skipPenalty -
             c.recentPenalty
 

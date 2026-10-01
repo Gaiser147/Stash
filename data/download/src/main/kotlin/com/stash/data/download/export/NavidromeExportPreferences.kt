@@ -10,6 +10,7 @@ import androidx.datastore.preferences.core.edit
 import androidx.datastore.preferences.core.emptyPreferences
 import androidx.datastore.preferences.core.longPreferencesKey
 import androidx.datastore.preferences.core.stringPreferencesKey
+import androidx.datastore.preferences.core.stringSetPreferencesKey
 import androidx.datastore.preferences.preferencesDataStore
 import com.stash.core.auth.crypto.TinkEncryptionManager
 import dagger.hilt.android.qualifiers.ApplicationContext
@@ -23,6 +24,12 @@ import kotlinx.coroutines.flow.map
 private val Context.navidromeExportDataStore: DataStore<Preferences> by preferencesDataStore(
     name = "navidrome_export_preferences",
     corruptionHandler = ReplaceFileCorruptionHandler { emptyPreferences() },
+)
+
+/** See [NavidromeExportPreferences.fullExportProgress]. */
+data class NavidromeFullExportProgress(
+    val afterTrackId: Long = Long.MIN_VALUE,
+    val retryTrackIds: Set<Long> = emptySet(),
 )
 
 data class NavidromeExportConfig(
@@ -73,6 +80,9 @@ class NavidromeExportPreferences @Inject constructor(
         val lastResult = stringPreferencesKey("last_result")
         val fullExportServer = stringPreferencesKey("full_export_server")
         val fullExportAfterTrackId = longPreferencesKey("full_export_after_track_id")
+        val fullExportRetryIds = stringSetPreferencesKey("full_export_retry_track_ids")
+        val featuresServer = stringPreferencesKey("audio_features_server")
+        val featuresAfter = longPreferencesKey("audio_features_after_seq")
     }
 
     val config: Flow<NavidromeExportConfig> = context.navidromeExportDataStore.data.map(::decode)
@@ -143,22 +153,28 @@ class NavidromeExportPreferences @Inject constructor(
     }
 
     /**
-     * Resume point of a full export: tracks up to this id (in id order) were
-     * all sent to [serverUrl]. Android stops long background work and
-     * WorkManager restarts it, so without this every restart began again
-     * with the first song and the playlists at the end were never sent.
-     * A cursor saved for another server is ignored.
+     * Where a full export stands for [serverUrl]: every track up to
+     * [NavidromeFullExportProgress.afterTrackId] (in id order) was attempted,
+     * and [NavidromeFullExportProgress.retryTrackIds] are the ones among them
+     * that hit a retryable failure. Android stops long background work and
+     * WorkManager restarts it; without this every restart began again with
+     * the first song and the playlists at the end were never sent. Progress
+     * saved for another server is ignored.
      */
-    suspend fun fullExportResumeAfter(serverUrl: String): Long {
+    suspend fun fullExportProgress(serverUrl: String): NavidromeFullExportProgress {
         val prefs = context.navidromeExportDataStore.data.first()
-        if (prefs[Keys.fullExportServer] != serverUrl) return Long.MIN_VALUE
-        return prefs[Keys.fullExportAfterTrackId] ?: Long.MIN_VALUE
+        if (prefs[Keys.fullExportServer] != serverUrl) return NavidromeFullExportProgress()
+        return NavidromeFullExportProgress(
+            afterTrackId = prefs[Keys.fullExportAfterTrackId] ?: Long.MIN_VALUE,
+            retryTrackIds = prefs[Keys.fullExportRetryIds].orEmpty().mapNotNullTo(HashSet()) { it.toLongOrNull() },
+        )
     }
 
-    suspend fun saveFullExportProgress(serverUrl: String, afterTrackId: Long) {
+    suspend fun saveFullExportProgress(serverUrl: String, progress: NavidromeFullExportProgress) {
         context.navidromeExportDataStore.edit {
             it[Keys.fullExportServer] = serverUrl
-            it[Keys.fullExportAfterTrackId] = afterTrackId
+            it[Keys.fullExportAfterTrackId] = progress.afterTrackId
+            it[Keys.fullExportRetryIds] = progress.retryTrackIds.mapTo(HashSet()) { id -> id.toString() }
         }
     }
 
@@ -166,6 +182,20 @@ class NavidromeExportPreferences @Inject constructor(
         context.navidromeExportDataStore.edit {
             it.remove(Keys.fullExportServer)
             it.remove(Keys.fullExportAfterTrackId)
+            it.remove(Keys.fullExportRetryIds)
+        }
+    }
+
+    /** Paging cursor for `GET /v1/features` on [serverUrl]; 0 for another server. */
+    suspend fun audioFeaturesCursor(serverUrl: String): Long {
+        val prefs = context.navidromeExportDataStore.data.first()
+        return if (prefs[Keys.featuresServer] == serverUrl) prefs[Keys.featuresAfter] ?: 0L else 0L
+    }
+
+    suspend fun saveAudioFeaturesCursor(serverUrl: String, after: Long) {
+        context.navidromeExportDataStore.edit {
+            it[Keys.featuresServer] = serverUrl
+            it[Keys.featuresAfter] = after
         }
     }
 

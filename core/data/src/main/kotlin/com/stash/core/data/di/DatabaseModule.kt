@@ -64,6 +64,7 @@ object DatabaseModule {
                 StashDatabase.MIGRATION_30_31,
                 StashDatabase.MIGRATION_31_32,
                 StashDatabase.MIGRATION_32_33,
+                StashDatabase.MIGRATION_33_34,
             )
             // No fallbackToDestructiveMigration() — if a migration is missing,
             // the app will crash on startup instead of silently wiping the
@@ -129,4 +130,8 @@ object DatabaseModule {
     @Provides
     fun provideSpotifyResolutionDao(db: StashDatabase): com.stash.core.data.db.dao.SpotifyResolutionDao =
         db.spotifyResolutionDao()
+
+    @Provides
+    fun provideAudioFeaturesDao(db: StashDatabase): com.stash.core.data.db.dao.AudioFeaturesDao =
+        db.audioFeaturesDao()
 }
