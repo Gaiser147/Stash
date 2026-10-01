@@ -13,6 +13,7 @@ import androidx.media3.exoplayer.DefaultLoadControl
 import androidx.media3.exoplayer.ExoPlayer
 import androidx.media3.session.CommandButton
 import androidx.media3.session.LibraryResult
+import androidx.media3.session.MediaConstants
 import androidx.media3.session.MediaLibraryService
 import androidx.media3.session.MediaSession
 import androidx.media3.session.SessionCommand
@@ -56,6 +57,10 @@ import javax.inject.Inject
 import androidx.core.app.ServiceCompat
 import androidx.core.net.toUri
 import com.stash.core.data.db.entity.TrackEntity
+import com.stash.core.data.autoplay.AutoplayEngine
+import com.stash.core.data.mapper.toDomain
+import com.stash.core.media.PlayerRepository
+import com.stash.core.media.streaming.StreamingGate
 
 /**
  * Background playback service that hosts an [ExoPlayer] and exposes a [MediaSession]
@@ -82,6 +87,20 @@ class StashPlaybackService : MediaLibraryService() {
     @Inject lateinit var playbackResumer: PlaybackResumer
     @Inject lateinit var resumeStreamResolver: ResumeStreamResolver
     @Inject lateinit var crossfadePreference: CrossfadePreference
+
+    /** Android Auto: "Mix for you" and the shared may-stream rule. */
+    @Inject lateinit var autoplayEngine: AutoplayEngine
+    @Inject lateinit var streamingGate: StreamingGate
+
+    /**
+     * The app's own player front-end. Lazy: it connects a controller to this
+     * very service, so it must not be built while the service is being built.
+     * Car-started queues are handed to it so autoplay continues them.
+     */
+    @Inject lateinit var playerRepository: dagger.Lazy<PlayerRepository>
+
+    /** Authority of [StashArtworkProvider] — local covers the car can load. */
+    private val artAuthority: String by lazy { StashArtworkProvider.authority(this) }
 
     /** Deps for the full-timeline lazy-resolve chain (LazyResolvingDataSource). */
     @Inject lateinit var streamResolver: com.stash.core.media.streaming.StreamSourceRegistry
@@ -161,6 +180,26 @@ class StashPlaybackService : MediaLibraryService() {
         private const val RECENTLY_ADDED_ID = "RECENTLY_ADDED"
         private const val PLAYLIST_PREFIX = "PLAYLIST_"
         private const val SHUFFLE_PLAY_PREFIX = "SHUFFLE_PLAY_"
+
+        // Android Auto tabs and actions. RECENTLY_ADDED_ID doubles as the
+        // "New" tab so AUTOQ ids cached by the car keep resolving.
+        private const val FOR_YOU_ID = "FOR_YOU"
+        private const val MIX_FOR_ME_ID = "MIX_FOR_ME"
+        private const val CONTINUE_ID = "CONTINUE"
+
+        /** Songs in the "New" tab. */
+        private const val NEW_LIMIT = 50
+
+        /** Library songs shuffled when "Mix for you" has no history to work from. */
+        private const val MIX_FALLBACK_SIZE = 200
+
+        /** Custom command: autoplay "more like this" from the current song. */
+        const val COMMAND_MORE_LIKE_THIS = "com.stash.MORE_LIKE_THIS"
+
+        private const val ANDROID_AUTO_PACKAGE = "com.google.android.projection.gearhead"
+
+        /** Wait after a stream-error halt before continuing with downloads. */
+        private const val HALT_SETTLE_MS = 400L
 
         /**
          * How often the prefetch poll checks playback position against
@@ -275,6 +314,7 @@ class StashPlaybackService : MediaLibraryService() {
         }
 
         override fun onIsPlayingChanged(isPlaying: Boolean) {
+            if (isPlaying) clearCarMessage()
             // During a transition the engine owns both players' play/pause state
             // (pauseAtEndOfMediaItems, the spare) — ignore the churn it makes.
             if (crossfadeEngine?.isTransitioning() == true) return
@@ -404,6 +444,16 @@ class StashPlaybackService : MediaLibraryService() {
         serviceScope.launch { crossfadePreference.durationMs.collect { crossfadeDurationMs = it } }
 
         updateCustomLayout()
+
+        // Car: keep playing downloaded songs when streaming gives out.
+        serviceScope.launch {
+            playerRepository.get().streamingHaltedEvents.collect {
+                // The guard's pause() travels through the app's controller;
+                // let it land first so it can't undo the skip below.
+                delay(HALT_SETTLE_MS)
+                onStreamingHalted()
+            }
+        }
     }
 
     /**
@@ -478,8 +528,9 @@ class StashPlaybackService : MediaLibraryService() {
         val nextIndex = player.nextMediaItemIndex
         if (nextIndex == C.INDEX_UNSET) return
         val nextItem = runCatching { player.getMediaItemAt(nextIndex) }.getOrNull() ?: return
-        if (!isNextResolved(nextItem)) return
+        if (!isCrossfadeReady(nextItem)) return
         val nextId = nextItem.mediaId
+        if (nextId == engine.abortedMediaId) return // didn't start last time: hard cut
         val remaining = duration - player.currentPosition
 
         // Phase 1 — prime the spare as soon as the next track is resolved and we
@@ -522,21 +573,6 @@ class StashPlaybackService : MediaLibraryService() {
         if (newMaster.isPlaying) {
             startPrefetchPoll(newMaster)
             startCrossfadePoll(newMaster)
-        }
-    }
-
-    /**
-     * Whether [item] is playable right now (so a fade into it won't error).
-     * Local/downloaded items (file/content URIs) always are. A streaming item
-     * is only playable once a resolver has produced its URL, which stamps
-     * [EXTRA_STREAM_ORIGIN] — placeholder queue-fill http(s) URLs lack it.
-     */
-    private fun isNextResolved(item: MediaItem): Boolean {
-        val scheme = item.localConfiguration?.uri?.scheme?.lowercase() ?: return false
-        return if (scheme == "http" || scheme == "https") {
-            item.mediaMetadata.extras?.getString(EXTRA_STREAM_ORIGIN) != null
-        } else {
-            true
         }
     }
 
@@ -707,6 +743,95 @@ class StashPlaybackService : MediaLibraryService() {
             buildRepeatButton(player.repeatMode)
         )
         session.setCustomLayout(layout)
+        // The car gets more room: shuffle and "more like this" as well.
+        val carLayout = ImmutableList.of(
+            buildLikeButton(isLiked),
+            buildShuffleButton(player.shuffleModeEnabled),
+            buildRepeatButton(player.repeatMode),
+            buildMoreLikeThisButton(),
+        )
+        session.connectedControllers.filter { isCarController(it) }.forEach { session.setCustomLayout(it, carLayout) }
+    }
+
+    @OptIn(UnstableApi::class)
+    private fun buildShuffleButton(enabled: Boolean): CommandButton =
+        CommandButton.Builder()
+            .setDisplayName(getString(if (enabled) R.string.notification_action_shuffle_on else R.string.notification_action_shuffle_off))
+            .setIconResId(if (enabled) R.drawable.ic_shuffle else R.drawable.ic_shuffle_off)
+            .setSessionCommand(SessionCommand(COMMAND_TOGGLE_SHUFFLE, android.os.Bundle.EMPTY))
+            .build()
+
+    @OptIn(UnstableApi::class)
+    private fun buildMoreLikeThisButton(): CommandButton =
+        CommandButton.Builder()
+            .setDisplayName(getString(R.string.auto_more_like_this))
+            .setIconResId(R.drawable.ic_auto_more_like_this)
+            .setSessionCommand(SessionCommand(COMMAND_MORE_LIKE_THIS, android.os.Bundle.EMPTY))
+            .build()
+
+    /** Android Auto (phone projection) or Android Automotive's media centre. */
+    private fun isCarController(controller: MediaSession.ControllerInfo): Boolean =
+        controller.packageName == ANDROID_AUTO_PACKAGE || controller.packageName.startsWith("com.android.car.")
+
+    // ---- Messages in the car ----------------------------------------------
+
+    /** Car controllers currently showing a message from [showCarMessage]. */
+    private val carMessageShown = mutableSetOf<MediaSession.ControllerInfo>()
+
+    /**
+     * Shows [message] on the car screen. Sent to car controllers only — the
+     * app's own controller would treat it as a player error and skip.
+     */
+    @OptIn(UnstableApi::class)
+    private fun showCarMessage(message: String) {
+        val session = mediaSession ?: return
+        val exception = PlaybackException(message, null, PlaybackException.ERROR_CODE_IO_NETWORK_CONNECTION_FAILED)
+        session.connectedControllers.filter { isCarController(it) }.forEach {
+            session.setPlaybackException(it, exception)
+            carMessageShown += it
+        }
+    }
+
+    @OptIn(UnstableApi::class)
+    private fun clearCarMessage() {
+        val session = mediaSession ?: return
+        if (carMessageShown.isEmpty()) return
+        carMessageShown.filter { it in session.connectedControllers }.forEach { session.setPlaybackException(it, null) }
+        carMessageShown.clear()
+    }
+
+    /**
+     * The stream-error guard paused playback (streaming keeps failing). In the
+     * car that silence used to be all the driver got: carry on with the next
+     * downloaded song instead, and say why when there is none.
+     */
+    private fun onStreamingHalted() {
+        val session = mediaSession ?: return
+        if (session.connectedControllers.none { isCarController(it) }) return
+        val player = session.player
+        val next = nextLocalIndex(player)
+        android.util.Log.w("StashPlayback", "streaming halted in the car — next local index=$next")
+        if (next != null) {
+            player.seekTo(next, 0L)
+            player.prepare()
+            player.play()
+        } else {
+            showCarMessage(getString(R.string.auto_streaming_unavailable))
+        }
+    }
+
+    /** Index of the next queue item after the current one that plays from a file. */
+    private fun nextLocalIndex(player: Player): Int? {
+        var index = player.currentMediaItemIndex
+        val seen = HashSet<Int>()
+        while (true) {
+            index = player.currentTimeline.takeIf { !it.isEmpty }
+                ?.getNextWindowIndex(index, Player.REPEAT_MODE_OFF, player.shuffleModeEnabled)
+                ?: return null
+            if (index == C.INDEX_UNSET || !seen.add(index)) return null
+            val scheme = player.getMediaItemAt(index).localConfiguration?.uri?.scheme?.lowercase()
+            if (scheme == "file" || scheme == "content") return index
+        }
     }
 
     @OptIn(UnstableApi::class)
@@ -844,6 +969,8 @@ class StashPlaybackService : MediaLibraryService() {
 
     // ---- MediaLibrarySession.Callback ----
 
+    // Content-style hints and per-controller errors are UnstableApi in Media3.
+    @OptIn(UnstableApi::class)
     private inner class StashSessionCallback : MediaLibrarySession.Callback {
 
         private suspend fun resolveMediaItem(item: MediaItem): MediaItem {
@@ -878,6 +1005,94 @@ class StashPlaybackService : MediaLibraryService() {
             return item
         }
 
+        /**
+         * A queue the car (or voice search) asked for: the rows to play, where
+         * to start, the shuffle mode to apply, and whether it's "Mix for you".
+         */
+        private inner class CarQueue(
+            val items: List<MediaItem>,
+            val tracks: List<com.stash.core.model.Track>,
+            val startIndex: Int,
+            val shuffle: Boolean?,
+            val personalMix: Boolean = false,
+        )
+
+        private fun carQueueOf(entities: List<TrackEntity>, startIndex: Int, shuffle: Boolean?): CarQueue? {
+            if (entities.isEmpty()) return null
+            return CarQueue(
+                items = entities.map { it.toAutoMediaItem(artAuthority = artAuthority) },
+                tracks = entities.map { it.toDomain() },
+                startIndex = startIndex.coerceIn(0, entities.size - 1),
+                shuffle = shuffle,
+            )
+        }
+
+        /** "Mix for you", built like the in-app button; falls back to a library shuffle. */
+        private suspend fun mixForYouQueue(canStream: Boolean): CarQueue? {
+            val mix = runCatching {
+                kotlinx.coroutines.withContext(Dispatchers.Default) {
+                    autoplayEngine.buildMix(includeStreamable = canStream, allowDiscovery = canStream)
+                }
+            }.onFailure { android.util.Log.w("StashPlayback", "car mix failed", it) }.getOrDefault(emptyList())
+            if (mix.isNotEmpty()) {
+                val items = playerRepository.get().queueItemsFor(mix)
+                return CarQueue(items, mix, 0, shuffle = false, personalMix = true)
+            }
+            // No listening history yet: never let the tile do nothing.
+            val library = trackDao.getRecentlyAdded(MIX_FALLBACK_SIZE).first()
+                .filter { it.isPlayableInAuto(canStream) }
+                .shuffled()
+            return carQueueOf(library, 0, shuffle = false)
+        }
+
+        /** Turns a spoken request into a queue (see [AutoVoiceQuery]). */
+        private suspend fun voiceQueue(query: String, canStream: Boolean): CarQueue? {
+            val playlists = playlistDao.getAllVisible(includeStreamable = canStream).first()
+            return when (val target = AutoVoiceQuery.resolve(query, playlists.map { it.id to it.name })) {
+                AutoVoiceQuery.Target.MixForYou -> mixForYouQueue(canStream)
+                is AutoVoiceQuery.Target.Playlist -> carQueueOf(
+                    playlistDao.getTracksForPlaylist(target.id).filter { it.isPlayableInAuto(canStream) },
+                    0,
+                    shuffle = false,
+                )
+                is AutoVoiceQuery.Target.Songs -> carQueueOf(
+                    trackDao.searchDownloaded(ftsQuery(target.query)).first(),
+                    0,
+                    shuffle = false,
+                ) ?: mixForYouQueue(canStream)
+            }
+        }
+
+        /** The queue a browse id stands for, or null when it isn't a car queue id. */
+        private suspend fun browseQueue(mediaId: String, canStream: Boolean): CarQueue? {
+            if (mediaId == MIX_FOR_ME_ID) return mixForYouQueue(canStream)
+            if (mediaId.startsWith(SHUFFLE_PLAY_PREFIX)) {
+                val playlistId = mediaId.removePrefix(SHUFFLE_PLAY_PREFIX).toLongOrNull() ?: return null
+                // isPlayableInAuto, NOT the bare is_streamable flag:
+                // never-checked synced rows must play (see AutoBrowse.kt).
+                val tracks = playlistDao.getTracksForPlaylist(playlistId)
+                    .filter { it.isPlayableInAuto(canStream) }
+                    .shuffled()
+                return carQueueOf(tracks, 0, shuffle = true)
+            }
+            // Browse-tap on a playlist/new child (#154/#173): the mediaId
+            // carries its parent, so rebuild the whole parent as the queue,
+            // starting at the tapped track — in order, unshuffled (shuffle
+            // stays reachable via the Shuffle Play entry).
+            val parsed = AutoBrowseQueue.parse(mediaId)
+            if (parsed == null) {
+                // A bare track id (car search result): play it, autoplay continues.
+                val track = mediaId.toLongOrNull()?.let { trackDao.getById(it) } ?: return null
+                return carQueueOf(listOf(track).filter { it.isPlayableInAuto(canStream) }, 0, shuffle = null)
+            }
+            val plan = AutoBrowseQueue.queuePlan(
+                tracksForBrowseParent(parsed.parentId, canStream),
+                tappedTrackId = parsed.trackId,
+                canStream = canStream,
+            )
+            return carQueueOf(plan.tracks, plan.startIndex, shuffle = false)
+        }
+
         @OptIn(UnstableApi::class)
         override fun onSetMediaItems(
             mediaSession: MediaSession,
@@ -887,51 +1102,44 @@ class StashPlaybackService : MediaLibraryService() {
             startPositionMs: Long,
         ): ListenableFuture<MediaSession.MediaItemsWithStartPosition> {
             return serviceScope.future {
-                if (mediaItems.size == 1 && mediaItems[0].mediaId.startsWith(SHUFFLE_PLAY_PREFIX)) {
-                    val playlistId = mediaItems[0].mediaId.removePrefix(SHUFFLE_PLAY_PREFIX).toLongOrNull()
-                    if (playlistId != null) {
-                        val tracks = playlistDao.getTracksForPlaylist(playlistId)
-                        // isPlayableInAuto, NOT the bare is_streamable flag:
-                        // never-checked synced rows must play (see AutoBrowse.kt).
-                        val items = tracks.filter { it.isPlayableInAuto() }
-                            .map { it.toAutoMediaItem() }
-                            .shuffled()
-
-                        kotlinx.coroutines.withContext(Dispatchers.Main) {
-                            mediaSession.player.shuffleModeEnabled = true
+                val single = mediaItems.singleOrNull()
+                if (single != null && !isOwnController(controller)) {
+                    val canStream = streamingGate.canStreamNow()
+                    val query = single.requestMetadata.searchQuery
+                    if (single.mediaId == CONTINUE_ID) {
+                        continueQueue()?.let { return@future it }
+                    }
+                    val queue = when {
+                        single.mediaId.isEmpty() && query != null -> voiceQueue(query, canStream)
+                        // Nothing saved to continue: play the mix rather than nothing.
+                        single.mediaId == CONTINUE_ID -> mixForYouQueue(canStream)
+                        else -> browseQueue(single.mediaId, canStream)
+                    }
+                    if (queue != null) {
+                        android.util.Log.i(
+                            "StashPlayback",
+                            "car queue from ${controller.packageName}: id=${single.mediaId.take(40)} " +
+                                "items=${queue.items.size} mix=${queue.personalMix} canStream=$canStream",
+                        )
+                        queue.shuffle?.let { shuffle ->
+                            kotlinx.coroutines.withContext(Dispatchers.Main) {
+                                mediaSession.player.shuffleModeEnabled = shuffle
+                            }
                         }
-
+                        // After the queue reaches the player: autoplay continues
+                        // it, exactly as in the app (it used to just end).
+                        serviceScope.launch {
+                            playerRepository.get().adoptExternalQueue(queue.tracks, queue.personalMix)
+                        }
                         return@future MediaSession.MediaItemsWithStartPosition(
-                            items,
-                            0,
-                            C.TIME_UNSET
+                            queue.items,
+                            queue.startIndex,
+                            C.TIME_UNSET,
                         )
                     }
-                }
-                // Browse-tap on a playlist/recently-added child (#154/#173):
-                // the mediaId carries its parent, so rebuild the whole parent
-                // as the queue, starting at the tapped track — mirroring the
-                // SHUFFLE_PLAY_ expansion above, but in order and unshuffled.
-                if (mediaItems.size == 1) {
-                    val parsed = AutoBrowseQueue.parse(mediaItems[0].mediaId)
-                    if (parsed != null) {
-                        val plan = AutoBrowseQueue.queuePlan(
-                            tracksForBrowseParent(parsed.parentId),
-                            tappedTrackId = parsed.trackId,
-                        )
-                        if (plan.tracks.isNotEmpty()) {
-                            val items = plan.tracks.map { it.toAutoMediaItem() }
-                            // An explicit in-order tap means in-order playback;
-                            // shuffle stays reachable via the Shuffle Play entry.
-                            kotlinx.coroutines.withContext(Dispatchers.Main) {
-                                mediaSession.player.shuffleModeEnabled = false
-                            }
-                            return@future MediaSession.MediaItemsWithStartPosition(
-                                items,
-                                plan.startIndex,
-                                C.TIME_UNSET,
-                            )
-                        }
+                    if (query != null || single.mediaId == MIX_FOR_ME_ID || single.mediaId == CONTINUE_ID) {
+                        // Asked for something and nothing can play: say so in the car.
+                        showCarMessage(getString(R.string.auto_nothing_playable))
                     }
                 }
                 val resolvedItems = mediaItems.map { resolveMediaItem(it) }
@@ -939,20 +1147,38 @@ class StashPlaybackService : MediaLibraryService() {
             }
         }
 
+        /** The in-app controller (PlayerRepositoryImpl) builds its own queues. */
+        private fun isOwnController(controller: MediaSession.ControllerInfo): Boolean =
+            controller.packageName == packageName && controller.uid == android.os.Process.myUid()
+
+        /** "Continue listening": the persisted queue at the saved position. */
+        private suspend fun continueQueue(): MediaSession.MediaItemsWithStartPosition? {
+            val plan = playbackResumer.buildResumePlan() ?: return null
+            val items = plan.tracks.map { it.toAutoMediaItem(artAuthority = artAuthority) }
+            kotlinx.coroutines.withContext(Dispatchers.Main) {
+                mediaSession?.player?.shuffleModeEnabled = plan.isShuffled
+            }
+            serviceScope.launch {
+                playerRepository.get().adoptExternalQueue(plan.tracks.map { it.toDomain() }, personalMix = false)
+            }
+            return MediaSession.MediaItemsWithStartPosition(items, plan.startIndex, plan.positionMs)
+        }
+
         /**
          * Loads the track list backing an Auto browse parent id — the same
          * rows (and order) `onGetChildren` listed for it.
          */
-        private suspend fun tracksForBrowseParent(parentId: String): List<TrackEntity> =
+        private suspend fun tracksForBrowseParent(parentId: String, canStream: Boolean): List<TrackEntity> =
             when {
                 parentId.startsWith(PLAYLIST_PREFIX) ->
                     parentId.removePrefix(PLAYLIST_PREFIX).toLongOrNull()
                         ?.let { playlistDao.getTracksForPlaylist(it) }
                         // Same predicate as onGetChildren so the queue built
                         // from a tap matches the rows the car listed.
-                        ?.filter { it.isPlayableInAuto() }
+                        ?.filter { it.isPlayableInAuto(canStream) }
                         ?: emptyList()
-                parentId == RECENTLY_ADDED_ID -> trackDao.getRecentlyAdded(20).first()
+                parentId == RECENTLY_ADDED_ID ->
+                    trackDao.getRecentlyAdded(NEW_LIMIT).first().filter { it.isPlayableInAuto(canStream) }
                 else -> emptyList()
             }
 
@@ -966,9 +1192,10 @@ class StashPlaybackService : MediaLibraryService() {
                 if (mediaItems.size == 1 && mediaItems[0].mediaId.startsWith(SHUFFLE_PLAY_PREFIX)) {
                     val playlistId = mediaItems[0].mediaId.removePrefix(SHUFFLE_PLAY_PREFIX).toLongOrNull()
                     if (playlistId != null) {
+                        val canStream = streamingGate.canStreamNow()
                         return@future playlistDao.getTracksForPlaylist(playlistId)
-                            .filter { it.isPlayableInAuto() }
-                            .map { it.toAutoMediaItem() }
+                            .filter { it.isPlayableInAuto(canStream) }
+                            .map { it.toAutoMediaItem(artAuthority = artAuthority) }
                             .shuffled()
                     }
                 }
@@ -988,6 +1215,102 @@ class StashPlaybackService : MediaLibraryService() {
             }
         }
 
+        // ---- Browse tree -------------------------------------------------
+
+        private fun iconUri(name: String) = "android.resource://$packageName/drawable/$name".toUri()
+
+        private fun styleExtras(browsable: Int? = null, playable: Int? = null, group: String? = null) =
+            android.os.Bundle().apply {
+                browsable?.let { putInt(MediaConstants.EXTRAS_KEY_CONTENT_STYLE_BROWSABLE, it) }
+                playable?.let { putInt(MediaConstants.EXTRAS_KEY_CONTENT_STYLE_PLAYABLE, it) }
+                group?.let { putString(MediaConstants.EXTRAS_KEY_CONTENT_STYLE_GROUP_TITLE, it) }
+            }
+
+        private fun folder(
+            id: String,
+            title: String,
+            subtitle: String? = null,
+            artwork: android.net.Uri? = null,
+            extras: android.os.Bundle? = null,
+        ): MediaItem = MediaItem.Builder()
+            .setMediaId(id)
+            .setMediaMetadata(
+                MediaMetadata.Builder()
+                    .setTitle(title)
+                    .setSubtitle(subtitle)
+                    .setArtworkUri(artwork)
+                    .setIsBrowsable(true)
+                    .setIsPlayable(false)
+                    .setExtras(extras)
+                    .build(),
+            )
+            .build()
+
+        private fun action(
+            id: String,
+            title: String,
+            subtitle: String?,
+            artwork: android.net.Uri?,
+            extras: android.os.Bundle? = null,
+        ): MediaItem = MediaItem.Builder()
+            .setMediaId(id)
+            .setMediaMetadata(
+                MediaMetadata.Builder()
+                    .setTitle(title)
+                    .setSubtitle(subtitle)
+                    .setArtworkUri(artwork)
+                    .setIsBrowsable(false)
+                    .setIsPlayable(true)
+                    .setExtras(extras)
+                    .build(),
+            )
+            .build()
+
+        private fun rootItem() = folder(ROOT_ID, "Stash")
+
+        private fun tabs(): List<MediaItem> = listOf(
+            folder(
+                FOR_YOU_ID, getString(R.string.auto_tab_for_you), artwork = iconUri("ic_auto_for_you"),
+                extras = styleExtras(
+                    browsable = MediaConstants.EXTRAS_VALUE_CONTENT_STYLE_GRID_ITEM,
+                    playable = MediaConstants.EXTRAS_VALUE_CONTENT_STYLE_GRID_ITEM,
+                ),
+            ),
+            folder(
+                PLAYLISTS_ID, getString(R.string.auto_tab_playlists), artwork = iconUri("ic_auto_playlists"),
+                extras = styleExtras(browsable = MediaConstants.EXTRAS_VALUE_CONTENT_STYLE_GRID_ITEM),
+            ),
+            folder(
+                RECENTLY_ADDED_ID, getString(R.string.auto_tab_new), artwork = iconUri("ic_auto_new"),
+                extras = styleExtras(playable = MediaConstants.EXTRAS_VALUE_CONTENT_STYLE_LIST_ITEM),
+            ),
+        )
+
+        private fun mixForYouItem(group: String?) = action(
+            MIX_FOR_ME_ID,
+            getString(R.string.auto_mix_for_you),
+            getString(R.string.auto_mix_for_you_subtitle),
+            iconUri("ic_auto_mix"),
+            styleExtras(group = group),
+        )
+
+        private fun continueItem(group: String?) = action(
+            CONTINUE_ID,
+            getString(R.string.auto_continue),
+            null,
+            iconUri("ic_auto_continue"),
+            styleExtras(group = group),
+        )
+
+        private fun playlistFolder(playlist: com.stash.core.data.db.entity.PlaylistEntity, group: String?) = folder(
+            "$PLAYLIST_PREFIX${playlist.id}",
+            playlist.name,
+            subtitle = resources.getQuantityString(R.plurals.auto_song_count, playlist.trackCount, playlist.trackCount),
+            artwork = playlist.artUrl?.toUri() ?: iconUri(if (AutoBrowseTree.isMix(playlist)) "ic_auto_mix" else "ic_auto_playlists"),
+            // Inside a playlist: songs as a list.
+            extras = styleExtras(playable = MediaConstants.EXTRAS_VALUE_CONTENT_STYLE_LIST_ITEM, group = group),
+        )
+
         @OptIn(UnstableApi::class)
         override fun onGetItem(
             session: MediaLibrarySession,
@@ -995,102 +1318,43 @@ class StashPlaybackService : MediaLibraryService() {
             mediaId: String,
         ): ListenableFuture<LibraryResult<MediaItem>> {
             android.util.Log.d("StashPlayback", "onGetItem: id=$mediaId client=${browser.packageName}")
-            return when (mediaId) {
-                ROOT_ID -> {
-                    val rootItem = MediaItem.Builder()
-                        .setMediaId(ROOT_ID)
-                        .setMediaMetadata(
-                            MediaMetadata.Builder()
-                                .setTitle("Stash Root")
-                                .setIsBrowsable(true)
-                                .setIsPlayable(false)
-                                .build(),
-                        )
-                        .build()
-                    Futures.immediateFuture(LibraryResult.ofItem(rootItem, null))
+            return serviceScope.future {
+                when (mediaId) {
+                    ROOT_ID -> return@future LibraryResult.ofItem(rootItem(), null)
+                    FOR_YOU_ID, PLAYLISTS_ID, RECENTLY_ADDED_ID ->
+                        return@future LibraryResult.ofItem(tabs().first { it.mediaId == mediaId }, null)
+                    MIX_FOR_ME_ID -> return@future LibraryResult.ofItem(mixForYouItem(null), null)
+                    CONTINUE_ID -> return@future LibraryResult.ofItem(continueItem(null), null)
                 }
-                PLAYLISTS_ID -> {
-                    val playlistsItem = MediaItem.Builder()
-                        .setMediaId(PLAYLISTS_ID)
-                        .setMediaMetadata(
-                            MediaMetadata.Builder()
-                                .setTitle("Playlists")
-                                .setIsBrowsable(true)
-                                .setIsPlayable(false)
-                                .build(),
+                // Browse-child ids (AUTOQ_…) resolve to their track,
+                // keeping the parent-carrying mediaId intact so a
+                // subsequent tap still expands the playlist (#154/#173).
+                val trackId = AutoBrowseQueue.parse(mediaId)?.trackId ?: mediaId.toLongOrNull()
+                if (trackId != null) {
+                    trackDao.getById(trackId)?.let { track ->
+                        val item = track.toAutoMediaItem(
+                            mediaId = if (mediaId.startsWith(AutoBrowseQueue.PREFIX)) mediaId else track.id.toString(),
+                            artAuthority = artAuthority,
                         )
-                        .build()
-                    Futures.immediateFuture(LibraryResult.ofItem(playlistsItem, null))
-                }
-                else -> {
-                    // Try to resolve track or playlist
-                    serviceScope.future {
-                        // Browse-child ids (AUTOQ_…) resolve to their track,
-                        // keeping the parent-carrying mediaId intact so a
-                        // subsequent tap still expands the playlist (#154/#173).
-                        val trackId = AutoBrowseQueue.parse(mediaId)?.trackId
-                            ?: mediaId.toLongOrNull()
-                        if (trackId != null) {
-                            val track = trackDao.getById(trackId)
-                            if (track != null) {
-                                return@future LibraryResult.ofItem(
-                                    track.toAutoMediaItem(
-                                        mediaId = if (mediaId.startsWith(AutoBrowseQueue.PREFIX)) {
-                                            mediaId
-                                        } else {
-                                            track.id.toString()
-                                        },
-                                    ),
-                                    null,
-                                )
-                            }
-                        }
-                        if (mediaId.startsWith(PLAYLIST_PREFIX)) {
-                            val playlistId = mediaId.removePrefix(PLAYLIST_PREFIX).toLongOrNull()
-                            if (playlistId != null) {
-                                val playlist = playlistDao.getById(playlistId)
-                                if (playlist != null) {
-                                    return@future LibraryResult.ofItem(
-                                        MediaItem.Builder()
-                                            .setMediaId(mediaId)
-                                            .setMediaMetadata(
-                                                MediaMetadata.Builder()
-                                                    .setTitle(playlist.name)
-                                                    .setIsBrowsable(true)
-                                                    .setIsPlayable(false)
-                                                    .build(),
-                                            )
-                                            .build(),
-                                        null,
-                                    )
-                                }
-                            }
-                        }
-                        if (mediaId.startsWith(SHUFFLE_PLAY_PREFIX)) {
-                            val playlistId = mediaId.removePrefix(SHUFFLE_PLAY_PREFIX).toLongOrNull()
-                            if (playlistId != null) {
-                                val playlist = playlistDao.getById(playlistId)
-                                if (playlist != null) {
-                                    return@future LibraryResult.ofItem(
-                                        MediaItem.Builder()
-                                            .setMediaId(mediaId)
-                                            .setMediaMetadata(
-                                                MediaMetadata.Builder()
-                                                    .setTitle(getString(R.string.shuffle_play))
-                                                    .setArtworkUri("android.resource://$packageName/drawable/ic_shuffle".toUri())
-                                                    .setIsBrowsable(false)
-                                                    .setIsPlayable(true)
-                                                    .build(),
-                                            )
-                                            .build(),
-                                        null,
-                                    )
-                                }
-                            }
-                        }
-                        LibraryResult.ofError(SessionError.ERROR_BAD_VALUE)
+                        grantArtwork(browser, listOf(item))
+                        return@future LibraryResult.ofItem(item, null)
                     }
                 }
+                if (mediaId.startsWith(PLAYLIST_PREFIX)) {
+                    mediaId.removePrefix(PLAYLIST_PREFIX).toLongOrNull()
+                        ?.let { playlistDao.getById(it) }
+                        ?.let { return@future LibraryResult.ofItem(playlistFolder(it, null), null) }
+                }
+                if (mediaId.startsWith(SHUFFLE_PLAY_PREFIX)) {
+                    val playlistId = mediaId.removePrefix(SHUFFLE_PLAY_PREFIX).toLongOrNull()
+                    if (playlistId != null && playlistDao.getById(playlistId) != null) {
+                        return@future LibraryResult.ofItem(
+                            action(mediaId, getString(R.string.shuffle_play), null, iconUri("ic_shuffle")),
+                            null,
+                        )
+                    }
+                }
+                LibraryResult.ofError(SessionError.ERROR_BAD_VALUE)
             }
         }
 
@@ -1099,17 +1363,18 @@ class StashPlaybackService : MediaLibraryService() {
             browser: MediaSession.ControllerInfo,
             params: LibraryParams?,
         ): ListenableFuture<LibraryResult<MediaItem>> {
-            val rootItem = MediaItem.Builder()
-                .setMediaId(ROOT_ID)
-                .setMediaMetadata(
-                    MediaMetadata.Builder()
-                        .setTitle("Stash Root")
-                        .setIsBrowsable(true)
-                        .setIsPlayable(false)
-                        .build(),
-                )
+            // Defaults for every level: folders as tiles, songs as rows.
+            val rootExtras = styleExtras(
+                browsable = MediaConstants.EXTRAS_VALUE_CONTENT_STYLE_GRID_ITEM,
+                playable = MediaConstants.EXTRAS_VALUE_CONTENT_STYLE_LIST_ITEM,
+            ).apply { putBoolean("android.media.browse.SEARCH_SUPPORTED", true) }
+            val rootParams = LibraryParams.Builder()
+                .setExtras(rootExtras)
+                .setOffline(params?.isOffline ?: false)
+                .setRecent(params?.isRecent ?: false)
+                .setSuggested(params?.isSuggested ?: false)
                 .build()
-            return Futures.immediateFuture(LibraryResult.ofItem(rootItem, params))
+            return Futures.immediateFuture(LibraryResult.ofItem(rootItem(), rootParams))
         }
 
         @OptIn(UnstableApi::class)
@@ -1122,94 +1387,64 @@ class StashPlaybackService : MediaLibraryService() {
             params: LibraryParams?,
         ): ListenableFuture<LibraryResult<ImmutableList<MediaItem>>> {
             return serviceScope.future {
-                val items = when (parentId) {
-                    ROOT_ID -> {
-                        listOf(
-                            MediaItem.Builder()
-                                .setMediaId(PLAYLISTS_ID)
-                                .setMediaMetadata(
-                                    MediaMetadata.Builder()
-                                        .setTitle("Playlists")
-                                        .setIsBrowsable(true)
-                                        .setIsPlayable(false)
-                                        .build(),
-                                )
-                                .build(),
-                            MediaItem.Builder()
-                                .setMediaId(RECENTLY_ADDED_ID)
-                                .setMediaMetadata(
-                                    MediaMetadata.Builder()
-                                        .setTitle("Recently Added")
-                                        .setIsBrowsable(true)
-                                        .setIsPlayable(false)
-                                        .build(),
-                                )
-                                .build(),
-                        )
+                val canStream = streamingGate.canStreamNow()
+                val items: List<MediaItem> = when (parentId) {
+                    ROOT_ID -> tabs()
+                    FOR_YOU_ID -> {
+                        val start = getString(R.string.auto_group_start)
+                        val mixes = getString(R.string.auto_group_mixes)
+                        val library = getString(R.string.auto_group_library)
+                        val playlists = AutoBrowseTree.forYou(playlistDao.getAllVisible(includeStreamable = canStream).first())
+                        listOfNotNull(
+                            mixForYouItem(start),
+                            continueItem(start),
+                        ) + playlists.map { playlistFolder(it, if (AutoBrowseTree.isMix(it)) mixes else library) }
                     }
-                    PLAYLISTS_ID -> {
-                        // Android Auto browse shows downloaded playlists only.
-                        // Streaming-only tracks would fail on flaky cellular while
-                        // driving — worse UX than not seeing them at all. Revisit
-                        // when streaming-aware Auto support lands.
-                        playlistDao.getAllVisible(includeStreamable = false).first().map { playlist ->
-                            MediaItem.Builder()
-                                .setMediaId("$PLAYLIST_PREFIX${playlist.id}")
-                                .setMediaMetadata(
-                                    MediaMetadata.Builder()
-                                        .setTitle(playlist.name)
-                                        .setSubtitle("${playlist.trackCount} tracks")
-                                        .setArtworkUri(playlist.artUrl?.toUri())
-                                        .setIsBrowsable(true)
-                                        .setIsPlayable(false)
-                                        .build(),
-                                )
-                                .build()
-                        }
-                    }
-                    RECENTLY_ADDED_ID -> {
-                        trackDao.getRecentlyAdded(20).first().map { track ->
+                    PLAYLISTS_ID ->
+                        // Stream-only playlists appear only while streaming can work.
+                        AutoBrowseTree.library(playlistDao.getAllVisible(includeStreamable = canStream).first())
+                            .map { playlistFolder(it, null) }
+                    RECENTLY_ADDED_ID ->
+                        tracksForBrowseParent(parentId, canStream).map { track ->
                             track.toAutoMediaItem(
                                 mediaId = AutoBrowseQueue.childMediaId(parentId, track.id),
+                                artAuthority = artAuthority,
                             )
                         }
-                    }
-                    else -> {
-                        if (parentId.startsWith(PLAYLIST_PREFIX)) {
-                            val playlistId = parentId.removePrefix(PLAYLIST_PREFIX).toLongOrNull()
-                            if (playlistId != null) {
-                                val shuffleItem = MediaItem.Builder()
-                                    .setMediaId("$SHUFFLE_PLAY_PREFIX$playlistId")
-                                    .setMediaMetadata(
-                                        MediaMetadata.Builder()
-                                            .setTitle(getString(R.string.shuffle_play))
-                                            .setArtworkUri("android.resource://$packageName/drawable/ic_shuffle".toUri())
-                                            .setIsBrowsable(false)
-                                            .setIsPlayable(true)
-                                            .build(),
-                                    )
-                                    .build()
-
-                                // isPlayableInAuto, NOT the bare is_streamable flag —
-                                // synced rows are "never checked" (is_streamable=0,
-                                // checked_at=null) and the bare flag dropped ALL of
-                                // them: the "playlist opens empty in the car" bug.
-                                // mediaId carries the parent playlist (AUTOQ_…) so a tap
-                                // can queue the WHOLE playlist, not a single item — #154/#173.
-                                val tracks = playlistDao.getTracksForPlaylist(playlistId)
-                                    .filter { it.isPlayableInAuto() }
-                                    .map { track ->
-                                        track.toAutoMediaItem(
-                                            mediaId = AutoBrowseQueue.childMediaId(parentId, track.id),
-                                        )
-                                    }
-                                listOf(shuffleItem) + tracks
-                            } else emptyList()
-                        } else emptyList()
+                    else -> if (parentId.startsWith(PLAYLIST_PREFIX)) {
+                        val playlistId = parentId.removePrefix(PLAYLIST_PREFIX).toLongOrNull()
+                        // isPlayableInAuto, NOT the bare is_streamable flag —
+                        // synced rows are "never checked" (is_streamable=0,
+                        // checked_at=null) and the bare flag dropped ALL of
+                        // them: the "playlist opens empty in the car" bug.
+                        // mediaId carries the parent playlist (AUTOQ_…) so a tap
+                        // can queue the WHOLE playlist, not a single item — #154/#173.
+                        val tracks = tracksForBrowseParent(parentId, canStream).map { track ->
+                            track.toAutoMediaItem(
+                                mediaId = AutoBrowseQueue.childMediaId(parentId, track.id),
+                                artAuthority = artAuthority,
+                            )
+                        }
+                        if (playlistId == null || tracks.isEmpty()) {
+                            tracks
+                        } else {
+                            listOf(
+                                action("$SHUFFLE_PLAY_PREFIX$playlistId", getString(R.string.shuffle_play), null, iconUri("ic_shuffle")),
+                            ) + tracks
+                        }
+                    } else {
+                        emptyList()
                     }
                 }
-                LibraryResult.ofItemList(ImmutableList.copyOf(items), params)
+                grantArtwork(browser, items)
+                LibraryResult.ofItemList(ImmutableList.copyOf(pageOf(items, page, pageSize)), params)
             }
+        }
+
+        /** Lets the car read the local covers in [items] (it renders in its own process). */
+        private fun grantArtwork(browser: MediaSession.ControllerInfo, items: List<MediaItem>) {
+            if (browser.packageName == packageName) return
+            StashArtworkProvider.grantTo(this@StashPlaybackService, browser.packageName, items.map { it.mediaMetadata.artworkUri })
         }
 
         override fun onSearch(
@@ -1232,14 +1467,10 @@ class StashPlaybackService : MediaLibraryService() {
             params: LibraryParams?,
         ): ListenableFuture<LibraryResult<ImmutableList<MediaItem>>> {
             return serviceScope.future {
-                // Sanitize for FTS (append * to each term for prefix matching)
-                val sanitized = query.split(" ")
-                    .filter { it.isNotBlank() }
-                    .joinToString(" ") { "$it*" }
-
-                val tracks = trackDao.searchDownloaded(sanitized).first()
-                val items = tracks.map { it.toAutoMediaItem() }
-                LibraryResult.ofItemList(ImmutableList.copyOf(items), params)
+                val tracks = trackDao.searchDownloaded(ftsQuery(query)).first()
+                val items = tracks.map { it.toAutoMediaItem(artAuthority = artAuthority) }
+                grantArtwork(browser, items)
+                LibraryResult.ofItemList(ImmutableList.copyOf(pageOf(items, page, pageSize)), params)
             }
         }
 
@@ -1252,6 +1483,7 @@ class StashPlaybackService : MediaLibraryService() {
                 SessionCommand(COMMAND_TOGGLE_SHUFFLE, /* extras = */ android.os.Bundle.EMPTY),
                 SessionCommand(COMMAND_CYCLE_REPEAT, /* extras = */ android.os.Bundle.EMPTY),
                 SessionCommand(COMMAND_TOGGLE_LIKE, /* extras = */ android.os.Bundle.EMPTY),
+                SessionCommand(COMMAND_MORE_LIKE_THIS, /* extras = */ android.os.Bundle.EMPTY),
             )
             // FULL library command set — not DEFAULT_SESSION_COMMANDS plus a
             // hand-picked subset. The old hand-picked list omitted
@@ -1283,6 +1515,14 @@ class StashPlaybackService : MediaLibraryService() {
                 .build()
         }
 
+        override fun onPostConnect(session: MediaSession, controller: MediaSession.ControllerInfo) {
+            // A car that just connected gets its wider button row right away.
+            if (isCarController(controller)) {
+                android.util.Log.i("StashPlayback", "car connected: ${controller.packageName}")
+                updateCustomLayout()
+            }
+        }
+
         override fun onCustomCommand(
             session: MediaSession,
             controller: MediaSession.ControllerInfo,
@@ -1293,6 +1533,12 @@ class StashPlaybackService : MediaLibraryService() {
                 COMMAND_TOGGLE_SHUFFLE -> {
                     val player = session.player
                     player.shuffleModeEnabled = !player.shuffleModeEnabled
+                }
+                COMMAND_MORE_LIKE_THIS -> {
+                    serviceScope.launch {
+                        val ok = runCatching { playerRepository.get().moreLikeThis() }.getOrDefault(false)
+                        if (!ok) showCarMessage(getString(R.string.auto_nothing_playable))
+                    }
                 }
                 COMMAND_CYCLE_REPEAT -> {
                     val player = session.player
