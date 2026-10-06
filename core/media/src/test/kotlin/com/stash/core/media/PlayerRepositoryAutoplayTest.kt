@@ -263,4 +263,17 @@ class PlayerRepositoryAutoplayTest {
         assertThat(repo.moreLikeThis()).isFalse()
         verify(exactly = 0) { controller.removeMediaItems(any(), any()) }
     }
+
+    @Test fun `songs appended after the queue already ended are started`() = runTest {
+        repo.setQueue(listOf(track(1), track(2)))
+        idleMain()
+        every { controller.playbackState } returns Player.STATE_ENDED
+        every { controller.mediaItemCount } returns 2
+
+        repo.growAutoplay()
+
+        verify { controller.addMediaItems(match<List<MediaItem>> { it.size == 2 }) }
+        verify { controller.seekTo(2, 0L) }
+        verify(atLeast = 1) { controller.play() }
+    }
 }

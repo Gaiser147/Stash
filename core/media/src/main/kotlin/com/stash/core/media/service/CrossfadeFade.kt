@@ -49,3 +49,15 @@ internal fun isCrossfadeReady(item: MediaItem): Boolean {
         else -> true
     }
 }
+
+/** Above this much master-vs-spare offset the hand-off re-syncs before switching. */
+internal const val HANDOFF_RESYNC_TOLERANCE_MS = 40L
+
+/**
+ * How far the master is off the spare after its hand-off seek, or null when
+ * it's close enough to switch without an audible jump or echo.
+ */
+internal fun handoffDrift(spareMs: Long, masterMs: Long): Long? {
+    val drift = spareMs - masterMs
+    return if (kotlin.math.abs(drift) > HANDOFF_RESYNC_TOLERANCE_MS) drift else null
+}

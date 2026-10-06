@@ -198,6 +198,20 @@ class StashPlaybackService : MediaLibraryService() {
 
         private const val ANDROID_AUTO_PACKAGE = "com.google.android.projection.gearhead"
 
+        /** Player commands worth a log line when tracking down unexpected stops. */
+        private val LOGGED_COMMANDS = setOf(
+            Player.COMMAND_PLAY_PAUSE,
+            Player.COMMAND_STOP,
+            Player.COMMAND_SEEK_TO_NEXT,
+            Player.COMMAND_SEEK_TO_NEXT_MEDIA_ITEM,
+            Player.COMMAND_SEEK_TO_MEDIA_ITEM,
+            Player.COMMAND_SET_MEDIA_ITEM,
+            Player.COMMAND_CHANGE_MEDIA_ITEMS,
+        )
+
+        /** How often [StallWatch] samples the master. */
+        private const val STALL_POLL_MS = 1_000L
+
         /** Wait after a stream-error halt before continuing with downloads. */
         private const val HALT_SETTLE_MS = 400L
 
@@ -268,7 +282,7 @@ class StashPlaybackService : MediaLibraryService() {
     /** mediaId the spare is currently primed for, so we don't re-prepare it. */
     @Volatile private var crossfadePreparedId: String? = null
 
-    /** The player [playerListener] is currently attached to (moves on swap). */
+    /** The player [playerListener] is attached to (the fixed master). */
     private var listenedPlayer: Player? = null
 
     /**
@@ -283,26 +297,34 @@ class StashPlaybackService : MediaLibraryService() {
      */
     private val resumePlayGate = ResumePlayGate()
 
+    /** Playing-but-not-moving detector, sampled by [stallWatchJob]. */
+    private val stallWatch = StallWatch()
+    private var stallWatchJob: Job? = null
+
     /**
-     * The per-track / transport listener. Extracted to a field (not inline) so
-     * it can be moved from the old master to the new one when the crossfade
-     * engine swaps players. Always references the CURRENT master via
-     * [crossfadeEngine].masterPlayer rather than a captured instance.
+     * The per-track / transport listener, on the session's (fixed) master
+     * player.
      */
     @OptIn(UnstableApi::class)
     private val playerListener = object : Player.Listener {
         override fun onMediaItemTransition(mediaItem: MediaItem?, reason: Int) {
             // A user skip (SEEK) or queue change (PLAYLIST_CHANGED) aborts a
             // pending/in-flight crossfade and hard-cuts. The engine's own
-            // role-swap does NOT surface here — we move this listener to the new
-            // master instead of advancing the old one.
+            // hand-off seek onto the next song is NOT a skip.
+            android.util.Log.i(
+                "StashPause",
+                "transition reason=$reason to='${mediaItem?.mediaMetadata?.title}' handoff=${crossfadeEngine?.isHandingOff()}",
+            )
             when (reason) {
                 Player.MEDIA_ITEM_TRANSITION_REASON_SEEK,
                 Player.MEDIA_ITEM_TRANSITION_REASON_PLAYLIST_CHANGED -> {
-                    crossfadeEngine?.cancelTransition()
-                    crossfadePreparedId = null
+                    if (crossfadeEngine?.isHandingOff() != true) {
+                        crossfadeEngine?.cancelTransition()
+                        crossfadePreparedId = null
+                    }
                 }
             }
+            stallWatch.reset()
             updateCustomLayout()
             onTrackTransitionForLoudness(mediaItem)
             prefetchOrchestrator.resetSession()
@@ -311,6 +333,25 @@ class StashPlaybackService : MediaLibraryService() {
                 startPrefetchPoll(master)
                 startCrossfadePoll(master)
             }
+        }
+
+        override fun onPlayWhenReadyChanged(playWhenReady: Boolean, reason: Int) {
+            // Who stopped the music: 1 user/controller, 2 audio focus,
+            // 3 becoming noisy, 4 remote, 5 end of item, 6 suppressed route.
+            val master = crossfadeEngine?.masterPlayer
+            android.util.Log.i(
+                "StashPause",
+                "playWhenReady=$playWhenReady reason=$reason state=${master?.playbackState} " +
+                    "pos=${master?.currentPosition} song='${master?.currentMediaItem?.mediaMetadata?.title}'",
+            )
+        }
+
+        override fun onPlaybackSuppressionReasonChanged(playbackSuppressionReason: Int) {
+            android.util.Log.i("StashPause", "suppression=$playbackSuppressionReason")
+        }
+
+        override fun onPlaybackStateChanged(playbackState: Int) {
+            android.util.Log.i("StashPause", "state=$playbackState")
         }
 
         override fun onIsPlayingChanged(isPlaying: Boolean) {
@@ -445,6 +486,13 @@ class StashPlaybackService : MediaLibraryService() {
 
         updateCustomLayout()
 
+        stallWatchJob = serviceScope.launch {
+            while (isActive) {
+                delay(STALL_POLL_MS)
+                checkStall()
+            }
+        }
+
         // Car: keep playing downloaded songs when streaming gives out.
         serviceScope.launch {
             playerRepository.get().streamingHaltedEvents.collect {
@@ -490,6 +538,9 @@ class StashPlaybackService : MediaLibraryService() {
             .setHandleAudioBecomingNoisy(true)
             .setWakeMode(C.WAKE_MODE_LOCAL)
             .build()
+            // Appended songs (autoplay, add to queue) go after everything
+            // queued in shuffle mode, never before the current song.
+            .also { it.setShuffleOrder(AppendingShuffleOrder(0)) }
     }
 
     /**
@@ -514,7 +565,7 @@ class StashPlaybackService : MediaLibraryService() {
      *  - **prepare**: well before the seam (`fade + lead`), prime the spare on
      *    the resolved next item so its readiness is never raced at fire time.
      *  - **fire**: inside the fade window, once the spare is buffered, run the
-     *    equal-power fade + role-swap via [CrossfadeEngine.performTransition].
+     *    equal-power fade + hand-off via [CrossfadeEngine.performTransition].
      */
     @OptIn(UnstableApi::class)
     private fun evaluateCrossfade(player: Player) {
@@ -548,31 +599,24 @@ class StashPlaybackService : MediaLibraryService() {
         if (remaining <= fade && engine.isPreparedFor(nextId) && engine.spareBufferedMs() >= fade) {
             val fadeMs = minOf(fade, remaining - HANDOFF_MARGIN_MS)
             if (fadeMs >= MIN_FADE_MS) {
-                crossfadePollJob?.cancel() // swap restarts the poll on the new master
-                engine.performTransition(fadeMs) { newMaster -> onCrossfadeSwap(newMaster) }
+                crossfadePollJob?.cancel() // restarted once the hand-off is done
+                engine.performTransition(fadeMs) { onCrossfadeDone() }
             }
         }
     }
 
     /**
-     * Promotes the incoming player to master after a crossfade: re-points the
-     * MediaSession, moves [playerListener], re-runs per-track wiring for the new
-     * current item, and restarts the polls. Invoked on the main thread by the
-     * engine at the end of the fade.
+     * The master plays alone again after a crossfade. The hand-off seek
+     * already ran the per-track wiring through [playerListener]; the polls
+     * were paused for the fade, so restart them.
      */
     @OptIn(UnstableApi::class)
-    private fun onCrossfadeSwap(newMaster: ExoPlayer) {
-        mediaSession?.player = newMaster
-        listenedPlayer?.removeListener(playerListener)
-        newMaster.addListener(playerListener)
-        listenedPlayer = newMaster
+    private fun onCrossfadeDone() {
         crossfadePreparedId = null
-        onTrackTransitionForLoudness(newMaster.currentMediaItem)
-        updateCustomLayout()
-        prefetchOrchestrator.resetSession()
-        if (newMaster.isPlaying) {
-            startPrefetchPoll(newMaster)
-            startCrossfadePoll(newMaster)
+        val master = crossfadeEngine?.masterPlayer ?: return
+        if (master.isPlaying) {
+            startPrefetchPoll(master)
+            startCrossfadePoll(master)
         }
     }
 
@@ -889,7 +933,43 @@ class StashPlaybackService : MediaLibraryService() {
         }
     }
 
+    /** One [StallWatch] tick on the master; recovers a frozen player. */
+    @OptIn(UnstableApi::class)
+    private fun checkStall() {
+        val engine = crossfadeEngine ?: return
+        if (engine.isTransitioning()) return
+        val player = engine.masterPlayer
+        val action = stallWatch.sample(
+            nowMs = android.os.SystemClock.elapsedRealtime(),
+            playWhenReady = player.playWhenReady,
+            ready = player.playbackState == Player.STATE_READY,
+            buffering = player.playbackState == Player.STATE_BUFFERING,
+            suppressed = player.playbackSuppressionReason != Player.PLAYBACK_SUPPRESSION_REASON_NONE,
+            positionMs = player.currentPosition,
+        )
+        if (action == StallWatch.Action.NONE) return
+        android.util.Log.w(
+            "StashPause",
+            "stall: $action state=${player.playbackState} pos=${player.currentPosition} " +
+                "song='${player.currentMediaItem?.mediaMetadata?.title}'",
+        )
+        when (action) {
+            StallWatch.Action.REPREPARE -> {
+                player.seekTo(player.currentMediaItemIndex, player.currentPosition)
+                player.prepare()
+                player.play()
+            }
+            StallWatch.Action.SKIP -> if (player.hasNextMediaItem()) {
+                player.seekToNextMediaItem()
+                player.prepare()
+                player.play()
+            }
+            StallWatch.Action.NONE -> Unit
+        }
+    }
+
     override fun onDestroy() {
+        stallWatchJob?.cancel()
         likeObserverJob?.cancel()
         prefetchPollJob?.cancel()
         crossfadePollJob?.cancel()
@@ -1513,6 +1593,25 @@ class StashPlaybackService : MediaLibraryService() {
                 .setAvailableSessionCommands(sessionCommands.build())
                 .setAvailablePlayerCommands(playerCommands)
                 .build()
+        }
+
+        @Deprecated("Media3 still routes every player command through here")
+        override fun onPlayerCommandRequest(
+            session: MediaSession,
+            controller: MediaSession.ControllerInfo,
+            playerCommand: Int,
+        ): Int {
+            // Which controller paused/stopped/skipped: the car, the app or the
+            // notification — the missing piece for "the music just stopped".
+            if (playerCommand in LOGGED_COMMANDS) {
+                android.util.Log.i(
+                    "StashPause",
+                    "command=$playerCommand from=${controller.packageName} playWhenReady=${session.player.playWhenReady}",
+                )
+            }
+            if (playerCommand == Player.COMMAND_PLAY_PAUSE || playerCommand == Player.COMMAND_STOP) stallWatch.reset()
+            @Suppress("DEPRECATION")
+            return super.onPlayerCommandRequest(session, controller, playerCommand)
         }
 
         override fun onPostConnect(session: MediaSession, controller: MediaSession.ControllerInfo) {

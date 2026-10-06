@@ -1028,8 +1028,19 @@ class PlayerRepositoryImpl @Inject constructor(
             }.onFailure { Log.w(TAG, "autoplay batch failed", it) }.getOrDefault(emptyList())
             // The user may have started something else while we were ranking.
             if (batch.isEmpty() || autoplaySession !== session) return
+            val firstNew = controller.mediaItemCount
+            val ended = controller.playbackState == Player.STATE_ENDED
             controller.addMediaItems(batch.map { it.toQueueMediaItem() })
             currentQueueTracks = currentQueueTracks + batch
+            if (ended) {
+                // The queue ran out before the batch was ready: a player in
+                // STATE_ENDED doesn't start appended songs by itself — they
+                // only showed in the queue. Continue with the first of them.
+                Log.i(TAG, "autoplay: queue had ended — continuing with the new batch")
+                controller.seekTo(firstNew, 0L)
+                controller.prepare()
+                controller.play()
+            }
         }
     }
 

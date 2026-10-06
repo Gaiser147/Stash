@@ -32,4 +32,11 @@ class CrossfadeFadeTest {
         assertFalse("remaining > duration", shouldArm(base.copy(remainingMs = 7000)))
         assertFalse("track too short", shouldArm(base.copy(trackDurationMs = 10_000)))
     }
+
+    @Test
+    fun `hand-off re-syncs only when master and spare drift apart audibly`() {
+        assertEquals(null, handoffDrift(spareMs = 6_300, masterMs = 6_280))
+        assertEquals(120L, handoffDrift(spareMs = 6_400, masterMs = 6_280))
+        assertEquals(-200L, handoffDrift(spareMs = 6_100, masterMs = 6_300))
+    }
 }

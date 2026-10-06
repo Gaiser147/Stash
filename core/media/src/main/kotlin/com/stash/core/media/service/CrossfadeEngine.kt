@@ -14,26 +14,30 @@ import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 
 /**
- * Two-player crossfade engine using the **role-swap** model (the only design
- * that yields a seamless overlap — see docs/superpowers/specs).
+ * Two-player crossfade with a **fixed master**.
  *
- * Two persistent [ExoPlayer]s are kept alive for the session. One is the
- * **master** ([masterPlayer], wired to the MediaSession); the other is the
- * spare. To crossfade onto the next track:
+ * The [masterPlayer] is the one and only player wired to the MediaSession,
+ * for its whole life. The spare only exists to make the overlap audible:
  *  1. [prepareNext] primes the spare with the next item (buffered, paused,
- *     volume 0) — called well ahead of the fade so readiness is never raced.
- *  2. [performTransition] starts the spare, runs an equal-power volume ramp
- *     (master down, spare up), and at the end **swaps roles**: the spare —
- *     which has been playing the incoming track the whole time — *becomes* the
- *     master via [onSwap] (the service calls `MediaSession.setPlayer`). The
- *     incoming player never stops, so there is no decoder hand-off on the
- *     audible signal and no glitch. The outgoing track's queue is transferred
- *     onto the new master first, so the timeline stays consistent.
+ *     volume 0) well ahead of the fade.
+ *  2. [performTransition] starts the spare and runs an equal-power ramp
+ *     (master down, spare up).
+ *  3. **Hand-off**: at the end of the ramp the master — silent now — seeks to
+ *     the next item at the spare's position, buffers while the spare keeps
+ *     playing, is re-synced to the spare within its buffer, takes over with a
+ *     short micro-fade, and the spare stops.
  *
- * Because the master identity changes, audio focus is managed **manually**
- * here (both players build with `handleAudioFocus = false`): a single focus
- * request covers whichever player is active, mirroring ExoPlayer's built-in
- * behaviour (pause on loss, duck on transient-duck, resume on gain).
+ * The earlier design swapped which player the session held
+ * (`MediaSession.setPlayer`) at the end of every fade. Every controller had
+ * to follow the swap — the app, the notification and Android Auto through
+ * the legacy session, whose queue ids are timeline indices that the queue
+ * transfer shifted. In the car that ended in a paused player right after
+ * each crossfade and in appended songs that showed but never played. With a
+ * fixed master, every controller always sees the same queue and the same
+ * player; the only thing they observe is an ordinary seek to the next song.
+ *
+ * Audio focus is managed here (both players build with
+ * `handleAudioFocus = false`) and follows the master only.
  *
  * Scope is auto-advance only: manual skips [cancelTransition] and hard-cut.
  */
@@ -45,15 +49,22 @@ class CrossfadeEngine(
 ) {
     private val audioManager = context.getSystemService(Context.AUDIO_SERVICE) as AudioManager
 
-    private lateinit var playerA: ExoPlayer
-    private lateinit var playerB: ExoPlayer
+    private lateinit var master: ExoPlayer
+    private lateinit var spare: ExoPlayer
 
-    /** The player currently wired to the MediaSession. */
-    val masterPlayer: ExoPlayer get() = playerA
+    /** The player wired to the MediaSession. Never changes. */
+    val masterPlayer: ExoPlayer get() = master
 
     private var transitionJob: Job? = null
     @Volatile private var transitioning = false
     fun isTransitioning(): Boolean = transitioning
+
+    /**
+     * True while the master seeks onto the next song itself; the service must
+     * not treat that seek as a user skip (which cancels the fade).
+     */
+    @Volatile private var handingOff = false
+    fun isHandingOff(): Boolean = handingOff
 
     /**
      * The item whose fade was last aborted because it didn't start; the
@@ -62,35 +73,48 @@ class CrossfadeEngine(
     @Volatile var abortedMediaId: String? = null
         private set
 
-    // ── Manual audio focus (shared across both players) ──────────────────────
+    // ── Volumes: fade level × duck level ─────────────────────────────────────
+    private var duck = 1f
+    private var masterLevel = 1f
+    private var spareLevel = 0f
+
+    private fun setLevels(masterLevel: Float, spareLevel: Float) {
+        this.masterLevel = masterLevel
+        this.spareLevel = spareLevel
+        master.volume = masterLevel * duck
+        spare.volume = spareLevel * duck
+    }
+
+    // ── Audio focus (follows the master) ─────────────────────────────────────
     private var focusRequest: AudioFocusRequest? = null
     private var pausedForFocusLoss = false
 
     private val focusListener = AudioManager.OnAudioFocusChangeListener { change ->
         // Every pause the user didn't ask for should be explainable from a log
         // ("the car just stopped"): LOSS = another app took over for good.
-        android.util.Log.i("StashFocus", "audio focus change=$change paused=$pausedForFocusLoss")
+        android.util.Log.i("StashFocus", "audio focus change=$change paused=$pausedForFocusLoss transitioning=$transitioning")
         when (change) {
             AudioManager.AUDIOFOCUS_LOSS -> {
+                cancelTransition()
                 pausedForFocusLoss = false
-                playerA.playWhenReady = false
-                playerB.playWhenReady = false
+                master.playWhenReady = false
                 abandonFocus()
             }
             AudioManager.AUDIOFOCUS_LOSS_TRANSIENT -> {
+                cancelTransition()
                 pausedForFocusLoss = true
-                playerA.playWhenReady = false
-                playerB.playWhenReady = false
+                master.playWhenReady = false
             }
             AudioManager.AUDIOFOCUS_LOSS_TRANSIENT_CAN_DUCK -> {
-                // Duck the audible master; the spare is silent unless mid-fade.
-                playerA.volume = DUCK_VOLUME
+                duck = DUCK_VOLUME
+                setLevels(masterLevel, spareLevel)
             }
             AudioManager.AUDIOFOCUS_GAIN -> {
-                if (!transitioning) playerA.volume = 1f
+                duck = 1f
+                setLevels(masterLevel, spareLevel)
                 if (pausedForFocusLoss) {
                     pausedForFocusLoss = false
-                    playerA.playWhenReady = true
+                    master.playWhenReady = true
                 }
             }
         }
@@ -104,13 +128,23 @@ class CrossfadeEngine(
     }
 
     fun initialize() {
-        playerA = buildPlayer()
-        playerB = buildPlayer()
-        playerA.addListener(masterFocusListener)
+        master = buildPlayer()
+        spare = buildPlayer()
+        master.addListener(masterFocusListener)
+        setLevels(1f, 0f)
     }
 
     private fun requestFocus() {
-        if (focusRequest != null) return
+        val existing = focusRequest
+        if (existing != null) {
+            // Play pressed while a transient loss is still pending: ask again
+            // instead of assuming we still hold focus.
+            if (pausedForFocusLoss) {
+                pausedForFocusLoss = false
+                audioManager.requestAudioFocus(existing)
+            }
+            return
+        }
         val attrs = android.media.AudioAttributes.Builder()
             .setUsage(android.media.AudioAttributes.USAGE_MEDIA)
             .setContentType(android.media.AudioAttributes.CONTENT_TYPE_MUSIC)
@@ -122,7 +156,8 @@ class CrossfadeEngine(
         if (audioManager.requestAudioFocus(req) == AudioManager.AUDIOFOCUS_REQUEST_GRANTED) {
             focusRequest = req
         } else {
-            playerA.playWhenReady = false
+            android.util.Log.w("StashFocus", "audio focus request denied — pausing")
+            master.playWhenReady = false
         }
     }
 
@@ -130,13 +165,14 @@ class CrossfadeEngine(
         focusRequest?.let { audioManager.abandonAudioFocusRequest(it); focusRequest = null }
     }
 
+    // ── Spare priming ────────────────────────────────────────────────────────
+
     /** Prime the spare on [item] (buffered, paused, silent) for an upcoming fade. */
     fun prepareNext(item: MediaItem) {
-        val spare = playerB
         spare.stop()
         spare.clearMediaItems()
         spare.playWhenReady = false
-        spare.volume = 0f
+        setLevels(masterLevel, 0f)
         spare.setMediaItem(item)
         spare.prepare()
         spare.seekTo(0)
@@ -144,11 +180,11 @@ class CrossfadeEngine(
 
     /** Whether the spare has buffered enough to start the fade. */
     fun isNextReady(): Boolean =
-        ::playerB.isInitialized && playerB.playbackState == Player.STATE_READY
+        ::spare.isInitialized && spare.playbackState == Player.STATE_READY
 
     /** Diagnostics: the spare's current playbackState and primed item. */
-    fun spareState(): Int = if (::playerB.isInitialized) playerB.playbackState else -1
-    fun spareId(): String? = if (::playerB.isInitialized) playerB.currentMediaItem?.mediaId else null
+    fun spareState(): Int = if (::spare.isInitialized) spare.playbackState else -1
+    fun spareId(): String? = if (::spare.isInitialized) spare.currentMediaItem?.mediaId else null
 
     /**
      * How much the spare has buffered from its start (it is primed at position
@@ -157,144 +193,154 @@ class CrossfadeEngine(
      * cold streams.
      */
     fun spareBufferedMs(): Long =
-        if (::playerB.isInitialized) playerB.bufferedPosition.coerceAtLeast(0) else 0
+        if (::spare.isInitialized) spare.bufferedPosition.coerceAtLeast(0) else 0
 
     /** True when the spare is primed with [mediaId] (so we don't re-prepare it). */
     fun isPreparedFor(mediaId: String?): Boolean =
-        mediaId != null && ::playerB.isInitialized &&
-            playerB.mediaItemCount > 0 && playerB.currentMediaItem?.mediaId == mediaId
+        mediaId != null && ::spare.isInitialized &&
+            spare.mediaItemCount > 0 && spare.currentMediaItem?.mediaId == mediaId
+
+    // ── The fade and the hand-off ────────────────────────────────────────────
 
     /**
-     * Runs the crossfade and the late role-swap. [fadeMs] is the ramp length;
-     * [onSwap] is invoked with the new master AFTER its queue is in place so the
-     * service can `setPlayer` + move its own listeners. No-ops if nothing primed.
+     * Runs the crossfade into the primed spare, then hands playback back to
+     * the master on the next item (see the class doc). [fadeMs] is the ramp
+     * length; [onDone] runs on the main thread once the master plays alone
+     * again. No-ops if nothing is primed.
      */
-    fun performTransition(fadeMs: Long, onSwap: (ExoPlayer) -> Unit) {
-        if (transitioning || !::playerB.isInitialized || playerB.mediaItemCount == 0) return
+    fun performTransition(fadeMs: Long, onDone: () -> Unit) {
+        if (transitioning || !::spare.isInitialized || spare.mediaItemCount == 0) return
+        val nextId = spare.currentMediaItem?.mediaId ?: return
         transitioning = true
-        // Prevent the outgoing master from auto-advancing to the next item on
-        // its own during the fade (we drive the transition manually).
-        playerA.pauseAtEndOfMediaItems = true
         transitionJob = scope.launch {
-            val outgoing = playerA
-            val incoming = playerB
-            incoming.volume = 0f
-            incoming.playWhenReady = true
-            incoming.play()
+            setLevels(1f, 0f)
+            spare.playWhenReady = true
+            spare.play()
             // Wait for the incoming to actually produce audio (bounded).
             var w = 0L
-            while (!incoming.isPlaying && w < START_TIMEOUT_MS) { delay(STEP_MS); w += STEP_MS }
-            if (!incoming.isPlaying) {
+            while (!spare.isPlaying && w < START_TIMEOUT_MS) { delay(STEP_MS); w += STEP_MS }
+            if (!spare.isPlaying) {
                 // The next song didn't start (stream not reachable, decoder
-                // error). Fading into it would leave a silent master and
-                // playback "just stops"; abort instead and let the current
-                // song end and advance normally (a hard cut).
+                // error). Fading into it would leave silence; abort and let
+                // the current song end and advance normally (a hard cut).
                 android.util.Log.w("Crossfade", "incoming did not start within ${START_TIMEOUT_MS}ms — aborting fade")
-                abortFade(outgoing, incoming)
+                abortedMediaId = nextId
+                finish()
                 return@launch
             }
 
             var elapsed = 0L
             while (elapsed < fadeMs) {
                 val (out, inc) = equalPowerVolumes(elapsed.toFloat() / fadeMs)
-                outgoing.volume = out
-                incoming.volume = inc
-                if (elapsed % 1000L < STEP_MS) {
-                    android.util.Log.i(
-                        "Crossfade",
-                        "ramp t=$elapsed set out=$out in=$inc | read A.vol=${outgoing.volume} B.vol=${incoming.volume} A.playing=${outgoing.isPlaying} B.playing=${incoming.isPlaying} A.state=${outgoing.playbackState} B.state=${incoming.playbackState}",
-                    )
-                }
-                if (outgoing.playbackState == Player.STATE_ENDED ||
-                    incoming.playbackState == Player.STATE_ENDED
-                ) break
+                setLevels(out, inc)
+                if (spare.playbackState == Player.STATE_ENDED) break
                 delay(STEP_MS)
                 elapsed += STEP_MS
             }
-            outgoing.volume = 0f
-            incoming.volume = 1f
+            setLevels(0f, 1f)
+            handOff(nextId)
+            finish()
+            onDone()
+        }
+    }
 
-            // Late swap: give the incoming the outgoing's queue, then promote it.
-            transferQueue(from = outgoing, to = incoming)
-            outgoing.removeListener(masterFocusListener)
-            incoming.addListener(masterFocusListener)
-            incoming.pauseAtEndOfMediaItems = false
-            playerA = incoming
-            playerB = outgoing
-            onSwap(playerA)
-
-            // Reset the old master to a clean spare.
-            outgoing.pauseAtEndOfMediaItems = false
-            outgoing.playWhenReady = false
-            outgoing.stop()
-            outgoing.clearMediaItems()
-            outgoing.volume = 1f
-            transitioning = false
+    /** Moves playback of [nextId] from the spare back onto the (silent) master. */
+    private suspend fun handOff(nextId: String) {
+        val index = handoffIndex(nextId)
+        if (index == null) {
+            // The queue changed under the fade; the master advances on its own.
+            android.util.Log.w("Crossfade", "hand-off: $nextId no longer in the queue — master continues")
+            return
+        }
+        handingOff = true
+        try {
+            master.seekTo(index, spare.currentPosition + HANDOFF_LEAD_MS)
+            master.playWhenReady = true
+            // The spare keeps playing (audible) while the master buffers.
+            if (!waitForMaster(index, HANDOFF_TIMEOUT_MS)) {
+                android.util.Log.w("Crossfade", "hand-off: master not playing after ${HANDOFF_TIMEOUT_MS}ms — hard switch")
+                return
+            }
+            // Re-sync inside the master's buffer so the switch is inaudible.
+            val drift = handoffDrift(spareMs = spare.currentPosition, masterMs = master.currentPosition)
+            if (drift != null && spare.playbackState != Player.STATE_ENDED) {
+                master.seekTo(index, spare.currentPosition + RESYNC_LEAD_MS)
+                waitForMaster(index, RESYNC_TIMEOUT_MS)
+            }
+            // Micro-fade spare → master.
+            var t = 0L
+            while (t < MICRO_FADE_MS) {
+                val (out, inc) = equalPowerVolumes(t.toFloat() / MICRO_FADE_MS)
+                setLevels(inc, out)
+                delay(STEP_MS / 2)
+                t += STEP_MS / 2
+            }
+        } finally {
+            handingOff = false
         }
     }
 
     /**
-     * Copies [from]'s queue around [to]'s current item so the promoted player
-     * has the full timeline (history + future) with the same current index and
-     * the position it has been playing. Matches by mediaId so it is shuffle- and
-     * repeat-order safe.
+     * Where [nextId] sits on the master: the up-next slot, or the current one
+     * when the master already reached the end and advanced on its own.
      */
-    private fun transferQueue(from: ExoPlayer, to: ExoPlayer) {
-        val currentId = to.currentMediaItem?.mediaId ?: return
-        val count = from.mediaItemCount
-        val idx = (0 until count).firstOrNull { from.getMediaItemAt(it).mediaId == currentId } ?: return
-        val history = (0 until idx).map { from.getMediaItemAt(it) }
-        val future = ((idx + 1) until count).map { from.getMediaItemAt(it) }
-        to.repeatMode = from.repeatMode
-        to.shuffleModeEnabled = from.shuffleModeEnabled
-        to.playbackParameters = from.playbackParameters
-        if (history.isNotEmpty()) to.addMediaItems(0, history) // shifts `to`'s current index up
-        if (future.isNotEmpty()) to.addMediaItems(future)
+    private fun handoffIndex(nextId: String): Int? {
+        val next = master.nextMediaItemIndex
+        if (next != androidx.media3.common.C.INDEX_UNSET && master.getMediaItemAt(next).mediaId == nextId) return next
+        if (master.currentMediaItem?.mediaId == nextId) return master.currentMediaItemIndex
+        return null
     }
 
-    /** In-job abort (cancelTransition would cancel this very coroutine). */
-    private fun abortFade(outgoing: ExoPlayer, incoming: ExoPlayer) {
-        abortedMediaId = incoming.currentMediaItem?.mediaId
-        outgoing.volume = 1f
-        outgoing.pauseAtEndOfMediaItems = false
-        incoming.playWhenReady = false
-        incoming.stop()
-        incoming.clearMediaItems()
-        incoming.volume = 1f
-        transitionJob = null
+    private suspend fun waitForMaster(index: Int, timeoutMs: Long): Boolean {
+        var w = 0L
+        while (w < timeoutMs) {
+            if (master.isPlaying && master.currentMediaItemIndex == index) return true
+            if (spare.playbackState == Player.STATE_ENDED) return master.currentMediaItemIndex == index
+            delay(STEP_MS / 2)
+            w += STEP_MS / 2
+        }
+        return false
+    }
+
+    /** Master alone and audible again; the spare reset to a clean silent state. */
+    private fun finish() {
+        setLevels(1f, 0f)
+        spare.playWhenReady = false
+        spare.stop()
+        spare.clearMediaItems()
+        handingOff = false
         transitioning = false
+        transitionJob = null
     }
 
     /** Abort a pending/in-flight fade and restore the master; spare is reset. */
     fun cancelTransition() {
         transitionJob?.cancel()
         transitionJob = null
-        if (::playerA.isInitialized) {
-            playerA.volume = 1f
-            playerA.pauseAtEndOfMediaItems = false
-        }
-        if (::playerB.isInitialized) {
-            playerB.playWhenReady = false
-            playerB.stop()
-            playerB.clearMediaItems()
-            playerB.volume = 1f
-        }
-        transitioning = false
+        if (::master.isInitialized && ::spare.isInitialized) finish()
     }
 
     fun release() {
         transitionJob?.cancel()
         abandonFocus()
-        if (::playerA.isInitialized) {
-            playerA.removeListener(masterFocusListener)
-            playerA.release()
+        if (::master.isInitialized) {
+            master.removeListener(masterFocusListener)
+            master.release()
         }
-        if (::playerB.isInitialized) playerB.release()
+        if (::spare.isInitialized) spare.release()
     }
 
     private companion object {
         const val STEP_MS = 50L
         const val START_TIMEOUT_MS = 1000L
         const val DUCK_VOLUME = 0.2f
+        const val MICRO_FADE_MS = 120L
+
+        /** The master seeks slightly ahead of the spare: it has to buffer first. */
+        const val HANDOFF_LEAD_MS = 300L
+        /** Give a stream this long to start on the master; the spare covers it. */
+        const val HANDOFF_TIMEOUT_MS = 15_000L
+        const val RESYNC_LEAD_MS = 20L
+        const val RESYNC_TIMEOUT_MS = 2_000L
     }
 }
