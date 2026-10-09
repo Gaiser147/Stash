@@ -1,0 +1,30 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="notification_action_like">Zu Lieblingssongs hinzufügen</string>
+    <string name="notification_action_unlike">Aus Lieblingssongs entfernen</string>
+    <string name="notification_action_repeat_off">Wiederholen aus</string>
+    <string name="notification_action_repeat_all">Alle wiederholen</string>
+    <string name="notification_action_repeat_one">Song wiederholen</string>
+    <string name="notification_action_shuffle_on">Zufall an</string>
+    <string name="notification_action_shuffle_off">Zufall aus</string>
+    <string name="shuffle_play">Zufallswiedergabe</string>
+    <string name="resuming_channel_name">Wiedergabe</string>
+    <string name="resuming_notification_title">Wird fortgesetzt…</string>
+    <!-- Android Auto -->
+    <string name="auto_tab_for_you">Für dich</string>
+    <string name="auto_tab_playlists">Playlists</string>
+    <string name="auto_tab_new">Neu</string>
+    <string name="auto_mix_for_you">Mix für mich</string>
+    <string name="auto_mix_for_you_subtitle">Frisch gemischt aus deinem Hörverhalten</string>
+    <string name="auto_continue">Weiterhören</string>
+    <string name="auto_group_start">Start</string>
+    <string name="auto_group_mixes">Mixe</string>
+    <string name="auto_group_library">Deine Bibliothek</string>
+    <plurals name="auto_song_count">
+        <item quantity="one">%d Song</item>
+        <item quantity="other">%d Songs</item>
+    </plurals>
+    <string name="auto_more_like_this">Mehr wie dieser</string>
+    <string name="auto_streaming_unavailable">Streaming nicht erreichbar – nur heruntergeladene Songs</string>
+    <string name="auto_nothing_playable">Gerade nichts abspielbar – Songs herunterladen oder Streaming erlauben</string>
+</resources>

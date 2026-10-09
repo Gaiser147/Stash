@@ -136,6 +136,9 @@ class PlayerRepositoryImpl @Inject constructor(
 
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main)
 
+    /** Same "may stream now" rule the Android Auto browse tree uses. */
+    private val streamingGate = com.stash.core.media.streaming.StreamingGate(streamingPreference, connectivity)
+
     /**
      * Last-known queue/timeline sizes, mirrored out of [updateState] for
      * [CrashDiagnostics]. Plain volatiles (not controller reads) because the
@@ -205,12 +208,18 @@ class PlayerRepositoryImpl @Inject constructor(
         // append songs chosen by the AutoplayEngine. Launched (not awaited)
         // so candidate generation never stalls state collection; the job
         // handle keeps it single-flight.
+        // A queue that reached the player some other way (resumed by the car
+        // or a media button, started by another controller) has no session
+        // yet: arm one from that queue first, so it doesn't just end.
         scope.launch {
             playerState.collect { state ->
-                if (autoplaySession == null || radioActive || libraryShuffleActive) return@collect
+                if (radioActive || libraryShuffleActive) return@collect
                 if (state.currentTrack == null || state.repeatMode != RepeatMode.OFF) return@collect
                 if (nearTailInPlayOrder(state, AUTOPLAY_GROW_THRESHOLD) && autoplayGrowJob?.isActive != true) {
-                    autoplayGrowJob = scope.launch { growAutoplay() }
+                    autoplayGrowJob = scope.launch {
+                        if (autoplaySession == null && !armFromPlayerQueue()) return@launch
+                        growAutoplay()
+                    }
                 }
             }
         }
@@ -907,12 +916,95 @@ class PlayerRepositoryImpl @Inject constructor(
         }
     }
 
+    /**
+     * Arms autoplay for whatever is on the player right now, without touching
+     * it: the in-app queue when it matches, else the player's own items.
+     * Returns false when autoplay is off or there is nothing to start from.
+     */
+    internal suspend fun armFromPlayerQueue(): Boolean {
+        val engine = autoplayEngine ?: return false
+        if (!engine.isEnabled()) return false
+        val controller = controllerDeferred ?: return false
+        val generation = autoplayGeneration
+        val currentId = _playerState.value.currentTrack?.id
+        val queue = if (currentId != null && currentQueueTracks.any { it.id == currentId }) {
+            currentQueueTracks
+        } else {
+            (0 until controller.mediaItemCount).map { controller.getMediaItemAt(it).toTrack() }
+                .filter { it.id > 0L }
+                .also { currentQueueTracks = it }
+        }
+        if (queue.isEmpty()) return false
+        val session = runCatching { engine.start(queue) }
+            .onFailure { Log.w(TAG, "autoplay late arm failed", it) }
+            .getOrNull() ?: return false
+        if (generation != autoplayGeneration || radioActive || libraryShuffleActive) return false
+        autoplaySession = session
+        Log.i(TAG, "autoplay: armed late for a queue started outside the app (${queue.size} songs)")
+        return true
+    }
+
     /** Ends any autoplay session and invalidates in-flight arms. Returns the new generation. */
     private fun disarmAutoplay(): Int {
         autoplaySession = null
         // Any other queue, station or shuffle replaces a generated mix.
         if (!startingPersonalMix) _personalMixActive.value = false
         return ++autoplayGeneration
+    }
+
+    override suspend fun queueItemsFor(tracks: List<Track>): List<MediaItem> =
+        withContext(Dispatchers.IO) { tracks.map { it.toQueueMediaItem() } }
+
+    override suspend fun moreLikeThis(): Boolean {
+        val engine = autoplayEngine ?: return false
+        val controller = ensureController() ?: return false
+        val current = _playerState.value.currentTrack ?: return false
+        val canStream = canStreamNow()
+        val generation = disarmAutoplay()
+        libraryShuffleActive = false
+        librarySnapshot = emptyList()
+        radioActive = false
+        radioSession = null
+        _radioSeedLabel.value = null
+        val (session, batch) = runCatching {
+            withContext(Dispatchers.Default) {
+                val session = engine.start(listOf(current))
+                session to engine.nextBatch(session, includeStreamable = canStream, allowDiscovery = canStream, size = MORE_LIKE_THIS_SIZE)
+            }
+        }.onFailure { Log.w(TAG, "more like this failed", it) }.getOrNull() ?: return false
+        if (batch.isEmpty() || generation != autoplayGeneration) return false
+        val items = queueItemsFor(batch)
+        // Linear order from here on, so "next" really is the next pick.
+        controller.shuffleModeEnabled = false
+        val index = controller.currentMediaItemIndex
+        val count = controller.mediaItemCount
+        if (index + 1 < count) controller.removeMediaItems(index + 1, count)
+        controller.addMediaItems(items)
+        currentQueueTracks = currentQueueTracks.take(index + 1) + batch
+        autoplaySession = session
+        Log.i(TAG, "more like this '${current.title}': ${batch.size} songs")
+        return true
+    }
+
+    override fun adoptExternalQueue(tracks: List<Track>, personalMix: Boolean) {
+        scope.launch {
+            // Same state reset as setQueueInternal, minus touching the player:
+            // the queue is already on it.
+            libraryShuffleActive = false
+            librarySnapshot = emptyList()
+            radioActive = false
+            radioSession = null
+            _radioSeedLabel.value = null
+            currentQueueTracks = tracks
+            startingPersonalMix = personalMix
+            try {
+                armAutoplay(tracks)
+            } finally {
+                startingPersonalMix = false
+            }
+            _personalMixActive.value = personalMix && tracks.isNotEmpty()
+            Log.i(TAG, "adopted external queue: ${tracks.size} tracks, mix=$personalMix")
+        }
     }
 
     override suspend fun startPersonalMix(): Boolean {
@@ -940,9 +1032,7 @@ class PlayerRepositoryImpl @Inject constructor(
     }
 
     /** Streaming allowed right now: online mode, connected, and cellular permitted if on cellular. */
-    private suspend fun canStreamNow(): Boolean =
-        streamingPreference.current() && connectivity.isConnected() &&
-            (!connectivity.isCellular() || streamingPreference.streamOnCellular.first())
+    private suspend fun canStreamNow(): Boolean = streamingGate.canStreamNow()
 
     /**
      * Append the next autoplay batch. Single-flight via [autoplayGrowMutex];
@@ -953,9 +1043,9 @@ class PlayerRepositoryImpl @Inject constructor(
     internal suspend fun growAutoplay() {
         autoplayGrowMutex.withLock {
             val engine = autoplayEngine ?: return
-            val session = autoplaySession ?: return
+            val session = autoplaySession ?: return Unit.also { Log.i(TAG, "autoplay: no session for this queue") }
             if (radioActive || libraryShuffleActive) return
-            if (!engine.isEnabled()) return
+            if (!engine.isEnabled()) return Unit.also { Log.i(TAG, "autoplay: switched off") }
             val controller = controllerDeferred ?: return
             val state = _playerState.value
             if (!nearTailInPlayOrder(state, AUTOPLAY_GROW_THRESHOLD)) return
@@ -971,9 +1061,24 @@ class PlayerRepositoryImpl @Inject constructor(
                 }
             }.onFailure { Log.w(TAG, "autoplay batch failed", it) }.getOrDefault(emptyList())
             // The user may have started something else while we were ranking.
-            if (batch.isEmpty() || autoplaySession !== session) return
+            if (batch.isEmpty() || autoplaySession !== session) {
+                Log.i(TAG, "autoplay: nothing appended (batch=${batch.size}, sessionChanged=${autoplaySession !== session})")
+                return
+            }
+            Log.i(TAG, "autoplay: appending ${batch.size} songs")
+            val firstNew = controller.mediaItemCount
+            val ended = controller.playbackState == Player.STATE_ENDED
             controller.addMediaItems(batch.map { it.toQueueMediaItem() })
             currentQueueTracks = currentQueueTracks + batch
+            if (ended) {
+                // The queue ran out before the batch was ready: a player in
+                // STATE_ENDED doesn't start appended songs by itself — they
+                // only showed in the queue. Continue with the first of them.
+                Log.i(TAG, "autoplay: queue had ended — continuing with the new batch")
+                controller.seekTo(firstNew, 0L)
+                controller.prepare()
+                controller.play()
+            }
         }
     }
 
@@ -1939,6 +2044,9 @@ class PlayerRepositoryImpl @Inject constructor(
 
         /** Autoplay appends once fewer than this many songs are left after the current one. */
         private const val AUTOPLAY_GROW_THRESHOLD = 2
+
+        /** Songs queued by "More like this"; autoplay continues after them. */
+        private const val MORE_LIKE_THIS_SIZE = 15
 
         /** How many tracks each grow appends. Big enough to outpace a fast-skipping user. */
         private const val LIBRARY_SHUFFLE_GROW_BATCH = 50

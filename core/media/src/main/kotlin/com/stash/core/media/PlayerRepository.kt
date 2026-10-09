@@ -191,6 +191,31 @@ interface PlayerRepository {
      */
     suspend fun startPersonalMix(): Boolean
 
+    /**
+     * A queue someone else installed on the player — Android Auto browsing,
+     * voice search — becomes this repository's queue: radio/library shuffle
+     * end and autoplay is armed for it, exactly as if [setQueue] had been
+     * called in the app. Call AFTER the queue reached the player.
+     *
+     * @param personalMix the queue is a generated "Mix für mich".
+     */
+    fun adoptExternalQueue(tracks: List<Track>, personalMix: Boolean = false)
+
+    /**
+     * The player items for [tracks], built exactly as [setQueue] builds them
+     * (local file when present, else a just-in-time stream placeholder), for
+     * callers that hand a queue to the player themselves (Android Auto).
+     */
+    suspend fun queueItemsFor(tracks: List<Track>): List<MediaItem>
+
+    /**
+     * "More like this": replaces everything after the current song with songs
+     * that follow it well (autoplay seeded by the current song alone) and
+     * keeps autoplay going from there. The current song keeps playing.
+     * Returns false when there's no current song or nothing to add.
+     */
+    suspend fun moreLikeThis(): Boolean
+
     /** True while the current queue is a generated "Mix für mich". */
     val personalMixActive: StateFlow<Boolean>
 

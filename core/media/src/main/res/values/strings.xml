@@ -10,4 +10,21 @@
     <string name="shuffle_play">Shuffle Play</string>
     <string name="resuming_channel_name">Playback</string>
     <string name="resuming_notification_title">Resuming…</string>
+    <!-- Android Auto -->
+    <string name="auto_tab_for_you">For you</string>
+    <string name="auto_tab_playlists">Playlists</string>
+    <string name="auto_tab_new">New</string>
+    <string name="auto_mix_for_you">Mix for you</string>
+    <string name="auto_mix_for_you_subtitle">Freshly mixed from your listening</string>
+    <string name="auto_continue">Continue listening</string>
+    <string name="auto_group_start">Start</string>
+    <string name="auto_group_mixes">Mixes</string>
+    <string name="auto_group_library">Your library</string>
+    <plurals name="auto_song_count">
+        <item quantity="one">%d song</item>
+        <item quantity="other">%d songs</item>
+    </plurals>
+    <string name="auto_more_like_this">More like this</string>
+    <string name="auto_streaming_unavailable">Streaming unavailable – playing downloaded songs only</string>
+    <string name="auto_nothing_playable">Nothing playable right now – download songs or allow streaming</string>
 </resources>

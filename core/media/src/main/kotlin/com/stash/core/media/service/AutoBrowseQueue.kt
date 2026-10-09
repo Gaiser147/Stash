@@ -52,14 +52,14 @@ object AutoBrowseQueue {
     }
 
     /**
-     * Filters [tracks] down to what the browse list actually showed
-     * (downloaded or streamable — keep this in lockstep with
-     * `onGetChildren`) and locates the tapped track in the filtered list.
-     * Falls back to index 0 if the tapped track vanished between browse
-     * and tap (deleted / re-synced).
+     * Filters [tracks] down to what the browse list actually showed — the
+     * same [isPlayableInAuto] predicate as `onGetChildren`, so the tapped
+     * row lands on the same index — and locates the tapped track in the
+     * filtered list. Falls back to index 0 if the tapped track vanished
+     * between browse and tap (deleted / re-synced).
      */
-    fun queuePlan(tracks: List<TrackEntity>, tappedTrackId: Long): QueuePlan {
-        val playable = tracks.filter { it.isDownloaded || it.isStreamable }
+    fun queuePlan(tracks: List<TrackEntity>, tappedTrackId: Long, canStream: Boolean): QueuePlan {
+        val playable = tracks.filter { it.isPlayableInAuto(canStream) }
         val startIndex = playable.indexOfFirst { it.id == tappedTrackId }
             .coerceAtLeast(0)
         return QueuePlan(playable, startIndex)

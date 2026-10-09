@@ -31,6 +31,8 @@ import com.stash.data.download.model.DownloadProgress
 import com.stash.data.download.model.DownloadStatus
 import com.stash.data.download.prefs.QualityPreferencesManager
 import com.stash.data.download.prefs.toYtDlpArgs
+import kotlinx.coroutines.async
+import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.SharedFlow
 import kotlinx.coroutines.flow.asSharedFlow
@@ -128,10 +130,51 @@ class DownloadManager @Inject constructor(
     private val audioDurationExtractor: AudioDurationExtractor,
     private val losslessHealthGate: LosslessSourceHealthGate,
     private val navidromeExportScheduler: NavidromeExportScheduler,
+    /** The user's own Navidrome, tried before any other source. */
+    private val ownServer: com.stash.data.download.navidrome.NavidromeSource? = null,
+    /** Per-song phase timings for the diagnostics bundle. */
+    private val timings: DownloadTimings = DownloadTimings(),
 ) {
-    /** Limits concurrent downloads. 8 parallel slots — with native opus (no FFmpeg
-     *  transcode) downloads are almost entirely network-bound so more parallelism helps. */
-    private val concurrencySemaphore = Semaphore(8)
+    /**
+     * Songs being worked on at once, including those only waiting — for a
+     * lossless source's rate-limit token or a search. Waiting is cheap, so
+     * this is wider than [workSemaphore].
+     */
+    private val concurrencySemaphore = Semaphore(MAX_IN_FLIGHT)
+
+    /**
+     * The heavy work — a file fetch, a yt-dlp run, tagging and moving the
+     * file. 8 parallel slots: with native opus (no FFmpeg transcode)
+     * downloads are almost entirely network-bound. A song waiting on a rate
+     * limiter used to hold one of these for its whole wait; now it doesn't.
+     */
+    private val workSemaphore = Semaphore(MAX_WORKING)
+
+    /** Phase stopwatch for one song; see [DownloadTimings]. */
+    internal class Timing {
+        val startedAt = now()
+        var waitSlotMs = 0L
+        var ownServerMs = 0L
+        var losslessResolveMs = 0L
+        var fetchMs = 0L
+        var youtubeResolveMs = 0L
+        var ytDlpMs = 0L
+        var finalizeMs = 0L
+        var source: String? = null
+        fun now() = System.currentTimeMillis()
+    }
+
+    /** Runs [block] holding one of the [MAX_WORKING] work slots; the wait counts as slot wait. */
+    private suspend fun <T> withWorkSlot(timing: Timing?, block: suspend () -> T): T {
+        val waitStart = System.currentTimeMillis()
+        workSemaphore.acquire()
+        timing?.let { it.waitSlotMs += System.currentTimeMillis() - waitStart }
+        try {
+            return block()
+        } finally {
+            workSemaphore.release()
+        }
+    }
 
     private val _progress = MutableSharedFlow<DownloadProgress>(replay = 1)
 
@@ -148,6 +191,12 @@ class DownloadManager @Inject constructor(
          * (kennyy, squid, + headroom) so it can't spin.
          */
         internal const val MAX_LOSSLESS_FAILOVER_ATTEMPTS = 3
+
+        /** Songs in flight at once (most of them waiting on searches or tokens). */
+        internal const val MAX_IN_FLIGHT = 16
+
+        /** Songs doing heavy work at once (fetch, yt-dlp, tag, store). */
+        internal const val MAX_WORKING = 8
     }
 
     /**
@@ -161,11 +210,16 @@ class DownloadManager @Inject constructor(
         track: Track,
         preResolvedUrl: String? = null,
     ): TrackDownloadResult {
+        val timing = Timing()
         concurrencySemaphore.acquire()
+        timing.waitSlotMs = timing.now() - timing.startedAt
+        var result: TrackDownloadResult? = null
         try {
-            return executeDownload(track, preResolvedUrl)
+            result = executeDownload(track, preResolvedUrl, timing)
+            return result
         } finally {
             concurrencySemaphore.release()
+            recordTiming(track, timing, result)
         }
     }
 
@@ -178,7 +232,36 @@ class DownloadManager @Inject constructor(
     /**
      * Executes the download pipeline for a single track.
      */
-    private suspend fun executeDownload(track: Track, preResolvedUrl: String?): TrackDownloadResult {
+    private fun recordTiming(track: Track, timing: Timing, result: TrackDownloadResult?) {
+        val outcome = when (result) {
+            is TrackDownloadResult.Success -> "ok"
+            is TrackDownloadResult.Unmatched -> "unmatched"
+            is TrackDownloadResult.Deferred -> "deferred"
+            null -> "cancelled"
+            else -> "failed"
+        }
+        val entry = DownloadTimings.Entry(
+            atMs = timing.now(),
+            outcome = outcome,
+            source = timing.source,
+            waitSlotMs = timing.waitSlotMs,
+            ownServerMs = timing.ownServerMs,
+            losslessResolveMs = timing.losslessResolveMs,
+            fetchMs = timing.fetchMs,
+            youtubeResolveMs = timing.youtubeResolveMs,
+            ytDlpMs = timing.ytDlpMs,
+            finalizeMs = timing.finalizeMs,
+            totalMs = timing.now() - timing.startedAt,
+        )
+        timings.record(entry)
+        Log.i(TAG, entry.logLine("${track.artist} - ${track.title}"))
+    }
+
+    private suspend fun executeDownload(
+        track: Track,
+        preResolvedUrl: String?,
+        timing: Timing? = null,
+    ): TrackDownloadResult = coroutineScope {
         emitProgress(track.id, 0f, DownloadStatus.MATCHING)
 
         // Step -1: the song may already be on the phone at the exact path this
@@ -192,69 +275,98 @@ class DownloadManager @Inject constructor(
             }.getOrNull()?.takeIf(String::isNotBlank)
             if (existing != null) {
                 Log.i(TAG, "Reusing file already on the device: ${track.artist} - ${track.title} → $existing")
+                timing?.source = "device"
                 lyricsFetchTrigger.enqueueFor(track.id)
                 enqueueNavidromeExport(track, existing)
                 emitProgress(track.id, 1f, DownloadStatus.COMPLETED)
-                return TrackDownloadResult.Success(existing)
+                return@coroutineScope TrackDownloadResult.Success(existing)
             }
         }
 
-        // Step 0: Lossless source attempt. Attempted whenever lossless
-        // is enabled (or the track belongs to a Stash Mix), regardless
-        // of whether the caller supplied a preResolvedUrl. Stash Mix
-        // tracks are a small curated surface where lossless is worth
-        // eating bandwidth even when the user hasn't opted in globally.
-        //
-        // Historical note: this block used to be wrapped in
-        // `if (preResolvedUrl == null)`, which meant YT-Music synced
-        // tracks (which always arrive with their video URL preset by
-        // DiffWorker) silently bypassed lossless and downloaded as
-        // 128kbps m4a. Spotify tracks happened to work because Spotify
-        // doesn't expose YouTube ids, so their preResolvedUrl was null.
-        // Lifting the guard means "Find in Lossless" semantics now
-        // apply to the initial sync path too — see 2026-05-12.
-        //
-        // On success we short-circuit the YouTube pipeline. On null /
-        // failure we fall through to the YouTube path (or defer when
-        // fallback is off, per v0.9.17 strict-FLAC).
         val forceLossless = isStashMixTrack(track.id)
-        if (forceLossless || losslessPrefs.enabledNow()) {
-            val losslessResult = tryLosslessDownload(track, forced = forceLossless)
-            if (losslessResult != null) return losslessResult
+        val wantLossless = forceLossless || losslessPrefs.enabledNow()
+
+        // Step -0.5: the user's own Navidrome. A song the Pi already has comes
+        // straight from there: no community-service search, no rate-limit
+        // wait, no yt-dlp. First downloads only (a re-download asks for a
+        // different file), and never a lossy copy when lossless is wanted.
+        if (!track.isDownloaded && track.filePath.isNullOrBlank()) {
+            tryOwnServerDownload(track, timing, losslessOnly = wantLossless)?.let { return@coroutineScope it }
+        }
+
+        // Step 0: Lossless source attempt, whenever lossless is enabled (or
+        // the track belongs to a Stash Mix), regardless of a preResolvedUrl —
+        // YT-Music synced tracks arrive with their video URL preset and used
+        // to bypass lossless entirely (see 2026-05-12). On null we fall
+        // through to YouTube, or defer when fallback is off (strict-FLAC).
+        val youtubeAllowed = !wantLossless || forceLossless || losslessPrefs.youtubeFallbackEnabledNow()
+
+        // Look the song up on YouTube while lossless waits on its
+        // rate-limited sources, so a lossless miss can start yt-dlp at once.
+        // Only the InnerTube search runs early (no yt-dlp process — that
+        // fallback search waits for a real miss); a lossless hit discards it.
+        val earlyYoutube = if (wantLossless && youtubeAllowed && preResolvedUrl == null && track.youtubeId == null) {
+            async {
+                val t0 = System.currentTimeMillis()
+                resolveUrl(track, allowYtDlpSearch = false).also {
+                    timing?.youtubeResolveMs = System.currentTimeMillis() - t0
+                }
+            }
+        } else {
+            null
+        }
+
+        if (wantLossless) {
+            val losslessResult = tryLosslessDownload(track, forced = forceLossless, timing = timing)
+            if (losslessResult != null) {
+                earlyYoutube?.cancel()
+                return@coroutineScope losslessResult
+            }
             // strict-FLAC: lossless returned null AND yt-dlp fallback is off,
             // so defer instead of pulling a lossy opus/m4a from the YouTube
-            // path. Applies to EVERY track — including genuinely YouTube-
-            // sourced ones — so "fallback off" means no YouTube downloads at
-            // all, matching SearchDownloadCoordinator's unconditional gate.
-            // (Earlier a track.source==YOUTUBE carve-out let YT-native tracks
-            // fall through to yt-dlp here; that leaked opus/m4a downloads with
-            // fallback off, so it's removed.) The lone exemption is Stash-Mix
-            // tracks (forceLossless=true): the small curated rotating playlist
-            // would silently empty if its tracks got stuck in deferral.
-            if (!forceLossless && !losslessPrefs.youtubeFallbackEnabledNow()) {
+            // path. Applies to EVERY track; the lone exemption is Stash-Mix
+            // tracks (forceLossless=true), whose small rotating playlist would
+            // silently empty if its tracks got stuck in deferral.
+            if (!youtubeAllowed) {
                 Log.i(
                     TAG,
                     "deferring '${track.artist} - ${track.title}': lossless unavailable, fallback off",
                 )
-                return TrackDownloadResult.Deferred
+                return@coroutineScope TrackDownloadResult.Deferred
             }
         }
 
         // Step 1: Resolve YouTube URL
-        val resolveResult = if (preResolvedUrl != null) ResolveResult(url = preResolvedUrl) else resolveUrl(track)
+        val resolveStart = System.currentTimeMillis()
+        var fallbackSearchMs = 0L
+        val resolveResult = when {
+            preResolvedUrl != null -> ResolveResult(url = preResolvedUrl)
+            earlyYoutube != null -> earlyYoutube.await().let { early ->
+                if (early.url != null) {
+                    early
+                } else {
+                    val t0 = System.currentTimeMillis()
+                    resolveViaYtDlpSearch(track, early.rejectedVideoId).also { fallbackSearchMs = System.currentTimeMillis() - t0 }
+                }
+            }
+            else -> resolveUrl(track)
+        }
+        // Early lookup: its own duration was recorded; count only what came
+        // after it (the yt-dlp search fallback).
+        timing?.let {
+            if (earlyYoutube == null) it.youtubeResolveMs = System.currentTimeMillis() - resolveStart
+            else it.youtubeResolveMs += fallbackSearchMs
+        }
         if (resolveResult.url == null) {
             emitProgress(track.id, 0f, DownloadStatus.UNMATCHED)
-            return TrackDownloadResult.Unmatched(rejectedVideoId = resolveResult.rejectedVideoId)
+            return@coroutineScope TrackDownloadResult.Unmatched(rejectedVideoId = resolveResult.rejectedVideoId)
         }
         val youtubeUrl = resolveResult.url
 
-        // If resolveUrl routed through YtLibraryCanonicalizer, the DB
-        // now has the ATV's refreshed title/album/album_art/duration —
-        // but the `track` object passed in here is still the stale
-        // in-memory copy from TrackDownloadWorker. Re-fetch so
-        // commitDownload's filename derivation uses the new title.
-        // Fallback to the original in-memory track if the row was
-        // deleted mid-flight (rare; better to still download than bail).
+        // If resolveUrl routed through YtLibraryCanonicalizer, the DB now has
+        // the ATV's refreshed title/album/album_art/duration, but `track` is
+        // still the stale in-memory copy. Re-fetch so commitDownload's
+        // filename derivation uses the new title (fallback: the original).
         val effectiveTrack = trackDao.getById(track.id)?.toDomain() ?: track
         if (effectiveTrack.title != track.title) {
             Log.i(
@@ -264,95 +376,152 @@ class DownloadManager @Inject constructor(
             )
         }
 
-        emitProgress(track.id, 0.1f, DownloadStatus.DOWNLOADING)
-
         // Step 2: Get quality args from user preferences
         val qualityTier = qualityPrefs.qualityTier.first()
         val qualityArgs = qualityTier.toYtDlpArgs()
 
-        // Step 3: Download via yt-dlp
-        val tempDir = fileOrganizer.getTempDir()
-        val tempFilename = "dl_${track.id}"
+        withWorkSlot(timing) {
+            emitProgress(track.id, 0.1f, DownloadStatus.DOWNLOADING)
+            timing?.source = "youtube"
 
-        val dlResult = downloadExecutor.download(
-            url = youtubeUrl,
-            outputDir = tempDir,
-            filename = tempFilename,
-            qualityArgs = qualityArgs,
-            onProgress = { progress ->
-                emitProgress(track.id, 0.1f + progress * 0.7f, DownloadStatus.DOWNLOADING)
-            },
-        )
+            // Step 3: Download via yt-dlp
+            val tempDir = fileOrganizer.getTempDir()
+            val tempFilename = "dl_${track.id}"
 
-        val downloadedFile = when (dlResult) {
-            is DownloadResult.Success -> dlResult.file
-            is DownloadResult.YtDlpError -> {
-                emitProgress(track.id, 0f, DownloadStatus.FAILED)
-                return TrackDownloadResult.Failed("yt-dlp: ${dlResult.message.take(500)}")
-            }
-            is DownloadResult.NoOutput -> {
-                emitProgress(track.id, 0f, DownloadStatus.FAILED)
-                val detail = buildString {
-                    append("yt-dlp produced no output file.")
-                    dlResult.stderr?.let { append(" stderr: ${it.take(300)}") }
+            val ytStart = System.currentTimeMillis()
+            val dlResult = downloadExecutor.download(
+                url = youtubeUrl,
+                outputDir = tempDir,
+                filename = tempFilename,
+                qualityArgs = qualityArgs,
+                onProgress = { progress ->
+                    emitProgress(track.id, 0.1f + progress * 0.7f, DownloadStatus.DOWNLOADING)
+                },
+            )
+            timing?.ytDlpMs = System.currentTimeMillis() - ytStart
+
+            val downloadedFile = when (dlResult) {
+                is DownloadResult.Success -> dlResult.file
+                is DownloadResult.YtDlpError -> {
+                    emitProgress(track.id, 0f, DownloadStatus.FAILED)
+                    return@withWorkSlot TrackDownloadResult.Failed("yt-dlp: ${dlResult.message.take(500)}")
                 }
-                return TrackDownloadResult.Failed(detail)
+                is DownloadResult.NoOutput -> {
+                    emitProgress(track.id, 0f, DownloadStatus.FAILED)
+                    val detail = buildString {
+                        append("yt-dlp produced no output file.")
+                        dlResult.stderr?.let { append(" stderr: ${it.take(300)}") }
+                    }
+                    return@withWorkSlot TrackDownloadResult.Failed(detail)
+                }
+                is DownloadResult.Error -> {
+                    emitProgress(track.id, 0f, DownloadStatus.FAILED)
+                    return@withWorkSlot TrackDownloadResult.Failed("Error: ${dlResult.message}")
+                }
             }
-            is DownloadResult.Error -> {
-                emitProgress(track.id, 0f, DownloadStatus.FAILED)
-                return TrackDownloadResult.Failed("Error: ${dlResult.message}")
+
+            val finalizeStart = System.currentTimeMillis()
+            // Embed clean Stash-side tags + cover art before commit, over
+            // yt-dlp's YouTube-flavoured ones. Failure is non-fatal.
+            val art = runCatching { albumArtCache.resolveArt(effectiveTrack) }.getOrNull()
+            runCatching { metadataEmbedder.embedMetadata(downloadedFile, effectiveTrack, art) }
+                .onFailure { Log.w(TAG, "metadata embed failed for ${track.id}: ${it.message}") }
+
+            emitProgress(track.id, 0.9f, DownloadStatus.PROCESSING)
+
+            // Step 4: Move to organized destination (internal or user-selected SAF target).
+            val committed = fileOrganizer.commitDownload(
+                tempFile = downloadedFile,
+                artist = effectiveTrack.artist,
+                album = effectiveTrack.album.ifEmpty { null },
+                title = effectiveTrack.title,
+                format = downloadedFile.extension,
+            )
+
+            // Clean up the previous file if the canonicalizer renamed the
+            // track (new title → new derived file path), so the old file
+            // doesn't linger as an orphan. Only when paths genuinely differ.
+            val oldPath = track.filePath
+            if (oldPath != null && oldPath != committed.filePath) {
+                runCatching {
+                    val deleted = File(oldPath).delete()
+                    Log.d(TAG, "executeDownload: deleted orphaned old file path=$oldPath deleted=$deleted")
+                }.onFailure { e ->
+                    Log.w(TAG, "executeDownload: failed to delete old file $oldPath", e)
+                }
+            }
+            timing?.finalizeMs = System.currentTimeMillis() - finalizeStart
+
+            Log.i(TAG, "Downloaded: ${effectiveTrack.artist} - ${effectiveTrack.title} → ${committed.filePath}")
+            runCatching { trackDao.setMetadataEmbeddedAt(track.id, System.currentTimeMillis()) }
+                .onFailure { Log.w(TAG, "setMetadataEmbeddedAt failed for ${track.id}: ${it.message}") }
+            // v0.9.36 lyrics: fetch on the same success boundary as the
+            // metadata stamp.
+            lyricsFetchTrigger.enqueueFor(track.id)
+            enqueueNavidromeExport(effectiveTrack, committed.filePath)
+            emitProgress(track.id, 1f, DownloadStatus.COMPLETED)
+            TrackDownloadResult.Success(committed.filePath)
+        }
+    }
+
+    /**
+     * Fetches [track] from the user's own Navidrome when it has the song.
+     * Null when not configured, not found or the fetch failed — the caller
+     * carries on with the usual sources. Not exported back to the server
+     * (it came from there; re-tagging would make the upload look new).
+     */
+    private suspend fun tryOwnServerDownload(
+        track: Track,
+        timing: Timing?,
+        losslessOnly: Boolean,
+    ): TrackDownloadResult? {
+        val source = ownServer ?: return null
+        val findStart = System.currentTimeMillis()
+        val hit = source.find(track)
+        timing?.let { it.ownServerMs = System.currentTimeMillis() - findStart }
+        if (hit == null || (losslessOnly && !hit.isLossless)) return null
+        return withWorkSlot(timing) {
+            emitProgress(track.id, 0.1f, DownloadStatus.DOWNLOADING)
+            val tempFile = File(fileOrganizer.getTempDir(), "own_${track.id}.${hit.extension}")
+            val fetchStart = System.currentTimeMillis()
+            val ok = source.fetch(hit, tempFile) { read, total ->
+                val frac = if (total > 0) read.toFloat() / total else 0f
+                emitProgress(track.id, 0.1f + frac * 0.7f, DownloadStatus.DOWNLOADING)
+            }
+            timing?.fetchMs = System.currentTimeMillis() - fetchStart
+            if (!ok) return@withWorkSlot null
+            emitProgress(track.id, 0.85f, DownloadStatus.PROCESSING)
+            val finalizeStart = System.currentTimeMillis()
+            val effectiveTrack = trackDao.getById(track.id)?.toDomain() ?: track
+            val finalized = trackFinalizer.finalizeFile(
+                sourceFile = tempFile,
+                track = effectiveTrack,
+                format = com.stash.data.download.lossless.AudioFormat(
+                    codec = hit.extension,
+                    bitrateKbps = hit.song.bitRateKbps,
+                ),
+            )
+            timing?.finalizeMs = System.currentTimeMillis() - finalizeStart
+            when (finalized) {
+                is TrackFinalizer.FinalizeResult.Success -> {
+                    timing?.source = com.stash.data.download.navidrome.NavidromeSource.SOURCE_ID
+                    Log.i(TAG, "From own server: ${effectiveTrack.artist} - ${effectiveTrack.title} → ${finalized.committed.filePath}")
+                    loudnessMeasurer.measureAndPersistInBackground(
+                        trackId = track.id,
+                        file = File(finalized.committed.filePath),
+                    )
+                    runCatching { trackDao.setMetadataEmbeddedAt(track.id, System.currentTimeMillis()) }
+                    lyricsFetchTrigger.enqueueFor(track.id)
+                    emitProgress(track.id, 1f, DownloadStatus.COMPLETED)
+                    TrackDownloadResult.Success(finalized.committed.filePath)
+                }
+                is TrackFinalizer.FinalizeResult.Failed -> {
+                    Log.w(TAG, "own-server finalize failed for ${track.id}: ${finalized.message}")
+                    runCatching { tempFile.delete() }
+                    null
+                }
             }
         }
-
-        // Embed clean Stash-side tags + cover art into the file before
-        // commit. yt-dlp's --embed-metadata leaves YouTube-flavoured tags
-        // (uploader, video title); our pass overwrites them with the clean
-        // Spotify/YT-Music identity already on the Track row. Failure is
-        // non-fatal: the file remains playable and yt-dlp's fallback tags
-        // stay in place.
-        val art = runCatching { albumArtCache.resolveArt(effectiveTrack) }.getOrNull()
-        runCatching { metadataEmbedder.embedMetadata(downloadedFile, effectiveTrack, art) }
-            .onFailure { Log.w(TAG, "metadata embed failed for ${track.id}: ${it.message}") }
-
-        // Metadata + cover art written above by MetadataEmbedder. yt-dlp's
-        // --embed-metadata still runs as a fallback layer (see toYtDlpArgs).
-
-        emitProgress(track.id, 0.9f, DownloadStatus.PROCESSING)
-
-        // Step 4: Move to organized destination (internal or user-selected SAF target).
-        val committed = fileOrganizer.commitDownload(
-            tempFile = downloadedFile,
-            artist = effectiveTrack.artist,
-            album = effectiveTrack.album.ifEmpty { null },
-            title = effectiveTrack.title,
-            format = downloadedFile.extension,
-        )
-
-        // Clean up the previous file if the canonicalizer renamed the
-        // track (new title → new derived file path). Without this the
-        // old OMV-titled file lingers as an orphan consuming disk. Only
-        // delete when paths genuinely differ — for a plain re-download
-        // commitDownload already overwrote the same path.
-        val oldPath = track.filePath
-        if (oldPath != null && oldPath != committed.filePath) {
-            runCatching {
-                val deleted = File(oldPath).delete()
-                Log.d(TAG, "executeDownload: deleted orphaned old file path=$oldPath deleted=$deleted")
-            }.onFailure { e ->
-                Log.w(TAG, "executeDownload: failed to delete old file $oldPath", e)
-            }
-        }
-
-        Log.i(TAG, "Downloaded: ${effectiveTrack.artist} - ${effectiveTrack.title} → ${committed.filePath}")
-        runCatching { trackDao.setMetadataEmbeddedAt(track.id, System.currentTimeMillis()) }
-            .onFailure { Log.w(TAG, "setMetadataEmbeddedAt failed for ${track.id}: ${it.message}") }
-        // v0.9.36 lyrics integration: fire the post-download lyrics fetch
-        // on the same success boundary as the metadata stamp so any track
-        // that survives to a stamped state also gets a lyrics-fetch attempt.
-        lyricsFetchTrigger.enqueueFor(track.id)
-        enqueueNavidromeExport(effectiveTrack, committed.filePath)
-        emitProgress(track.id, 1f, DownloadStatus.COMPLETED)
-        return TrackDownloadResult.Success(committed.filePath)
     }
 
     /**
@@ -386,7 +555,11 @@ class DownloadManager @Inject constructor(
             .onFailure { Log.w(TAG, "isTrackInStashMix lookup failed for $trackId", it) }
             .getOrDefault(false)
 
-    internal suspend fun tryLosslessDownload(track: Track, forced: Boolean = false): TrackDownloadResult? {
+    internal suspend fun tryLosslessDownload(
+        track: Track,
+        forced: Boolean = false,
+        timing: Timing? = null,
+    ): TrackDownloadResult? {
         val query = TrackQuery(
             artist = track.artist,
             title = track.title,
@@ -402,11 +575,44 @@ class DownloadManager @Inject constructor(
         // registry skips it — so we re-resolve to reach the next lossless
         // source. Capped so a pathologically-degrading set can't spin.
         repeat(MAX_LOSSLESS_FAILOVER_ATTEMPTS) {
-        val match: SourceResult = runCatching { losslessRegistry.resolve(query) }
+        val resolveStart = System.currentTimeMillis()
+        val match: SourceResult? = runCatching { losslessRegistry.resolve(query) }
             .onFailure { e ->
                 Log.w(TAG, "lossless registry threw for '${track.artist} - ${track.title}'", e)
             }
-            .getOrNull() ?: return null
+            .getOrNull()
+        timing?.let { it.losslessResolveMs += System.currentTimeMillis() - resolveStart }
+        if (match == null) return null
+
+        // The fetch + probe + tag/store hold a work slot; the resolve above
+        // (mostly waiting for a rate-limit token) did not.
+        val attempt: AttemptOutcome = withWorkSlot(timing) { fetchLosslessMatch(track, match, forced, timing) }
+        when (attempt) {
+            is AttemptOutcome.Done -> return attempt.result
+            AttemptOutcome.Retry -> return@repeat
+        }
+        }
+        // Every failover attempt this call rejected its source on the
+        // duration backstop → yt-dlp fallthrough (same null semantics).
+        Log.w(
+            TAG,
+            "lossless: exhausted failover attempts for '${track.artist} - ${track.title}'",
+        )
+        return null
+    }
+
+    /** One lossless attempt's end: a final result (success or give up), or try the next source. */
+    private sealed interface AttemptOutcome {
+        data class Done(val result: TrackDownloadResult?) : AttemptOutcome
+        data object Retry : AttemptOutcome
+    }
+
+    private suspend fun fetchLosslessMatch(
+        track: Track,
+        match: SourceResult,
+        forced: Boolean,
+        timing: Timing?,
+    ): AttemptOutcome {
 
         Log.d(
             TAG,
@@ -424,6 +630,7 @@ class DownloadManager @Inject constructor(
         val ext = match.format.codec.lowercase().ifBlank { "flac" }
         val tempFile = File(fileOrganizer.getTempDir(), "lossless_${track.id}.$ext")
 
+        val fetchStart = System.currentTimeMillis()
         val fetched = losslessUrlDownloader.download(
             source = match,
             destination = tempFile,
@@ -434,7 +641,7 @@ class DownloadManager @Inject constructor(
         ).getOrElse { e ->
             Log.w(TAG, "lossless fetch failed for '${track.artist} - ${track.title}': ${e.message}")
             runCatching { tempFile.delete() }
-            return null
+            return AttemptOutcome.Done(null)
         }
 
         // Duration backstop (degradation detection): a degraded source can
@@ -453,10 +660,12 @@ class DownloadManager @Inject constructor(
             )
             losslessHealthGate.recordDegraded(match.sourceId)
             runCatching { fetched.delete() }
-            return@repeat
+            return AttemptOutcome.Retry
         }
 
+        timing?.fetchMs = System.currentTimeMillis() - fetchStart
         emitProgress(track.id, 0.85f, DownloadStatus.PROCESSING)
+        val finalizeStart = System.currentTimeMillis()
 
         // Re-fetch the track so any canonicalizer-driven refresh of
         // album_artist (or other tag-bearing fields) that landed between
@@ -476,6 +685,8 @@ class DownloadManager @Inject constructor(
         )
         when (finalized) {
             is TrackFinalizer.FinalizeResult.Success -> {
+                timing?.finalizeMs = System.currentTimeMillis() - finalizeStart
+                timing?.source = match.sourceId
                 Log.i(
                     TAG,
                     "Lossless downloaded (${match.sourceId}): ${effectiveTrack.artist} - ${effectiveTrack.title}" +
@@ -524,7 +735,7 @@ class DownloadManager @Inject constructor(
                 lyricsFetchTrigger.enqueueFor(track.id)
                 enqueueNavidromeExport(effectiveTrack, finalized.committed.filePath)
                 emitProgress(track.id, 1f, DownloadStatus.COMPLETED)
-                return TrackDownloadResult.Success(finalized.committed.filePath)
+                return AttemptOutcome.Done(TrackDownloadResult.Success(finalized.committed.filePath))
             }
             is TrackFinalizer.FinalizeResult.Failed -> {
                 Log.w(TAG, "lossless finalize failed for ${track.id}: ${finalized.message}")
@@ -532,17 +743,9 @@ class DownloadManager @Inject constructor(
                 // if commitDownload threw, the temp file may still be on disk.
                 // Best-effort cleanup to avoid leaving orphans in the temp dir.
                 runCatching { fetched.delete() }
-                return null  // fall through to yt-dlp — same semantics as before
+                return AttemptOutcome.Done(null)  // fall through to yt-dlp — same semantics as before
             }
         }
-        }
-        // Every failover attempt this call rejected its source on the
-        // duration backstop → yt-dlp fallthrough (same null semantics).
-        Log.w(
-            TAG,
-            "lossless: exhausted failover attempts for '${track.artist} - ${track.title}'",
-        )
-        return null
     }
 
     private suspend fun enqueueNavidromeExport(track: Track, filePath: String) {
@@ -576,7 +779,7 @@ class DownloadManager @Inject constructor(
      * @return A [ResolveResult] with the best-matching YouTube URL, or null URL
      *         with the best rejected candidate's video ID if no match was accepted.
      */
-    private suspend fun resolveUrl(track: Track): ResolveResult {
+    private suspend fun resolveUrl(track: Track, allowYtDlpSearch: Boolean = true): ResolveResult {
         // If we already have a YouTube ID, use it directly — except for
         // YT-library-sourced tracks, which get canonicalized: the imported
         // videoId may point at an OMV / UGC / PODCAST, and the canonicalizer
@@ -656,6 +859,15 @@ class DownloadManager @Inject constructor(
         }
 
         // Final fallback: direct yt-dlp search (bypasses InnerTube entirely)
+        // The yt-dlp search spawns a process; the early (parallel) lookup
+        // leaves it to [resolveViaYtDlpSearch] once lossless really missed.
+        if (!allowYtDlpSearch) return ResolveResult(url = null, rejectedVideoId = bestRejectedVideoId)
+        return resolveViaYtDlpSearch(track, bestRejectedVideoId)
+    }
+
+    /** Last resolve resort: a yt-dlp search, after the InnerTube strategies found nothing. */
+    private suspend fun resolveViaYtDlpSearch(track: Track, rejectedSoFar: String?): ResolveResult {
+        var bestRejectedVideoId: String? = rejectedSoFar
         Log.d(TAG, "resolveUrl: InnerTube strategies exhausted, trying yt-dlp for '${track.artist} - ${track.title}'")
         val ytDlpQuery = "${track.artist} ${track.title}"
         val ytDlpResults = searchExecutor.searchYtDlpDirect(ytDlpQuery, maxResults = 5)

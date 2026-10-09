@@ -126,4 +126,42 @@ class SubsonicClientTest {
         val redacted = SubsonicClient.redact("https://x/rest/ping?u=root&t=deadbeef&s=abc&v=1.16.1&p=enc:41")
         assertEquals("https://x/rest/ping?u=***&t=***&s=***&v=1.16.1&p=***", redacted)
     }
+
+    @Test fun `download writes the original file`() = runTest {
+        server.enqueue(MockResponse().setHeader("Content-Type", "audio/flac").setBody("fLaC-bytes"))
+        val dest = java.io.File.createTempFile("ndtest", ".flac").apply { delete() }
+
+        client.download(config, "song-1", dest)
+
+        assertEquals("fLaC-bytes", dest.readText())
+        val url = server.takeRequest().requestUrl!!
+        assertEquals("/rest/download", url.encodedPath)
+        assertEquals("song-1", url.queryParameter("id"))
+        dest.delete()
+    }
+
+    @Test fun `a subsonic error body is not taken for audio`() = runTest {
+        server.enqueue(
+            MockResponse().setHeader("Content-Type", "application/json")
+                .setBody("""{"subsonic-response":{"status":"failed","error":{"code":70,"message":"not found"}}}"""),
+        )
+        val dest = java.io.File.createTempFile("ndtest", ".flac").apply { delete() }
+
+        val error = runCatching { client.download(config, "missing", dest) }.exceptionOrNull()
+
+        assertTrue(error is java.io.IOException)
+        dest.delete()
+    }
+
+    @Test fun `findSong reports the file format`() = runTest {
+        server.enqueue(
+            ok(""","searchResult3":{"song":[{"id":"7","title":"Song","artist":"Artist","duration":200,"suffix":"FLAC","bitRate":900,"size":12345}]}"""),
+        )
+
+        val song = client.findSong(config, "Artist", "Song", null, 200_000)!!
+
+        assertEquals("flac", song.suffix)
+        assertEquals(900, song.bitRateKbps)
+        assertEquals(12345L, song.sizeBytes)
+    }
 }

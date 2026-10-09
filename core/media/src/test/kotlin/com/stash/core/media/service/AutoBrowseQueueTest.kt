@@ -11,6 +11,7 @@ class AutoBrowseQueueTest {
         id: Long,
         downloaded: Boolean = true,
         streamable: Boolean = false,
+        checkedAt: Long? = null,
     ) = TrackEntity(
         id = id,
         title = "Track $id",
@@ -19,6 +20,7 @@ class AutoBrowseQueueTest {
         filePath = if (downloaded) "/music/$id.flac" else null,
         isDownloaded = downloaded,
         isStreamable = streamable,
+        isStreamableCheckedAt = checkedAt,
     )
 
     // ── mediaId round-trip ───────────────────────────────────────────
@@ -54,7 +56,7 @@ class AutoBrowseQueueTest {
     @Test
     fun `queuePlan starts at the tapped track with the full playlist queued in order`() {
         val tracks = listOf(track(1), track(2), track(3), track(4))
-        val plan = AutoBrowseQueue.queuePlan(tracks, tappedTrackId = 3L)
+        val plan = AutoBrowseQueue.queuePlan(tracks, tappedTrackId = 3L, canStream = true)
         assertEquals(listOf(1L, 2L, 3L, 4L), plan.tracks.map { it.id })
         assertEquals(2, plan.startIndex)
     }
@@ -63,11 +65,11 @@ class AutoBrowseQueueTest {
     fun `queuePlan keeps streamable-only tracks and drops unplayable ones`() {
         val tracks = listOf(
             track(1),
-            track(2, downloaded = false, streamable = false), // unplayable — dropped
+            track(2, downloaded = false, streamable = false, checkedAt = 1L), // confirmed unplayable — dropped
             track(3, downloaded = false, streamable = true),
             track(4),
         )
-        val plan = AutoBrowseQueue.queuePlan(tracks, tappedTrackId = 4L)
+        val plan = AutoBrowseQueue.queuePlan(tracks, tappedTrackId = 4L, canStream = true)
         assertEquals(listOf(1L, 3L, 4L), plan.tracks.map { it.id })
         // Index is within the FILTERED list — same filter the browse UI used.
         assertEquals(2, plan.startIndex)
@@ -76,14 +78,30 @@ class AutoBrowseQueueTest {
     @Test
     fun `queuePlan falls back to index 0 when the tapped track is missing`() {
         val tracks = listOf(track(1), track(2))
-        val plan = AutoBrowseQueue.queuePlan(tracks, tappedTrackId = 999L)
+        val plan = AutoBrowseQueue.queuePlan(tracks, tappedTrackId = 999L, canStream = true)
         assertEquals(0, plan.startIndex)
     }
 
     @Test
     fun `queuePlan of an empty playlist is empty with index 0`() {
-        val plan = AutoBrowseQueue.queuePlan(emptyList(), tappedTrackId = 1L)
+        val plan = AutoBrowseQueue.queuePlan(emptyList(), tappedTrackId = 1L, canStream = true)
         assertEquals(0, plan.tracks.size)
         assertEquals(0, plan.startIndex)
+    }
+
+    @Test
+    fun `queuePlan uses the browse predicate - a never-checked synced row stays, matching the listed index`() {
+        val tracks = listOf(track(1), track(2, downloaded = false), track(3))
+        val plan = AutoBrowseQueue.queuePlan(tracks, tappedTrackId = 3L, canStream = true)
+        assertEquals(listOf(1L, 2L, 3L), plan.tracks.map { it.id })
+        assertEquals(2, plan.startIndex)
+    }
+
+    @Test
+    fun `queuePlan without streaming keeps only downloads and re-finds the tapped song`() {
+        val tracks = listOf(track(1), track(2, downloaded = false, streamable = true, checkedAt = 1L), track(3))
+        val plan = AutoBrowseQueue.queuePlan(tracks, tappedTrackId = 3L, canStream = false)
+        assertEquals(listOf(1L, 3L), plan.tracks.map { it.id })
+        assertEquals(1, plan.startIndex)
     }
 }
