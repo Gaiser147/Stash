@@ -46,9 +46,18 @@ class CrossfadeEngineTest {
         every { master.currentMediaItem } answers { if (masterState.index == 0) a else b }
         every { master.nextMediaItemIndex } answers { if (masterState.index == 0) 1 else -1 }
         every { master.isPlaying } returns true
-        every { master.currentPosition } answers { masterState.position }
+        var speed = 1f
+        // A slowed-down master falls back towards the spare as time passes.
+        every { master.currentPosition } answers {
+            masterState.position.also { if (speed < 1f) masterState.position -= 50 }
+        }
         every { master.seekTo(any<Int>(), any<Long>()) } answers {
             masterState.index = firstArg(); masterState.position = secondArg()
+        }
+        // Lands 600 ms ahead; slowing down closes the gap step by step.
+        every { master.playbackParameters } answers { androidx.media3.common.PlaybackParameters(speed) }
+        every { master.setPlaybackSpeed(any()) } answers {
+            speed = firstArg()
         }
         val spare: ExoPlayer = mockk(relaxed = true)
         every { spare.mediaItemCount } returns 1
@@ -68,7 +77,11 @@ class CrossfadeEngineTest {
 
         assertThat(done).isTrue()
         assertThat(engine.masterPlayer).isSameInstanceAs(master)
-        verify { master.seekTo(1, 6_300L) }
+        verify(exactly = 1) { master.seekTo(any<Int>(), any<Long>()) }
+        verify { master.seekTo(1, 6_600L) }
+        // Slowed down while ahead, back to normal speed at the end.
+        verify { master.setPlaybackSpeed(0.75f) }
+        assertThat(speed).isEqualTo(1f)
         verify { spare.stop() }
         assertThat(engine.isTransitioning()).isFalse()
         assertThat(engine.isHandingOff()).isFalse()

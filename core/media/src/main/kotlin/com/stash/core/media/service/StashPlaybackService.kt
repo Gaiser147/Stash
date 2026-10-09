@@ -1752,6 +1752,11 @@ class StashPlaybackService : MediaLibraryService() {
                     kotlinx.coroutines.withContext(Dispatchers.Main) {
                         session.player.shuffleModeEnabled = plan.isShuffled
                     }
+                    // Autoplay continues the restored queue (car autostart,
+                    // media button) just like one started in the app.
+                    serviceScope.launch {
+                        playerRepository.get().adoptExternalQueue(plan.tracks.map { it.toDomain() }, personalMix = false)
+                    }
                     // Force play once the queue lands iff this is a real play
                     // request (not boot-time notification population).
                     resumePlayGate.arm(isForPlayback)

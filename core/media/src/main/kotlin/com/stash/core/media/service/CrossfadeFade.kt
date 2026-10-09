@@ -50,14 +50,23 @@ internal fun isCrossfadeReady(item: MediaItem): Boolean {
     }
 }
 
-/** Above this much master-vs-spare offset the hand-off re-syncs before switching. */
-internal const val HANDOFF_RESYNC_TOLERANCE_MS = 40L
+/** Close enough: master and spare within this play the same instant. */
+internal const val SPEED_SYNC_TOLERANCE_MS = 25L
 
 /**
- * How far the master is off the spare after its hand-off seek, or null when
- * it's close enough to switch without an audible jump or echo.
+ * Playback speed for the silent master during the hand-off, from
+ * [driftMs] = spare position − master position: slow down when the master is
+ * ahead, speed up when it's behind, 1.0 once they line up.
  */
-internal fun handoffDrift(spareMs: Long, masterMs: Long): Long? {
-    val drift = spareMs - masterMs
-    return if (kotlin.math.abs(drift) > HANDOFF_RESYNC_TOLERANCE_MS) drift else null
+internal fun syncSpeed(driftMs: Long): Float = when {
+    // A speed change reaches the output ~150 ms late; near the target the
+    // gentler rate keeps that lag from overshooting past the tolerance.
+    driftMs < -SPEED_SYNC_COARSE_MS -> 0.75f
+    driftMs < -SPEED_SYNC_TOLERANCE_MS -> 0.9f
+    driftMs > SPEED_SYNC_COARSE_MS -> 1.33f
+    driftMs > SPEED_SYNC_TOLERANCE_MS -> 1.1f
+    else -> 1f
 }
+
+/** Beyond this offset the hand-off syncs at the coarse rate. */
+internal const val SPEED_SYNC_COARSE_MS = 200L

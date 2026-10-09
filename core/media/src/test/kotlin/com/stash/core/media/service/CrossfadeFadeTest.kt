@@ -34,9 +34,12 @@ class CrossfadeFadeTest {
     }
 
     @Test
-    fun `hand-off re-syncs only when master and spare drift apart audibly`() {
-        assertEquals(null, handoffDrift(spareMs = 6_300, masterMs = 6_280))
-        assertEquals(120L, handoffDrift(spareMs = 6_400, masterMs = 6_280))
-        assertEquals(-200L, handoffDrift(spareMs = 6_100, masterMs = 6_300))
+    fun `hand-off lines the silent master up by speed - slower ahead, faster behind`() {
+        assertEquals(1f, syncSpeed(0))
+        assertEquals(1f, syncSpeed(20))
+        assertEquals(0.9f, syncSpeed(-100))
+        assertEquals(0.75f, syncSpeed(-500))
+        assertEquals(1.1f, syncSpeed(100))
+        assertEquals(1.33f, syncSpeed(500))
     }
 }

@@ -208,12 +208,18 @@ class PlayerRepositoryImpl @Inject constructor(
         // append songs chosen by the AutoplayEngine. Launched (not awaited)
         // so candidate generation never stalls state collection; the job
         // handle keeps it single-flight.
+        // A queue that reached the player some other way (resumed by the car
+        // or a media button, started by another controller) has no session
+        // yet: arm one from that queue first, so it doesn't just end.
         scope.launch {
             playerState.collect { state ->
-                if (autoplaySession == null || radioActive || libraryShuffleActive) return@collect
+                if (radioActive || libraryShuffleActive) return@collect
                 if (state.currentTrack == null || state.repeatMode != RepeatMode.OFF) return@collect
                 if (nearTailInPlayOrder(state, AUTOPLAY_GROW_THRESHOLD) && autoplayGrowJob?.isActive != true) {
-                    autoplayGrowJob = scope.launch { growAutoplay() }
+                    autoplayGrowJob = scope.launch {
+                        if (autoplaySession == null && !armFromPlayerQueue()) return@launch
+                        growAutoplay()
+                    }
                 }
             }
         }
@@ -910,6 +916,34 @@ class PlayerRepositoryImpl @Inject constructor(
         }
     }
 
+    /**
+     * Arms autoplay for whatever is on the player right now, without touching
+     * it: the in-app queue when it matches, else the player's own items.
+     * Returns false when autoplay is off or there is nothing to start from.
+     */
+    internal suspend fun armFromPlayerQueue(): Boolean {
+        val engine = autoplayEngine ?: return false
+        if (!engine.isEnabled()) return false
+        val controller = controllerDeferred ?: return false
+        val generation = autoplayGeneration
+        val currentId = _playerState.value.currentTrack?.id
+        val queue = if (currentId != null && currentQueueTracks.any { it.id == currentId }) {
+            currentQueueTracks
+        } else {
+            (0 until controller.mediaItemCount).map { controller.getMediaItemAt(it).toTrack() }
+                .filter { it.id > 0L }
+                .also { currentQueueTracks = it }
+        }
+        if (queue.isEmpty()) return false
+        val session = runCatching { engine.start(queue) }
+            .onFailure { Log.w(TAG, "autoplay late arm failed", it) }
+            .getOrNull() ?: return false
+        if (generation != autoplayGeneration || radioActive || libraryShuffleActive) return false
+        autoplaySession = session
+        Log.i(TAG, "autoplay: armed late for a queue started outside the app (${queue.size} songs)")
+        return true
+    }
+
     /** Ends any autoplay session and invalidates in-flight arms. Returns the new generation. */
     private fun disarmAutoplay(): Int {
         autoplaySession = null
@@ -1009,9 +1043,9 @@ class PlayerRepositoryImpl @Inject constructor(
     internal suspend fun growAutoplay() {
         autoplayGrowMutex.withLock {
             val engine = autoplayEngine ?: return
-            val session = autoplaySession ?: return
+            val session = autoplaySession ?: return Unit.also { Log.i(TAG, "autoplay: no session for this queue") }
             if (radioActive || libraryShuffleActive) return
-            if (!engine.isEnabled()) return
+            if (!engine.isEnabled()) return Unit.also { Log.i(TAG, "autoplay: switched off") }
             val controller = controllerDeferred ?: return
             val state = _playerState.value
             if (!nearTailInPlayOrder(state, AUTOPLAY_GROW_THRESHOLD)) return
@@ -1027,7 +1061,11 @@ class PlayerRepositoryImpl @Inject constructor(
                 }
             }.onFailure { Log.w(TAG, "autoplay batch failed", it) }.getOrDefault(emptyList())
             // The user may have started something else while we were ranking.
-            if (batch.isEmpty() || autoplaySession !== session) return
+            if (batch.isEmpty() || autoplaySession !== session) {
+                Log.i(TAG, "autoplay: nothing appended (batch=${batch.size}, sessionChanged=${autoplaySession !== session})")
+                return
+            }
+            Log.i(TAG, "autoplay: appending ${batch.size} songs")
             val firstNew = controller.mediaItemCount
             val ended = controller.playbackState == Player.STATE_ENDED
             controller.addMediaItems(batch.map { it.toQueueMediaItem() })

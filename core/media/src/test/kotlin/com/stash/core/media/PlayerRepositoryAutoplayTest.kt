@@ -276,4 +276,25 @@ class PlayerRepositoryAutoplayTest {
         verify { controller.seekTo(2, 0L) }
         verify(atLeast = 1) { controller.play() }
     }
+
+    @Test fun `a queue that reached the player without setQueue still gets autoplay`() = runTest {
+        // e.g. resumed by the car on connect: no session was ever armed.
+        repo.currentQueueTracks = listOf(track(1), track(2))
+        repo._playerState.value = PlayerState(currentTrack = track(2), queue = listOf(track(1), track(2)), currentIndex = 1)
+
+        assertThat(repo.armFromPlayerQueue()).isTrue()
+        repo.growAutoplay()
+
+        coVerify { engine.start(match { q -> q.map { it.id } == listOf(1L, 2L) }, any()) }
+        verify { controller.addMediaItems(match<List<MediaItem>> { it.size == 2 }) }
+    }
+
+    @Test fun `late arming respects the autoplay switch`() = runTest {
+        coEvery { engine.isEnabled() } returns false
+        repo.currentQueueTracks = listOf(track(1))
+        repo._playerState.value = PlayerState(currentTrack = track(1), queue = listOf(track(1)), currentIndex = 0)
+
+        assertThat(repo.armFromPlayerQueue()).isFalse()
+        coVerify(exactly = 0) { engine.start(any(), any()) }
+    }
 }

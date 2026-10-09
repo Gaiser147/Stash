@@ -254,6 +254,7 @@ class CrossfadeEngine(
         }
         handingOff = true
         try {
+            val seekAt = android.os.SystemClock.elapsedRealtime()
             master.seekTo(index, spare.currentPosition + HANDOFF_LEAD_MS)
             master.playWhenReady = true
             // The spare keeps playing (audible) while the master buffers.
@@ -261,19 +262,33 @@ class CrossfadeEngine(
                 android.util.Log.w("Crossfade", "hand-off: master not playing after ${HANDOFF_TIMEOUT_MS}ms — hard switch")
                 return
             }
-            // Re-sync inside the master's buffer so the switch is inaudible.
-            val drift = handoffDrift(spareMs = spare.currentPosition, masterMs = master.currentPosition)
-            if (drift != null && spare.playbackState != Player.STATE_ENDED) {
-                master.seekTo(index, spare.currentPosition + RESYNC_LEAD_MS)
+            val startupMs = android.os.SystemClock.elapsedRealtime() - seekAt
+            // Far behind (a slow stream): one more seek, ahead by what the
+            // first start-up actually took.
+            if (spare.currentPosition - master.currentPosition > FAR_BEHIND_MS && spare.playbackState != Player.STATE_ENDED) {
+                master.seekTo(index, spare.currentPosition + startupMs + HANDOFF_LEAD_MS)
                 waitForMaster(index, RESYNC_TIMEOUT_MS)
             }
-            // Micro-fade spare → master.
+            // Line the (silent) master up with the spare by speed, not by
+            // seeking: a seek re-buffers and lands it behind again, which the
+            // micro-fade played as a short repeat. Pitch/tempo is inaudible
+            // at volume 0.
             var t = 0L
-            while (t < MICRO_FADE_MS) {
-                val (out, inc) = equalPowerVolumes(t.toFloat() / MICRO_FADE_MS)
+            while (t < SPEED_SYNC_MAX_MS && spare.playbackState != Player.STATE_ENDED) {
+                val speed = syncSpeed(spare.currentPosition - master.currentPosition)
+                if (master.playbackParameters.speed != speed) master.setPlaybackSpeed(speed)
+                if (speed == 1f) break
+                delay(SYNC_STEP_MS)
+                t += SYNC_STEP_MS
+            }
+            master.setPlaybackSpeed(1f)
+            // Micro-fade spare → master.
+            var f = 0L
+            while (f < MICRO_FADE_MS) {
+                val (out, inc) = equalPowerVolumes(f.toFloat() / MICRO_FADE_MS)
                 setLevels(inc, out)
                 delay(STEP_MS / 2)
-                t += STEP_MS / 2
+                f += STEP_MS / 2
             }
         } finally {
             handingOff = false
@@ -304,6 +319,7 @@ class CrossfadeEngine(
 
     /** Master alone and audible again; the spare reset to a clean silent state. */
     private fun finish() {
+        if (master.playbackParameters.speed != 1f) master.setPlaybackSpeed(1f)
         setLevels(1f, 0f)
         spare.playWhenReady = false
         spare.stop()
@@ -336,11 +352,17 @@ class CrossfadeEngine(
         const val DUCK_VOLUME = 0.2f
         const val MICRO_FADE_MS = 120L
 
-        /** The master seeks slightly ahead of the spare: it has to buffer first. */
-        const val HANDOFF_LEAD_MS = 300L
+        /**
+         * The master seeks ahead of the spare (it has to buffer first) and is
+         * then slowed down onto it; landing ahead is cheap, behind repeats.
+         */
+        const val HANDOFF_LEAD_MS = 600L
+        /** Beyond this far behind, speeding up would take too long: seek once more. */
+        const val FAR_BEHIND_MS = 1_500L
+        const val SPEED_SYNC_MAX_MS = 3_000L
+        const val SYNC_STEP_MS = 25L
         /** Give a stream this long to start on the master; the spare covers it. */
         const val HANDOFF_TIMEOUT_MS = 15_000L
-        const val RESYNC_LEAD_MS = 20L
         const val RESYNC_TIMEOUT_MS = 2_000L
     }
 }
