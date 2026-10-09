@@ -217,10 +217,27 @@ class AggregatorRateLimiter @Inject constructor() {
         resetEventId?.let { _circuitResetEvents.tryEmit(it) }
         earlyResult?.let { return it }
 
-        if (waitMs > 0) delay(waitMs)
+        if (waitMs > 0) {
+            waitedMs.merge(sourceId, waitMs, Long::plus)
+            delay(waitMs)
+        }
         // Re-acquire (same source, fresh state). Recursion is fine here —
         // depth is bounded because tokens accumulate during the delay.
         return acquire(sourceId)
+    }
+
+    /** Total time callers spent waiting for a token, per source (diagnostics). */
+    private val waitedMs = java.util.concurrent.ConcurrentHashMap<String, Long>()
+
+    /** "amz 42s, qbdlx_qobuz 3m10s" — time downloads spent waiting on each source since app start. */
+    fun waitSummary(): String =
+        waitedMs.entries.sortedByDescending { it.value }
+            .joinToString { (id, ms) -> "$id ${formatDuration(ms)}" }
+            .ifEmpty { "none" }
+
+    private fun formatDuration(ms: Long): String {
+        val sec = ms / 1000
+        return if (sec >= 60) "${sec / 60}m${sec % 60}s" else "${sec}s"
     }
 
     /** Record a successful response. Resets the failure counter. */

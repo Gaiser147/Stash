@@ -45,6 +45,7 @@ class DiagnosticsBundleBuilder @Inject constructor(
     private val tokenManager: TokenManager,
     private val crashFileStore: CrashFileStore,
     private val logcatCapture: LogcatCapture,
+    private val extraSections: Set<@JvmSuppressWildcards DiagnosticsSection> = emptySet(),
 ) {
 
     /** A built bundle: the redacted report text, the on-disk file, and a shareable URI. */
@@ -65,6 +66,9 @@ class DiagnosticsBundleBuilder @Inject constructor(
             section("Recent sync history") { syncHistorySection() },
             section("Downloads") { downloadsSection() },
             section("Counts") { countsSection() },
+        ) + extraSections.sortedBy { it.title }.map { extra ->
+            section(extra.title) { "== ${extra.title} ==\n" + extra.render() }
+        } + listOf(
             section("Recent crash reports") { crashReportsSection() },
             section("Recent logs") { "== Recent logs ==\n" + logcatCapture.recentLogs(1500) },
         )
