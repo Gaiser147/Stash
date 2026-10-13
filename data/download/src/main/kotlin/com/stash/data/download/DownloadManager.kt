@@ -837,7 +837,9 @@ class DownloadManager @Inject constructor(
 
         for (query in strategies) {
             if (query.isBlank()) continue
-            val results = searchExecutor.search(query, maxResults = 10)
+            // InnerTube only per variant; the single yt-dlp search runs once,
+            // after all variants (resolveViaYtDlpSearch).
+            val results = searchExecutor.search(query, maxResults = 10, allowYtDlpFallback = false)
             if (results.isEmpty()) continue
 
             val scored = matchScorer.scoreResults(

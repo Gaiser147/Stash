@@ -34,6 +34,11 @@ class InnerTubeSearchExecutor @Inject constructor(
 ) {
     companion object {
         private const val TAG = "InnerTubeSearch"
+        private val DURATION = Regex("""\d+:\d{2}(:\d{2})?""")
+        private val DATE = Regex("""[A-Z][a-z]{2} \d{1,2}(, \d{4})?""")
+
+        /** Result types that are never a playable track, even with a videoId. */
+        private val NON_TRACK_TYPES = setOf("Episode", "Podcast", "Profile", "Artist", "Playlist", "Album", "Show")
     }
 
     /**
@@ -120,9 +125,13 @@ class InnerTubeSearchExecutor @Inject constructor(
     /**
      * Parses the top-level InnerTube search response into a flat list of results.
      *
-     * Navigates through `tabbedSearchResultsRenderer` -> tabs -> sections ->
-     * `musicShelfRenderer` -> contents, extracting each
-     * `musicResponsiveListItemRenderer` item.
+     * Navigates through `tabbedSearchResultsRenderer` -> tabs -> sections and
+     * reads every section shape YouTube Music has used:
+     *  - `musicShelfRenderer.contents[]` (the classic shelf layout),
+     *  - `itemSectionRenderer.contents[]` (October 2026 layout: one row per
+     *    section — reading only shelves made every search return 0 results
+     *    and pushed each song onto the slow yt-dlp search fallback),
+     *  - `musicCardShelfRenderer` (the "top result" card).
      */
     private fun parseSearchResults(response: JsonObject, maxResults: Int): List<YtDlpSearchResult> {
         val results = mutableListOf<YtDlpSearchResult>()
@@ -142,7 +151,13 @@ class InnerTubeSearchExecutor @Inject constructor(
             ?.jsonArray ?: return emptyList()
 
         for (section in sections) {
-            val shelf = section.jsonObject["musicShelfRenderer"]?.jsonObject ?: continue
+            val sectionObj = section.jsonObject
+            sectionObj["musicCardShelfRenderer"]?.jsonObject?.let { card ->
+                parseTopResultCard(card)?.let { if (results.size < maxResults) results.add(it) }
+            }
+            val shelf = sectionObj["musicShelfRenderer"]?.jsonObject
+                ?: sectionObj["itemSectionRenderer"]?.jsonObject
+                ?: continue
             val contents = shelf["contents"]?.jsonArray ?: continue
 
             for (item in contents) {
@@ -158,8 +173,64 @@ class InnerTubeSearchExecutor @Inject constructor(
             if (results.size >= maxResults) break
         }
 
-        return results
+        return results.distinctBy { it.id }
     }
+
+    /**
+     * The "top result" card: title runs, a subtitle of
+     * `Type • Artist • 21K views • 3:26`, and the video on `onTap`.
+     * Null for non-playable cards (an artist, an album).
+     */
+    private fun parseTopResultCard(card: JsonObject): YtDlpSearchResult? {
+        val videoId = card.navigatePath("onTap", "watchEndpoint", "videoId")?.jsonPrimitive?.contentOrNull
+            ?: return null
+        val title = card.navigatePath("title", "runs")?.jsonArray
+            ?.joinToString("") { it.jsonObject["text"]?.jsonPrimitive?.contentOrNull.orEmpty() }
+            ?.takeIf { it.isNotBlank() } ?: return null
+        val parts = card.navigatePath("subtitle", "runs")?.jsonArray
+            ?.mapNotNull { it.jsonObject["text"]?.jsonPrimitive?.contentOrNull }
+            ?.filterNot { it.isSeparator() }
+            .orEmpty()
+        val type = parts.firstOrNull().orEmpty()
+        if (type in NON_TRACK_TYPES) return null
+        val artist = parts.drop(1).filterNot { it.isCountOrDuration() }.joinToString(", ")
+        val duration = parseDurationToSeconds(parts.lastOrNull { it.matches(DURATION) })
+        val musicVideoType = MusicVideoType.fromInnerTube(
+            card.navigatePath(
+                "onTap", "watchEndpoint", "watchEndpointMusicSupportedConfigs",
+                "watchEndpointMusicConfig", "musicVideoType",
+            )?.jsonPrimitive?.contentOrNull,
+        )
+        val isSong = type.equals("Song", ignoreCase = true)
+        return YtDlpSearchResult(
+            id = videoId,
+            title = title,
+            uploader = artist,
+            uploaderId = "",
+            channel = if (isSong) "$artist - Topic" else artist,
+            duration = duration,
+            viewCount = 0,
+            webpageUrl = "https://www.youtube.com/watch?v=$videoId",
+            url = "",
+            likeCount = null,
+            thumbnail = com.stash.core.common.ArtUrlUpgrader.upgrade(
+                card.navigatePath("thumbnail", "musicThumbnailRenderer", "thumbnail", "thumbnails")
+                    ?.jsonArray
+                    ?.maxByOrNull { it.jsonObject["width"]?.jsonPrimitive?.intOrNull ?: 0 }
+                    ?.jsonObject?.get("url")?.jsonPrimitive?.contentOrNull,
+            ),
+            album = null,
+            description = "",
+            musicVideoType = musicVideoType,
+        )
+    }
+
+    private fun String.isSeparator() = this == " • " || this == " · "
+
+    /** "7.7M views", "551M plays", "1.15M monthly audience", "3:26", a date like "Aug 13, 2021". */
+    private fun String.isCountOrDuration(): Boolean =
+        matches(DURATION) || looksLikePlayCountBadge(this) ||
+            contains("monthly audience", ignoreCase = true) || matches(DATE)
 
     /**
      * Parses a single `musicResponsiveListItemRenderer` into a [YtDlpSearchResult].
@@ -206,9 +277,13 @@ class InnerTubeSearchExecutor @Inject constructor(
         // First text in flexColumns[1] is the result type: "Song", "Video", "Album", etc.
         val resultType = allArtistTexts.firstOrNull() ?: ""
         val isSongType = resultType.equals("Song", ignoreCase = true)
+        // Podcast episodes carry a videoId too; they're never the song.
+        if (resultType in NON_TRACK_TYPES) return null
 
         val artist = allArtistTexts
             .filterNot { it == " & " || it == ", " || it == " • " || it == " x " || it == " · " || it == "Song" || it == "Video" || it == "Album" || it == "EP" || it == "Single" }
+            // The 2026 layout puts "7.7M views" / the duration in this column too.
+            .filterNot { it.isCountOrDuration() }
             .joinToString(", ")
 
         // Extract album from flexColumns[2] (if present).

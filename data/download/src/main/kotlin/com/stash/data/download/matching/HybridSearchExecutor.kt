@@ -1,6 +1,7 @@
 package com.stash.data.download.matching
 
 import android.util.Log
+import kotlinx.coroutines.sync.withPermit
 import com.stash.data.download.ytdlp.YtDlpSearchResult
 import javax.inject.Inject
 import javax.inject.Singleton
@@ -28,7 +29,13 @@ class HybridSearchExecutor @Inject constructor(
 ) {
     companion object {
         private const val TAG = "HybridSearch"
+
+        /** yt-dlp searches at once; each is a Python process competing with downloads for CPU. */
+        internal const val MAX_YTDLP_SEARCHES = 2
     }
+
+    /** Caps concurrent yt-dlp searches (see [MAX_YTDLP_SEARCHES]). */
+    private val ytDlpSearchGate = kotlinx.coroutines.sync.Semaphore(MAX_YTDLP_SEARCHES)
 
     /**
      * Verifies a video ID via the InnerTube player endpoint.
@@ -45,7 +52,9 @@ class HybridSearchExecutor @Inject constructor(
      */
     suspend fun searchYtDlpDirect(query: String, maxResults: Int = 5): List<YtDlpSearchResult> {
         return try {
-            ytDlpSearch.search(query, maxResults)
+            ytDlpSearchGate.withPermit { ytDlpSearch.search(query, maxResults) }
+        } catch (e: kotlinx.coroutines.CancellationException) {
+            throw e
         } catch (e: Exception) {
             Log.w(TAG, "yt-dlp direct search failed", e)
             emptyList()
@@ -62,7 +71,11 @@ class HybridSearchExecutor @Inject constructor(
      * @param maxResults Maximum number of results to return.
      * @return List of search results.
      */
-    suspend fun search(query: String, maxResults: Int = 10): List<YtDlpSearchResult> {
+    suspend fun search(
+        query: String,
+        maxResults: Int = 10,
+        allowYtDlpFallback: Boolean = true,
+    ): List<YtDlpSearchResult> {
         // Fast path: InnerTube (~0.2s)
         val innerTubeResults = innerTubeSearch.search(query, maxResults)
 
@@ -71,13 +84,12 @@ class HybridSearchExecutor @Inject constructor(
             return innerTubeResults
         }
 
+        // Callers that try several query variants pass false and run one
+        // yt-dlp search at the end instead of one per variant.
+        if (!allowYtDlpFallback) return emptyList()
+
         // Slow fallback: yt-dlp only when InnerTube returns nothing
         Log.d(TAG, "InnerTube empty, falling back to yt-dlp for: $query")
-        return try {
-            ytDlpSearch.search(query, maxResults = 5)
-        } catch (e: Exception) {
-            Log.w(TAG, "yt-dlp search failed", e)
-            emptyList()
-        }
+        return searchYtDlpDirect(query, maxResults = 5)
     }
 }
