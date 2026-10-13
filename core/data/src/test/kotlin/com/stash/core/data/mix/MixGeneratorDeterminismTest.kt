@@ -51,6 +51,7 @@ class MixGeneratorDeterminismTest {
         coEvery { listeningEventDao.getPlayCountsSinceWithLatest(any()) } returns emptyList()
         coEvery { listeningEventDao.getTrackIdsPlayedSince(any()) } returns emptyList()
         coEvery { trackTagDao.getByTrack(any()) } returns emptyList()
+        coEvery { trackTagDao.getByTracks(any()) } returns emptyList()
     }
 
     @Test fun `generate yields identical ordering across calls for the same recipe and day`() = runTest {

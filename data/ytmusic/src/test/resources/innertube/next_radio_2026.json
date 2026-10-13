@@ -1,0 +1,776 @@
+{
+ "contents": {
+  "singleColumnMusicWatchNextResultsRenderer": {
+   "tabbedRenderer": {
+    "watchNextTabbedResultsRenderer": {
+     "tabs": [
+      {
+       "tabRenderer": {
+        "content": {
+         "musicQueueRenderer": {
+          "content": {
+           "playlistPanelRenderer": {
+            "contents": [
+             {
+              "playlistPanelVideoRenderer": {
+               "title": {
+                "runs": [
+                 {
+                  "text": "Dua Lipa - Levitating Featuring DaBaby (Official Music Video)"
+                 }
+                ]
+               },
+               "longBylineText": {
+                "runs": [
+                 {
+                  "text": "Dua Lipa"
+                 },
+                 {
+                  "text": " • "
+                 },
+                 {
+                  "text": "1.1B views"
+                 },
+                 {
+                  "text": " • "
+                 },
+                 {
+                  "text": "8.8M likes"
+                 }
+                ]
+               },
+               "lengthText": {
+                "runs": [
+                 {
+                  "text": "3:51"
+                 }
+                ]
+               },
+               "videoId": "TUVcZfQe-Kw",
+               "navigationEndpoint": {
+                "watchEndpoint": {
+                 "videoId": "TUVcZfQe-Kw",
+                 "playlistId": "RDAMVMTUVcZfQe-Kw",
+                 "watchEndpointMusicSupportedConfigs": {
+                  "watchEndpointMusicConfig": {
+                   "hasPersistentPlaylistPanel": true,
+                   "musicVideoType": "MUSIC_VIDEO_TYPE_UGC"
+                  }
+                 }
+                }
+               }
+              }
+             },
+             {
+              "playlistPanelVideoRenderer": {
+               "title": {
+                "runs": [
+                 {
+                  "text": "Dua Lipa - New Rules (Official Music Video)"
+                 }
+                ]
+               },
+               "longBylineText": {
+                "runs": [
+                 {
+                  "text": "Dua Lipa"
+                 },
+                 {
+                  "text": " • "
+                 },
+                 {
+                  "text": "3.3B views"
+                 },
+                 {
+                  "text": " • "
+                 },
+                 {
+                  "text": "18M likes"
+                 }
+                ]
+               },
+               "lengthText": {
+                "runs": [
+                 {
+                  "text": "3:45"
+                 }
+                ]
+               },
+               "videoId": "k2qgadSvNyU",
+               "navigationEndpoint": {
+                "watchEndpoint": {
+                 "videoId": "k2qgadSvNyU",
+                 "playlistId": "RDAMVMTUVcZfQe-Kw",
+                 "watchEndpointMusicSupportedConfigs": {
+                  "watchEndpointMusicConfig": {
+                   "hasPersistentPlaylistPanel": true,
+                   "musicVideoType": "MUSIC_VIDEO_TYPE_UGC"
+                  }
+                 }
+                }
+               }
+              }
+             },
+             {
+              "playlistPanelVideoRenderer": {
+               "title": {
+                "runs": [
+                 {
+                  "text": "Major Lazer & DJ Snake - Lean On (feat. MØ) [Official 4K Music Video]"
+                 }
+                ]
+               },
+               "longBylineText": {
+                "runs": [
+                 {
+                  "text": "Major Lazer Official"
+                 },
+                 {
+                  "text": " • "
+                 },
+                 {
+                  "text": "3.9B views"
+                 },
+                 {
+                  "text": " • "
+                 },
+                 {
+                  "text": "18M likes"
+                 }
+                ]
+               },
+               "lengthText": {
+                "runs": [
+                 {
+                  "text": "2:59"
+                 }
+                ]
+               },
+               "videoId": "YqeW9_5kURI",
+               "navigationEndpoint": {
+                "watchEndpoint": {
+                 "videoId": "YqeW9_5kURI",
+                 "playlistId": "RDAMVMTUVcZfQe-Kw",
+                 "watchEndpointMusicSupportedConfigs": {
+                  "watchEndpointMusicConfig": {
+                   "hasPersistentPlaylistPanel": true,
+                   "musicVideoType": "MUSIC_VIDEO_TYPE_UGC"
+                  }
+                 }
+                }
+               }
+              }
+             },
+             {
+              "playlistPanelVideoRenderer": {
+               "title": {
+                "runs": [
+                 {
+                  "text": "Coldplay - Hymn For The Weekend (Official Video)"
+                 }
+                ]
+               },
+               "longBylineText": {
+                "runs": [
+                 {
+                  "text": "Coldplay"
+                 },
+                 {
+                  "text": " • "
+                 },
+                 {
+                  "text": "2.2B views"
+                 },
+                 {
+                  "text": " • "
+                 },
+                 {
+                  "text": "16M likes"
+                 }
+                ]
+               },
+               "lengthText": {
+                "runs": [
+                 {
+                  "text": "4:21"
+                 }
+                ]
+               },
+               "videoId": "YykjpeuMNEk",
+               "navigationEndpoint": {
+                "watchEndpoint": {
+                 "videoId": "YykjpeuMNEk",
+                 "playlistId": "RDAMVMTUVcZfQe-Kw",
+                 "watchEndpointMusicSupportedConfigs": {
+                  "watchEndpointMusicConfig": {
+                   "hasPersistentPlaylistPanel": true,
+                   "musicVideoType": "MUSIC_VIDEO_TYPE_UGC"
+                  }
+                 }
+                }
+               }
+              }
+             },
+             {
+              "playlistPanelVideoRenderer": {
+               "title": {
+                "runs": [
+                 {
+                  "text": "BTS (방탄소년단) 'Dynamite' Official MV"
+                 }
+                ]
+               },
+               "longBylineText": {
+                "runs": [
+                 {
+                  "text": "HYBE LABELS"
+                 },
+                 {
+                  "text": " • "
+                 },
+                 {
+                  "text": "2.1B views"
+                 },
+                 {
+                  "text": " • "
+                 },
+                 {
+                  "text": "39M likes"
+                 }
+                ]
+               },
+               "lengthText": {
+                "runs": [
+                 {
+                  "text": "3:44"
+                 }
+                ]
+               },
+               "videoId": "gdZLi9oWNZg",
+               "navigationEndpoint": {
+                "watchEndpoint": {
+                 "videoId": "gdZLi9oWNZg",
+                 "playlistId": "RDAMVMTUVcZfQe-Kw",
+                 "watchEndpointMusicSupportedConfigs": {
+                  "watchEndpointMusicConfig": {
+                   "hasPersistentPlaylistPanel": true,
+                   "musicVideoType": "MUSIC_VIDEO_TYPE_UGC"
+                  }
+                 }
+                }
+               }
+              }
+             },
+             {
+              "playlistPanelVideoRenderer": {
+               "title": {
+                "runs": [
+                 {
+                  "text": "Dua Lipa - Don't Start Now (Official Music Video)"
+                 }
+                ]
+               },
+               "longBylineText": {
+                "runs": [
+                 {
+                  "text": "Dua Lipa"
+                 },
+                 {
+                  "text": " • "
+                 },
+                 {
+                  "text": "779M views"
+                 },
+                 {
+                  "text": " • "
+                 },
+                 {
+                  "text": "7.3M likes"
+                 }
+                ]
+               },
+               "lengthText": {
+                "runs": [
+                 {
+                  "text": "3:02"
+                 }
+                ]
+               },
+               "videoId": "oygrmJFKYZY",
+               "navigationEndpoint": {
+                "watchEndpoint": {
+                 "videoId": "oygrmJFKYZY",
+                 "playlistId": "RDAMVMTUVcZfQe-Kw",
+                 "watchEndpointMusicSupportedConfigs": {
+                  "watchEndpointMusicConfig": {
+                   "hasPersistentPlaylistPanel": true,
+                   "musicVideoType": "MUSIC_VIDEO_TYPE_UGC"
+                  }
+                 }
+                }
+               }
+              }
+             },
+             {
+              "playlistPanelVideoRenderer": {
+               "title": {
+                "runs": [
+                 {
+                  "text": "Charlie Puth - We Don't Talk Anymore (feat. Selena Gomez) [Official Video]"
+                 }
+                ]
+               },
+               "longBylineText": {
+                "runs": [
+                 {
+                  "text": "Charlie Puth"
+                 },
+                 {
+                  "text": " • "
+                 },
+                 {
+                  "text": "3.6B views"
+                 },
+                 {
+                  "text": " • "
+                 },
+                 {
+                  "text": "16M likes"
+                 }
+                ]
+               },
+               "lengthText": {
+                "runs": [
+                 {
+                  "text": "3:51"
+                 }
+                ]
+               },
+               "videoId": "3AtDnEC4zak",
+               "navigationEndpoint": {
+                "watchEndpoint": {
+                 "videoId": "3AtDnEC4zak",
+                 "playlistId": "RDAMVMTUVcZfQe-Kw",
+                 "watchEndpointMusicSupportedConfigs": {
+                  "watchEndpointMusicConfig": {
+                   "hasPersistentPlaylistPanel": true,
+                   "musicVideoType": "MUSIC_VIDEO_TYPE_UGC"
+                  }
+                 }
+                }
+               }
+              }
+             },
+             {
+              "playlistPanelVideoRenderer": {
+               "title": {
+                "runs": [
+                 {
+                  "text": "RAYE - WHERE IS MY HUSBAND! (Official Music Video)"
+                 }
+                ]
+               },
+               "longBylineText": {
+                "runs": [
+                 {
+                  "text": "RAYE"
+                 },
+                 {
+                  "text": " • "
+                 },
+                 {
+                  "text": "166M views"
+                 },
+                 {
+                  "text": " • "
+                 },
+                 {
+                  "text": "1.6M likes"
+                 }
+                ]
+               },
+               "lengthText": {
+                "runs": [
+                 {
+                  "text": "3:18"
+                 }
+                ]
+               },
+               "videoId": "rK5TyISxZ_M",
+               "navigationEndpoint": {
+                "watchEndpoint": {
+                 "videoId": "rK5TyISxZ_M",
+                 "playlistId": "RDAMVMTUVcZfQe-Kw",
+                 "watchEndpointMusicSupportedConfigs": {
+                  "watchEndpointMusicConfig": {
+                   "hasPersistentPlaylistPanel": true,
+                   "musicVideoType": "MUSIC_VIDEO_TYPE_UGC"
+                  }
+                 }
+                }
+               }
+              }
+             },
+             {
+              "playlistPanelVideoRenderer": {
+               "title": {
+                "runs": [
+                 {
+                  "text": "Ava Max - Kings & Queens [Official Music Video]"
+                 }
+                ]
+               },
+               "longBylineText": {
+                "runs": [
+                 {
+                  "text": "Ava Max"
+                 },
+                 {
+                  "text": " • "
+                 },
+                 {
+                  "text": "526M views"
+                 },
+                 {
+                  "text": " • "
+                 },
+                 {
+                  "text": "4.4M likes"
+                 }
+                ]
+               },
+               "lengthText": {
+                "runs": [
+                 {
+                  "text": "2:43"
+                 }
+                ]
+               },
+               "videoId": "jH1RNk8954Q",
+               "navigationEndpoint": {
+                "watchEndpoint": {
+                 "videoId": "jH1RNk8954Q",
+                 "playlistId": "RDAMVMTUVcZfQe-Kw",
+                 "watchEndpointMusicSupportedConfigs": {
+                  "watchEndpointMusicConfig": {
+                   "hasPersistentPlaylistPanel": true,
+                   "musicVideoType": "MUSIC_VIDEO_TYPE_UGC"
+                  }
+                 }
+                }
+               }
+              }
+             },
+             {
+              "playlistPanelVideoRenderer": {
+               "title": {
+                "runs": [
+                 {
+                  "text": "Dua Lipa - Break My Heart (Official Video)"
+                 }
+                ]
+               },
+               "longBylineText": {
+                "runs": [
+                 {
+                  "text": "Dua Lipa"
+                 },
+                 {
+                  "text": " • "
+                 },
+                 {
+                  "text": "694M views"
+                 },
+                 {
+                  "text": " • "
+                 },
+                 {
+                  "text": "5.8M likes"
+                 }
+                ]
+               },
+               "lengthText": {
+                "runs": [
+                 {
+                  "text": "3:50"
+                 }
+                ]
+               },
+               "videoId": "Nj2U6rhnucI",
+               "navigationEndpoint": {
+                "watchEndpoint": {
+                 "videoId": "Nj2U6rhnucI",
+                 "playlistId": "RDAMVMTUVcZfQe-Kw",
+                 "watchEndpointMusicSupportedConfigs": {
+                  "watchEndpointMusicConfig": {
+                   "hasPersistentPlaylistPanel": true,
+                   "musicVideoType": "MUSIC_VIDEO_TYPE_UGC"
+                  }
+                 }
+                }
+               }
+              }
+             },
+             {
+              "playlistPanelVideoRenderer": {
+               "title": {
+                "runs": [
+                 {
+                  "text": "Taylor Swift - Shake It Off"
+                 }
+                ]
+               },
+               "longBylineText": {
+                "runs": [
+                 {
+                  "text": "Taylor Swift"
+                 },
+                 {
+                  "text": " • "
+                 },
+                 {
+                  "text": "3.7B views"
+                 },
+                 {
+                  "text": " • "
+                 },
+                 {
+                  "text": "14M likes"
+                 }
+                ]
+               },
+               "lengthText": {
+                "runs": [
+                 {
+                  "text": "4:02"
+                 }
+                ]
+               },
+               "videoId": "nfWlot6h_JM",
+               "navigationEndpoint": {
+                "watchEndpoint": {
+                 "videoId": "nfWlot6h_JM",
+                 "playlistId": "RDAMVMTUVcZfQe-Kw",
+                 "watchEndpointMusicSupportedConfigs": {
+                  "watchEndpointMusicConfig": {
+                   "hasPersistentPlaylistPanel": true,
+                   "musicVideoType": "MUSIC_VIDEO_TYPE_UGC"
+                  }
+                 }
+                }
+               }
+              }
+             },
+             {
+              "playlistPanelVideoRenderer": {
+               "title": {
+                "runs": [
+                 {
+                  "text": "Bruno Mars - I Just Might [Official Music Video]"
+                 }
+                ]
+               },
+               "longBylineText": {
+                "runs": [
+                 {
+                  "text": "Bruno Mars"
+                 },
+                 {
+                  "text": " • "
+                 },
+                 {
+                  "text": "175M views"
+                 },
+                 {
+                  "text": " • "
+                 },
+                 {
+                  "text": "1.8M likes"
+                 }
+                ]
+               },
+               "lengthText": {
+                "runs": [
+                 {
+                  "text": "3:33"
+                 }
+                ]
+               },
+               "videoId": "mrV8kK5t0V8",
+               "navigationEndpoint": {
+                "watchEndpoint": {
+                 "videoId": "mrV8kK5t0V8",
+                 "playlistId": "RDAMVMTUVcZfQe-Kw",
+                 "watchEndpointMusicSupportedConfigs": {
+                  "watchEndpointMusicConfig": {
+                   "hasPersistentPlaylistPanel": true,
+                   "musicVideoType": "MUSIC_VIDEO_TYPE_UGC"
+                  }
+                 }
+                }
+               }
+              }
+             },
+             {
+              "playlistPanelVideoRenderer": {
+               "title": {
+                "runs": [
+                 {
+                  "text": "Ed Sheeran - Shape of You (Official Music Video)"
+                 }
+                ]
+               },
+               "longBylineText": {
+                "runs": [
+                 {
+                  "text": "Ed Sheeran"
+                 },
+                 {
+                  "text": " • "
+                 },
+                 {
+                  "text": "6.8B views"
+                 },
+                 {
+                  "text": " • "
+                 },
+                 {
+                  "text": "35M likes"
+                 }
+                ]
+               },
+               "lengthText": {
+                "runs": [
+                 {
+                  "text": "4:24"
+                 }
+                ]
+               },
+               "videoId": "JGwWNGJdvx8",
+               "navigationEndpoint": {
+                "watchEndpoint": {
+                 "videoId": "JGwWNGJdvx8",
+                 "playlistId": "RDAMVMTUVcZfQe-Kw",
+                 "watchEndpointMusicSupportedConfigs": {
+                  "watchEndpointMusicConfig": {
+                   "hasPersistentPlaylistPanel": true,
+                   "musicVideoType": "MUSIC_VIDEO_TYPE_UGC"
+                  }
+                 }
+                }
+               }
+              }
+             },
+             {
+              "playlistPanelVideoRenderer": {
+               "title": {
+                "runs": [
+                 {
+                  "text": "Dua Lipa - Love Again (Official Music Video)"
+                 }
+                ]
+               },
+               "longBylineText": {
+                "runs": [
+                 {
+                  "text": "Dua Lipa"
+                 },
+                 {
+                  "text": " • "
+                 },
+                 {
+                  "text": "432M views"
+                 },
+                 {
+                  "text": " • "
+                 },
+                 {
+                  "text": "2.8M likes"
+                 }
+                ]
+               },
+               "lengthText": {
+                "runs": [
+                 {
+                  "text": "4:23"
+                 }
+                ]
+               },
+               "videoId": "BC19kwABFwc",
+               "navigationEndpoint": {
+                "watchEndpoint": {
+                 "videoId": "BC19kwABFwc",
+                 "playlistId": "RDAMVMTUVcZfQe-Kw",
+                 "watchEndpointMusicSupportedConfigs": {
+                  "watchEndpointMusicConfig": {
+                   "hasPersistentPlaylistPanel": true,
+                   "musicVideoType": "MUSIC_VIDEO_TYPE_UGC"
+                  }
+                 }
+                }
+               }
+              }
+             },
+             {
+              "playlistPanelVideoRenderer": {
+               "title": {
+                "runs": [
+                 {
+                  "text": "David Guetta, Bebe Rexha & J Balvin - Say My Name (Official Video)"
+                 }
+                ]
+               },
+               "longBylineText": {
+                "runs": [
+                 {
+                  "text": "David Guetta"
+                 },
+                 {
+                  "text": " • "
+                 },
+                 {
+                  "text": "1.2B views"
+                 },
+                 {
+                  "text": " • "
+                 },
+                 {
+                  "text": "6.6M likes"
+                 }
+                ]
+               },
+               "lengthText": {
+                "runs": [
+                 {
+                  "text": "3:31"
+                 }
+                ]
+               },
+               "videoId": "ft4jcPSLJfY",
+               "navigationEndpoint": {
+                "watchEndpoint": {
+                 "videoId": "ft4jcPSLJfY",
+                 "playlistId": "RDAMVMTUVcZfQe-Kw",
+                 "watchEndpointMusicSupportedConfigs": {
+                  "watchEndpointMusicConfig": {
+                   "hasPersistentPlaylistPanel": true,
+                   "musicVideoType": "MUSIC_VIDEO_TYPE_UGC"
+                  }
+                 }
+                }
+               }
+              }
+             }
+            ]
+           }
+          }
+         }
+        }
+       }
+      }
+     ]
+    }
+   }
+  }
+ }
+}

@@ -130,7 +130,7 @@ class DownloadManagerDeferTest {
         // Deferred. Stub all search paths to return empty so resolveUrl
         // hits its "all strategies failed" exit.
         coEvery { albumMatchExecutor.findTrackInAlbum(any(), any(), any(), any()) } returns null
-        coEvery { searchExecutor.search(any(), any()) } returns emptyList()
+        coEvery { searchExecutor.search(any(), any(), any()) } returns emptyList()
         coEvery { searchExecutor.searchYtDlpDirect(any(), any()) } returns emptyList()
 
         val result = newSubject().downloadTrack(track = stubTrack(), preResolvedUrl = null)
@@ -201,7 +201,7 @@ class DownloadManagerDeferTest {
         coEvery { losslessRegistry.resolve(any()) } returns null
         coEvery { playlistDao.isTrackInStashMix(any()) } returns true  // forceLossless = true
         coEvery { albumMatchExecutor.findTrackInAlbum(any(), any(), any(), any()) } returns null
-        coEvery { searchExecutor.search(any(), any()) } returns emptyList()
+        coEvery { searchExecutor.search(any(), any(), any()) } returns emptyList()
         coEvery { searchExecutor.searchYtDlpDirect(any(), any()) } returns emptyList()
 
         val result = newSubject().downloadTrack(track = stubTrack(), preResolvedUrl = null)

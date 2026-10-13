@@ -8,6 +8,7 @@ import androidx.sqlite.db.SupportSQLiteDatabase
 import com.stash.core.data.db.converter.Converters
 import com.stash.core.data.db.dao.ArtistProfileCacheDao
 import com.stash.core.data.db.dao.AudioFeaturesDao
+import com.stash.core.data.db.dao.DiscoveryFeedbackDao
 import com.stash.core.data.db.dao.DiscoveryQueueDao
 import com.stash.core.data.db.dao.DownloadQueueDao
 import com.stash.core.data.db.dao.LastFmCacheDao
@@ -25,6 +26,7 @@ import com.stash.core.data.db.dao.TrackSkipEventDao
 import com.stash.core.data.db.dao.TrackTagDao
 import com.stash.core.data.db.entity.ArtistProfileCacheEntity
 import com.stash.core.data.db.entity.AudioFeaturesEntity
+import com.stash.core.data.db.entity.DiscoveryFeedbackEntity
 import com.stash.core.data.db.entity.DiscoveryQueueEntity
 import com.stash.core.data.db.entity.DownloadQueueEntity
 import com.stash.core.data.db.entity.LastFmCacheEntity
@@ -81,8 +83,9 @@ import com.stash.core.data.db.entity.TrackTagEntity
         LastFmCacheEntity::class,
         SpotifyResolutionEntity::class,
         AudioFeaturesEntity::class,
+        DiscoveryFeedbackEntity::class,
     ],
-    version = 34,
+    version = 35,
     exportSchema = true,
 )
 @TypeConverters(Converters::class)
@@ -121,6 +124,8 @@ abstract class StashDatabase : RoomDatabase() {
     abstract fun spotifyResolutionDao(): SpotifyResolutionDao
 
     abstract fun audioFeaturesDao(): AudioFeaturesDao
+    abstract fun discoveryFeedbackDao(): DiscoveryFeedbackDao
+    abstract fun statsDao(): com.stash.core.data.db.dao.StatsDao
 
 
     companion object {
@@ -898,6 +903,31 @@ abstract class StashDatabase : RoomDatabase() {
                 )
                 db.execSQL(
                     "CREATE INDEX IF NOT EXISTS `index_audio_features_track_id` ON `audio_features` (`track_id`)",
+                )
+            }
+        }
+
+        /**
+         * v34 → v35: real listening depth. `listening_events` gains
+         * `listened_ms` / `duration_ms` (NULL for older rows), and
+         * `discovery_feedback` keeps how suggested new songs were received
+         * across sessions. Additive; nothing to backfill.
+         */
+        val MIGRATION_34_35 = object : Migration(34, 35) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL("ALTER TABLE `listening_events` ADD COLUMN `listened_ms` INTEGER")
+                db.execSQL("ALTER TABLE `listening_events` ADD COLUMN `duration_ms` INTEGER")
+                db.execSQL(
+                    "CREATE TABLE IF NOT EXISTS `discovery_feedback` (" +
+                        "`id` INTEGER PRIMARY KEY AUTOINCREMENT NOT NULL, " +
+                        "`canonical_key` TEXT NOT NULL, `artist_key` TEXT NOT NULL, " +
+                        "`outcome` TEXT NOT NULL, `at` INTEGER NOT NULL)",
+                )
+                db.execSQL(
+                    "CREATE INDEX IF NOT EXISTS `index_discovery_feedback_artist_key` ON `discovery_feedback` (`artist_key`)",
+                )
+                db.execSQL(
+                    "CREATE INDEX IF NOT EXISTS `index_discovery_feedback_at` ON `discovery_feedback` (`at`)",
                 )
             }
         }

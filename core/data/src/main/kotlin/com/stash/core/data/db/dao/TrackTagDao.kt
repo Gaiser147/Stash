@@ -40,6 +40,10 @@ interface TrackTagDao {
     @Query("SELECT * FROM track_tags WHERE track_id = :trackId")
     suspend fun getByTrack(trackId: Long): List<TrackTagEntity>
 
+    /** Tags for many tracks in one query; callers chunk below SQLite's variable limit. */
+    @Query("SELECT * FROM track_tags WHERE track_id IN (:trackIds)")
+    suspend fun getByTracks(trackIds: List<Long>): List<TrackTagEntity>
+
     /**
      * Tracks whose title+artist canonical identity matches any of the
      * supplied tags, ordered by the *sum of weights* per track. Used by

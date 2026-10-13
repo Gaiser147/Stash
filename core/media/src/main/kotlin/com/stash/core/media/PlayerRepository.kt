@@ -189,7 +189,46 @@ interface PlayerRepository {
      * and starts it. Autoplay continues it when it runs out.
      * Returns false when there was nothing to build a mix from.
      */
-    suspend fun startPersonalMix(): Boolean
+    suspend fun startPersonalMix(): Boolean = startPersonalMix(null)
+
+    /**
+     * "Mix für mich" for a wish (mood, pace, genres, artists, share of new
+     * songs). Autoplay keeps that wish when the mix runs out. Null = the
+     * plain personal mix.
+     */
+    suspend fun startPersonalMix(request: com.stash.core.data.autoplay.MixRequest?): Boolean = false
+
+    /** Library artists, most songs first — the mix wish's artist picker and text matching. */
+    suspend fun libraryArtists(limit: Int = 3000): List<String> = emptyList()
+
+    /**
+     * A queue someone else installed on the player — Android Auto browsing,
+     * voice search — becomes this repository's queue: radio/library shuffle
+     * end and autoplay is armed for it, exactly as if [setQueue] had been
+     * called in the app. Call AFTER the queue reached the player.
+     *
+     * @param personalMix the queue is a generated "Mix für mich".
+     */
+    fun adoptExternalQueue(
+        tracks: List<Track>,
+        personalMix: Boolean = false,
+        request: com.stash.core.data.autoplay.MixRequest? = null,
+    )
+
+    /**
+     * The player items for [tracks], built exactly as [setQueue] builds them
+     * (local file when present, else a just-in-time stream placeholder), for
+     * callers that hand a queue to the player themselves (Android Auto).
+     */
+    suspend fun queueItemsFor(tracks: List<Track>): List<MediaItem>
+
+    /**
+     * "More like this": replaces everything after the current song with songs
+     * that follow it well (autoplay seeded by the current song alone) and
+     * keeps autoplay going from there. The current song keeps playing.
+     * Returns false when there's no current song or nothing to add.
+     */
+    suspend fun moreLikeThis(): Boolean
 
     /** True while the current queue is a generated "Mix für mich". */
     val personalMixActive: StateFlow<Boolean>

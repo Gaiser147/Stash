@@ -273,6 +273,7 @@ dependencies {
     implementation(project(":feature:settings"))
     implementation(project(":feature:search"))
     implementation(project(":feature:muse"))
+    implementation(project(":feature:stats"))
     implementation(project(":data:download"))
     // data:ytmusic provides AlbumSummary, used by SearchScreen/ArtistProfileScreen
     // callback signatures that StashNavHost wires up for Album Discovery.

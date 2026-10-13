@@ -11,6 +11,7 @@ import androidx.work.WorkerParameters
 import androidx.work.workDataOf
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.supervisorScope
+import kotlinx.coroutines.sync.Semaphore
 import java.util.concurrent.atomic.AtomicInteger
 import java.util.concurrent.atomic.AtomicLong
 import java.util.concurrent.atomic.AtomicReference
@@ -62,6 +63,12 @@ class TrackDownloadWorker @AssistedInject constructor(
 ) : CoroutineWorker(appContext, params) {
 
     companion object {
+        /**
+         * Songs admitted to the downloader at once; matches its in-flight
+         * limit, so a song is marked IN_PROGRESS when it really starts.
+         */
+        private const val MAX_ADMITTED = 16
+
         const val KEY_SYNC_ID = "sync_id"
         const val KEY_DOWNLOADED = "downloaded"
         const val KEY_FAILED = "failed"
@@ -273,9 +280,15 @@ class TrackDownloadWorker @AssistedInject constructor(
             val firstError = AtomicReference<String?>(null)
             val playlistsChecked = inputData.getInt(DiffWorker.KEY_PLAYLISTS_CHECKED, 0)
 
+            val admission = Semaphore(MAX_ADMITTED)
             supervisorScope {
                 for (queueItem in pendingItems) {
                     launch {
+                        // Mark a song IN_PROGRESS only once it is actually admitted:
+                        // all songs are launched at once, so marking them on
+                        // launch showed (and, on a cancel, left) every queued
+                        // song "in progress".
+                        admission.acquire()
                         try {
                             downloadQueueDao.updateStatus(
                                 id = queueItem.id,
@@ -542,6 +555,8 @@ class TrackDownloadWorker @AssistedInject constructor(
                                     "Interrupted (type=$type), keeping queue ${queueItem.id} PENDING for next sync: ${truncated?.take(120)}",
                                 )
                             }
+                        } finally {
+                            admission.release()
                         }
 
                         // Update progress notification after each completed track.

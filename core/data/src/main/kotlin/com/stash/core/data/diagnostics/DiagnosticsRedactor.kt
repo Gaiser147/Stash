@@ -19,6 +19,9 @@ object DiagnosticsRedactor {
         // Authorization / Bearer headers. Bearer first so its long token value is
         // scrubbed before the header catch-all collapses "Authorization: Bearer".
         Regex("""(?i)\bbearer\s+[A-Za-z0-9._\-]+""") to "Bearer [REDACTED]",
+        // Subsonic/Navidrome auth rides in the query string: t = md5(password +
+        // salt) and s = salt together log in, p is the password itself.
+        Regex("""([?&](?:t|s|p)=)[^&\s"']+""") to "$1[REDACTED]",
         Regex("""(?i)\bauthorization:\s*\S+""") to "Authorization: [REDACTED]",
         // Named token / key fields.
         Regex("""(?i)\b(access_token|refresh_token|id_token|api_key|apikey|client_secret)["']?\s*[:=]\s*["']?[A-Za-z0-9._\-]+["']?""")

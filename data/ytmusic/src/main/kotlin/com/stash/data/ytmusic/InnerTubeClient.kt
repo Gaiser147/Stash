@@ -247,11 +247,15 @@ class InnerTubeClient @Inject constructor(
      * @param videoId The YouTube video ID.
      * @return The parsed JSON response, or null on failure.
      */
-    suspend fun next(videoId: String): JsonObject? = withContext(Dispatchers.IO) {
+    suspend fun next(videoId: String, playlistId: String? = null): JsonObject? = withContext(Dispatchers.IO) {
         val variant = InnerTubeVariant.WEB_REMIX
         val body = buildJsonObject {
             put("context", buildContext(variant))
             put("videoId", videoId)
+            if (playlistId != null) {
+                put("playlistId", playlistId)
+                put("isAudioOnly", true)
+            }
         }
         executeRequest("$BASE_URL/next", body, null, variant)
     }
@@ -314,6 +318,19 @@ class InnerTubeClient @Inject constructor(
             if (params != null) put("params", params)
         }
         executeRequest("$BASE_URL/search", body, cookie, variant)
+    }
+
+    /** True when a search response has any list rows (classic shelves or the 2026 item sections). */
+    internal fun hasResultRows(response: JsonObject): Boolean {
+        val sections = response["contents"]?.jsonObject?.get("tabbedSearchResultsRenderer")
+            ?.jsonObject?.get("tabs")?.jsonArray?.firstOrNull()?.jsonObject?.get("tabRenderer")
+            ?.jsonObject?.get("content")?.jsonObject?.get("sectionListRenderer")
+            ?.jsonObject?.get("contents")?.jsonArray ?: return false
+        return sections.any { section ->
+            val obj = section.jsonObject
+            val container = obj["musicShelfRenderer"]?.jsonObject ?: obj["itemSectionRenderer"]?.jsonObject
+            container?.get("contents")?.jsonArray?.any { it.jsonObject.containsKey("musicResponsiveListItemRenderer") } == true
+        }
     }
 
     /** ytmusicapi-derived filter selector that constrains search results to the
@@ -517,7 +534,12 @@ class InnerTubeClient @Inject constructor(
     suspend fun searchCanonicalMatch(artist: String, title: String): CanonicalMatch? =
         withContext(Dispatchers.IO) {
             val query = "$artist $title"
-            val response = search(query, params = songsFilterParams) ?: return@withContext null
+            val filtered = search(query, params = songsFilterParams) ?: return@withContext null
+            // Since October 2026 the Songs filter can come back as a bare
+            // "no results" message; the unfiltered search still has the rows
+            // (as itemSectionRenderer sections), and the ATV/OMV check below
+            // keeps only songs.
+            val response = if (hasResultRows(filtered)) filtered else search(query) ?: return@withContext null
 
             // Walk the Songs shelf(ves) inside the search response. Each row is a
             // musicResponsiveListItemRenderer; we extract videoId and musicVideoType
@@ -538,7 +560,9 @@ class InnerTubeClient @Inject constructor(
 
             for (shelf in shelves) {
                 val shelfObj = shelf.jsonObject
-                val renderer = shelfObj["musicShelfRenderer"]?.jsonObject ?: continue
+                val renderer = shelfObj["musicShelfRenderer"]?.jsonObject
+                    ?: shelfObj["itemSectionRenderer"]?.jsonObject
+                    ?: continue
                 // Only process the Songs shelf (skip Artists, Albums, etc.)
                 val shelfTitle = renderer["title"]?.jsonObject
                     ?.get("runs")?.jsonArray

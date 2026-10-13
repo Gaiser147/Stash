@@ -17,6 +17,7 @@ import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.distinctUntilChangedBy
 import kotlinx.coroutines.launch
 import java.util.concurrent.atomic.AtomicBoolean
+import java.util.concurrent.atomic.AtomicLong
 import javax.inject.Inject
 import javax.inject.Singleton
 
@@ -80,6 +81,10 @@ class ListeningRecorder @VisibleForTesting internal constructor(
         val job: Job,
         val firedFlag: AtomicBoolean,
         val positionAtScheduleMs: Long,
+        /** Row id of the inserted listening event; -1 until it fires. */
+        val eventId: AtomicLong = AtomicLong(-1L),
+        /** Furthest position reached in this play (v35 `listened_ms`). */
+        val maxPositionMs: AtomicLong = AtomicLong(positionAtScheduleMs),
     )
 
     private var pending: PendingFire? = null
@@ -103,9 +108,14 @@ class ListeningRecorder @VisibleForTesting internal constructor(
                     val previousPending = pending
                     if (previousPending != null) {
                         previousPending.job.cancel()
-                        if (!previousPending.firedFlag.get()) {
+                        if (previousPending.firedFlag.get()) {
+                            recordListenedDepth(previousPending)
+                        } else {
                             val skipAt = System.currentTimeMillis()
-                            val position = previousPending.positionAtScheduleMs
+                            // Where the listener actually left the track —
+                            // not where the countdown started (≈0), which
+                            // made every skip look like an instant one.
+                            val position = previousPending.maxPositionMs.get()
                             // Inline (rather than `scope.launch { ... }`) so
                             // the suspend insert completes within the collect
                             // tick — keeps the skip ordered with respect to
@@ -153,6 +163,9 @@ class ListeningRecorder @VisibleForTesting internal constructor(
                         return@collect
                     }
 
+                    pending?.takeIf { it.trackId == track.id }?.maxPositionMs
+                        ?.accumulateAndGet(positionMs, ::maxOf)
+
                     val isRepeatOne = state.repeatMode == RepeatMode.ONE
                     // Require near-zero landing position (< 5s) to distinguish
                     // a genuine loop restart from a user scrubbing backwards.
@@ -161,7 +174,13 @@ class ListeningRecorder @VisibleForTesting internal constructor(
 
                     if (isRepeatOne && positionJumpedBack) {
                         Log.d(TAG, "repeat detected for track ${track.id} — scheduling new fire")
-                        pending?.job?.cancel()
+                        pending?.let { loop ->
+                            loop.job.cancel()
+                            if (loop.firedFlag.get()) {
+                                loop.maxPositionMs.accumulateAndGet(lastPositionMs, ::maxOf)
+                                recordListenedDepth(loop)
+                            }
+                        }
                         pending = null
                         schedulePendingFire(
                             track.id, track.artist, track.title,
@@ -197,8 +216,9 @@ class ListeningRecorder @VisibleForTesting internal constructor(
             // the correct state when it reads .get().
             if (nowPlaying == trackId) {
                 firedFlag.set(true)
+                val self = pending?.takeIf { it.firedFlag === firedFlag }
                 runCatching {
-                    listeningEventDao.insert(
+                    val id = listeningEventDao.insert(
                         ListeningEventEntity(
                             trackId = trackId,
                             startedAt = sessionStart,
@@ -206,8 +226,11 @@ class ListeningRecorder @VisibleForTesting internal constructor(
                             // v0.9.13: insert IS the completion event — recorder only fires
                             // after threshold delay. AutoSaveScrobbler reads completed_at.
                             completedAt = sessionStart,
+                            listenedMs = maxOf(threshold, self?.maxPositionMs?.get() ?: 0L),
+                            durationMs = durationMs.takeIf { it > 0 },
                         ),
                     )
+                    self?.eventId?.set(id)
                 }.onFailure { Log.w(TAG, "Failed to insert listening event", it) }
             }
         }
@@ -225,6 +248,17 @@ class ListeningRecorder @VisibleForTesting internal constructor(
                 album = album.takeIf { it.isNotBlank() },
             )
         }
+    }
+
+    /**
+     * v35: stores how far the listener got in a play that already counted,
+     * so completion means "heard to the end", not "crossed 30 s".
+     */
+    private suspend fun recordListenedDepth(fire: PendingFire) {
+        val id = fire.eventId.get()
+        if (id < 0) return
+        runCatching { listeningEventDao.updateListened(id, fire.maxPositionMs.get()) }
+            .onFailure { Log.w(TAG, "listened update failed", it) }
     }
 
     /**

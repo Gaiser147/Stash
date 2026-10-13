@@ -32,4 +32,14 @@ class CrossfadeFadeTest {
         assertFalse("remaining > duration", shouldArm(base.copy(remainingMs = 7000)))
         assertFalse("track too short", shouldArm(base.copy(trackDurationMs = 10_000)))
     }
+
+    @Test
+    fun `hand-off lines the silent master up by speed - slower ahead, faster behind`() {
+        assertEquals(1f, syncSpeed(0))
+        assertEquals(1f, syncSpeed(20))
+        assertEquals(0.9f, syncSpeed(-100))
+        assertEquals(0.75f, syncSpeed(-500))
+        assertEquals(1.1f, syncSpeed(100))
+        assertEquals(1.33f, syncSpeed(500))
+    }
 }

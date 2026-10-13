@@ -1,0 +1,41 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="mix_customize">Anpassen</string>
+    <string name="mix_request_title">Was möchtest du hören?</string>
+    <string name="mix_request_hint">z. B. ruhig, eher langsam, wie Billie Eilish</string>
+    <string name="mix_request_understood">Verstanden</string>
+    <string name="mix_request_recent">Letzte Wünsche</string>
+    <string name="mix_request_mood">Stimmung</string>
+    <string name="mix_request_energy">Energie</string>
+    <string name="mix_request_energy_any">Egal</string>
+    <string name="mix_request_energy_calm">Ruhig</string>
+    <string name="mix_request_energy_loud">Intensiv</string>
+    <string name="mix_request_tempo">Tempo</string>
+    <string name="mix_request_tempo_any">Egal</string>
+    <string name="mix_request_tempo_slow">Langsam</string>
+    <string name="mix_request_tempo_medium">Mittel</string>
+    <string name="mix_request_tempo_fast">Schnell</string>
+    <string name="mix_request_familiarity">Bekannt ↔ Neu</string>
+    <string name="mix_request_known">Bekannt</string>
+    <string name="mix_request_new">Neu</string>
+    <string name="mix_request_genres">Genres</string>
+    <string name="mix_request_artists">Künstler</string>
+    <string name="mix_request_artist_search">In deinen Künstlern suchen</string>
+    <string name="mix_request_length">Länge</string>
+    <string name="mix_request_songs">%d Songs</string>
+    <string name="mix_request_start">Mix starten</string>
+    <string name="mix_request_reset">Zurücksetzen</string>
+    <string name="mix_request_failed">Zu diesem Wunsch passen noch keine Songs. Versuch einen weiteren.</string>
+    <string name="mood_chill">Ruhig</string>
+    <string name="mood_energetic">Energie</string>
+    <string name="mood_focus">Fokus</string>
+    <string name="mood_party">Party</string>
+    <string name="mood_melancholy">Melancholisch</string>
+    <string name="mood_romantic">Romantisch</string>
+    <string name="stats_teaser_title">Deine Statistik</string>
+    <string name="stats_teaser_subtitle">Hörzeit, Top-Songs und was der Algorithmus über dich weiß</string>
+    <string name="stats_teaser_week_artist">%1$s diese Woche · vor allem %2$s</string>
+    <string name="stats_teaser_week">%1$s diese Woche</string>
+    <string name="stats_teaser_hours">%1$d Std. %2$d Min.</string>
+    <string name="stats_teaser_minutes">%1$d Min.</string>
+</resources>

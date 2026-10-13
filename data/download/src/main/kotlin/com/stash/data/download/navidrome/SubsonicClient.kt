@@ -10,6 +10,7 @@ import javax.inject.Singleton
 import kotlin.math.abs
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
+import kotlinx.coroutines.ensureActive
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.JsonElement
@@ -17,6 +18,7 @@ import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.contentOrNull
 import kotlinx.serialization.json.intOrNull
+import kotlinx.serialization.json.longOrNull
 import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
 import okhttp3.HttpUrl
@@ -41,6 +43,10 @@ data class SubsonicSong(
     val title: String,
     val durationSec: Int,
     val isrcs: List<String>,
+    /** File extension on the server ("flac", "opus", "m4a", "mp3"); empty when unknown. */
+    val suffix: String = "",
+    val bitRateKbps: Int = 0,
+    val sizeBytes: Long = 0,
 )
 
 data class SubsonicServerInfo(val serverVersion: String, val songCount: Int?)
@@ -65,7 +71,50 @@ class SubsonicClient internal constructor(
     private val http = httpClient.newBuilder()
         .connectTimeout(6, TimeUnit.SECONDS)
         .readTimeout(15, TimeUnit.SECONDS)
+        // Every Subsonic URL carries the auth token + salt as query
+        // parameters, which together log the user in. The shared client's
+        // HTTP logger printed them into logcat — and from there into the
+        // diagnostics bundle. Never log these requests.
+        .apply { interceptors().removeAll { it.javaClass.name == HTTP_LOGGER } }
         .build()
+
+    /**
+     * Downloads the original file of [songId] (`download.view`) to [destination].
+     * Throws on HTTP or I/O failure; the caller cleans up.
+     */
+    suspend fun download(
+        config: NavidromeServerConfig,
+        songId: String,
+        destination: java.io.File,
+        onProgress: (read: Long, total: Long) -> Unit = { _, _ -> },
+    ) = kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {
+        val request = okhttp3.Request.Builder().url(buildUrl(config, "download", "id" to songId)).get().build()
+        http.newBuilder().readTimeout(60, TimeUnit.SECONDS).build().newCall(request).execute().use { response ->
+            if (!response.isSuccessful) throw java.io.IOException("download.view HTTP ${response.code}")
+            val body = response.body ?: throw java.io.IOException("download.view: empty body")
+            val type = body.contentType()?.toString().orEmpty()
+            // A Subsonic error comes back as a 200 with a JSON/XML body.
+            if (type.startsWith("application/json") || type.contains("xml")) {
+                throw java.io.IOException("download.view returned $type instead of audio")
+            }
+            val total = body.contentLength()
+            destination.parentFile?.mkdirs()
+            body.byteStream().use { input ->
+                destination.outputStream().use { output ->
+                    val buffer = ByteArray(64 * 1024)
+                    var read = 0L
+                    while (true) {
+                        coroutineContext.ensureActive()
+                        val n = input.read(buffer)
+                        if (n < 0) break
+                        output.write(buffer, 0, n)
+                        read += n
+                        onProgress(read, total)
+                    }
+                }
+            }
+        }
+    }
 
     private val json = Json { ignoreUnknownKeys = true }
 
@@ -188,6 +237,9 @@ class SubsonicClient internal constructor(
             title = this["title"]?.jsonPrimitive?.contentOrNull.orEmpty(),
             durationSec = this["duration"]?.jsonPrimitive?.intOrNull ?: 0,
             isrcs = isrcs,
+            suffix = this["suffix"]?.jsonPrimitive?.contentOrNull.orEmpty().lowercase(),
+            bitRateKbps = this["bitRate"]?.jsonPrimitive?.intOrNull ?: 0,
+            sizeBytes = this["size"]?.jsonPrimitive?.longOrNull ?: 0L,
         )
     }
 
@@ -199,6 +251,7 @@ class SubsonicClient internal constructor(
     }
 
     companion object {
+        private const val HTTP_LOGGER = "okhttp3.logging.HttpLoggingInterceptor"
         const val API_VERSION = "1.16.1"
         const val CLIENT_NAME = "stash"
         const val DURATION_TOLERANCE_SEC = 5

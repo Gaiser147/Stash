@@ -551,7 +551,8 @@ suspend fun updateNowPlaying(
             val artist = obj["artist"]?.jsonObject?.get("name")?.jsonPrimitive?.content
                 ?.takeIf { it.isNotBlank() } ?: return@mapNotNull null
             val match = obj["match"]?.jsonPrimitive?.content?.toFloatOrNull() ?: 0f
-            LastFmSimilarTrack(artist = artist, title = title, match = match)
+            val playcount = obj["playcount"]?.jsonPrimitive?.content?.toLongOrNull()
+            LastFmSimilarTrack(artist = artist, title = title, match = match, playcount = playcount)
         }
     }
 
@@ -617,7 +618,8 @@ data class LastFmTag(val name: String, val weight: Float)
 data class LastFmSimilarArtist(val name: String, val match: Float)
 
 /** Parsed similar-track from `track.getSimilar`. [match] in 0..1. */
-data class LastFmSimilarTrack(val artist: String, val title: String, val match: Float)
+/** [playcount] = global Last.fm scrobbles, null when the response has none. */
+data class LastFmSimilarTrack(val artist: String, val title: String, val match: Float, val playcount: Long? = null)
 
 /** Track projection used by top-tracks, loved-tracks, artist top-tracks. */
 data class LastFmTopTrack(val artist: String, val title: String, val playcount: Int)

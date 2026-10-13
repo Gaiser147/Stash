@@ -17,6 +17,12 @@ package com.stash.core.data.autoplay
  * @property audioTarget recency-weighted sound of the session (completed
  *   songs count more; early skips don't count). Both null until songs with
  *   server-side audio features have been heard.
+ * @property moods session mood weights from the seeds' tags ([MoodSpace]).
+ * @property corridor the band of sound to stay in, null when nothing is
+ *   known about the session's sound.
+ * @property corridorTrackIds library songs whose analysis fits [corridor],
+ *   offered to the library shortlist so a calm session finds calm songs even
+ *   when its seeds have few neighbours.
  */
 data class AutoplayContext(
     val seeds: List<Seed>,
@@ -25,6 +31,9 @@ data class AutoplayContext(
     val recentArtists: List<String>,
     val lastAudio: AudioProfile? = null,
     val audioTarget: AudioProfile? = null,
+    val moods: Map<String, Float> = emptyMap(),
+    val corridor: MoodCorridor? = null,
+    val corridorTrackIds: List<Long> = emptyList(),
 ) {
     /** [libraryId] is the `tracks` row id, null for songs not in the library. */
     data class Seed(

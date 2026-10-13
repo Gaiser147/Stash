@@ -90,4 +90,16 @@ data class ListeningEventEntity(
      */
     @ColumnInfo(name = "completed_at")
     val completedAt: Long? = null,
+
+    /**
+     * v35: how far into the track the listener got (furthest position, ms),
+     * updated when the track changes. NULL for rows from before v35 — those
+     * only say "crossed the scrobble threshold".
+     */
+    @ColumnInfo(name = "listened_ms")
+    val listenedMs: Long? = null,
+
+    /** v35: track duration at play time (ms); NULL when unknown or pre-v35. */
+    @ColumnInfo(name = "duration_ms")
+    val durationMs: Long? = null,
 )

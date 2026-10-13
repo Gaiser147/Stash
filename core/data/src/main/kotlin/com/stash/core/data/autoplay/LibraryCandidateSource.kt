@@ -5,6 +5,7 @@ import com.stash.core.data.db.dao.PlaylistDao
 import com.stash.core.data.db.dao.TrackTagDao
 import com.stash.core.data.db.entity.TrackEntity
 import com.stash.core.data.mix.TrackSignals
+import com.stash.core.data.mix.UserTagAffinity
 import javax.inject.Inject
 import javax.inject.Singleton
 import kotlin.random.Random
@@ -86,13 +87,16 @@ class LibraryCandidateSource @Inject constructor(
             val tagged = trackTagDao.getTrackIdsMatchingAny(topTags).filter { it in byId }
             addAll(tagged.shuffled(random), cap = 150)
         }
+        addAll(context.corridorTrackIds, cap = CORRIDOR_CAP)
         if (shortlist.size < COLD_START_MIN) {
             addAll(pool.map { it.id }.shuffled(random), cap = COLD_START_MIN - shortlist.size)
         }
         val tracks = shortlist.values.toList()
 
         // ── Featurize ───────────────────────────────────────────────────
-        val tagCos = signals.tagCosine(tracks, context.tagVector)
+        val tags = signals.tagsOf(tracks.map { it.id })
+        val tagCos: Map<Long, Float> = if (context.tagVector.isEmpty()) emptyMap() else
+            tags.filterValues { it.isNotEmpty() }.mapValues { UserTagAffinity.cosine(it.value, context.tagVector) }
         val affinity = signals.affinity(tracks)
         val completion = signals.completion(tracks)
         val skip = signals.skipPenalty(tracks)
@@ -117,6 +121,7 @@ class LibraryCandidateSource @Inject constructor(
                 completion = completion[t.id] ?: 0.5f,
                 skipPenalty = skip[t.id] ?: 0f,
                 recentPenalty = if (t.id in recent) RECENT_PENALTY else 0f,
+                tagFit = MoodSpace.fit(context.moods, MoodSpace.moodsOf(tags[t.id].orEmpty())),
             )
         }
     }
@@ -127,6 +132,7 @@ class LibraryCandidateSource @Inject constructor(
         const val SHORTLIST_MAX = 400
         const val COLD_START_MIN = 80
         const val TOP_TAGS = 5
+        const val CORRIDOR_CAP = 120
 
         /** Share of sessionSim that comes from tags (rest from artist closeness). */
         const val TAG_SHARE = 0.55f

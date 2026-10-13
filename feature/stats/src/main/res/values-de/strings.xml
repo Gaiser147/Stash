@@ -1,0 +1,40 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="stats_title">Deine Statistik</string>
+    <string name="stats_back">Zurück</string>
+    <string name="stats_range_week">7 Tage</string>
+    <string name="stats_range_month">30 Tage</string>
+    <string name="stats_range_year">Jahr</string>
+    <string name="stats_range_all">Gesamt</string>
+    <string name="stats_listening_time">Hörzeit</string>
+    <string name="stats_songs">Songs</string>
+    <string name="stats_artists">Künstler</string>
+    <string name="stats_new_kept">Neu entdeckt</string>
+    <string name="stats_skip_rate">Übersprungen</string>
+    <string name="stats_per_day">Pro Tag</string>
+    <string name="stats_time_of_day">Tageszeit</string>
+    <string name="stats_week_heatmap">Deine Woche</string>
+    <string name="stats_top_songs">Top-Songs</string>
+    <string name="stats_top_artists">Top-Künstler</string>
+    <string name="stats_top_genres">Genres &amp; Tags</string>
+    <string name="stats_sound">Dein Sound</string>
+    <string name="stats_tempo">Tempo</string>
+    <string name="stats_energy">Energie</string>
+    <string name="stats_minor">%1$d %% deiner Songs sind in Moll</string>
+    <string name="stats_median_bpm">Typisches Tempo: %1$d BPM</string>
+    <string name="stats_energy_by_time">Energie nach Tageszeit</string>
+    <string name="stats_sound_empty">Erscheint, sobald der Server deine gehörten Songs analysiert hat.</string>
+    <string name="stats_taste">Das weiß der Algorithmus über dich</string>
+    <string name="stats_taste_tags">Deine stärksten Tags</string>
+    <string name="stats_taste_artists">Lieblingskünstler (6 Monate)</string>
+    <string name="stats_taste_discovery">Neue Songs im Autoplay: etwa %1$d %%</string>
+    <string name="stats_taste_resting">Pausiert für 30 Tage (neue Songs wurden immer übersprungen)</string>
+    <string name="stats_allow_again">Wieder erlauben</string>
+    <string name="stats_plays">%1$d Plays</string>
+    <string name="stats_empty">In diesem Zeitraum noch nichts gehört.</string>
+    <string name="stats_hours_minutes">%1$d Std. %2$d Min.</string>
+    <string name="stats_minutes">%1$d Min.</string>
+    <string name="stats_calm">Ruhig</string>
+    <string name="stats_intense">Intensiv</string>
+    <string name="stats_weekdays">Mo,Di,Mi,Do,Fr,Sa,So</string>
+</resources>

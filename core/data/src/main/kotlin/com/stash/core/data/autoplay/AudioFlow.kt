@@ -19,6 +19,10 @@ data class AudioProfile(
     val pitchClass: Int,
     val minor: Boolean,
     val keyStrength: Float,
+    /** How steady the beat is (0..1); 0 when unknown. */
+    val beatRegularity: Float = 0f,
+    /** Loudness range in dB (big = dynamic, small = compressed); 0 when unknown. */
+    val dynamicsDb: Float = 0f,
 ) {
     companion object {
         fun of(e: AudioFeaturesEntity) = AudioProfile(
@@ -30,6 +34,8 @@ data class AudioProfile(
             pitchClass = e.pitchClass,
             minor = e.minor,
             keyStrength = e.keyStrength,
+            beatRegularity = e.beatRegularity,
+            dynamicsDb = e.dynamicsDb,
         )
     }
 }
@@ -51,12 +57,16 @@ object AudioFlow {
     private const val W_BRIGHTNESS = 0.15f
     private const val W_KEY = 0.15f
     private const val W_ONSETS = 0.10f
+    private const val W_GROOVE = 0.08f
+    private const val W_DYNAMICS = 0.07f
 
     /** ~8 % tempo difference halves the tempo score. */
     private const val TEMPO_WIDTH = 0.1f
     private const val LOUDNESS_WIDTH_DB = 4f
     private const val BRIGHTNESS_WIDTH = 0.35f
     private const val ONSET_WIDTH = 0.45f
+    private const val GROOVE_WIDTH = 0.3f
+    private const val DYNAMICS_WIDTH_DB = 5f
 
     /** Beat tracking below this confidence says little about the tempo. */
     private const val MIN_BEAT_CONFIDENCE = 0.1f
@@ -78,6 +88,14 @@ object AudioFlow {
             add(W_BRIGHTNESS, gauss(ln(a.brightnessHz / b.brightnessHz), BRIGHTNESS_WIDTH))
         }
         add(W_ONSETS, gauss(ln((a.onsetRate + 0.2f) / (b.onsetRate + 0.2f)), ONSET_WIDTH))
+        // A steady four-on-the-floor next to a loose acoustic take feels like a
+        // jump even at the same tempo; so does a compressed track after a dynamic one.
+        if (a.beatRegularity > 0f && b.beatRegularity > 0f) {
+            add(W_GROOVE, gauss(groove(a) - groove(b), GROOVE_WIDTH))
+        }
+        if (a.dynamicsDb > 0f && b.dynamicsDb > 0f) {
+            add(W_DYNAMICS, gauss(a.dynamicsDb - b.dynamicsDb, DYNAMICS_WIDTH_DB))
+        }
         val keyTrust = min(a.keyStrength, b.keyStrength).coerceIn(0f, 1f)
         if (keyTrust > 0f) add(W_KEY * keyTrust, keyCompatibility(a, b))
         return if (weight <= 0f) NEUTRAL else (total / weight).coerceIn(0f, 1f)
@@ -149,8 +167,14 @@ object AudioFlow {
             pitchClass = newest.pitchClass,
             minor = newest.minor,
             keyStrength = newest.keyStrength,
+            beatRegularity = mean { it.beatRegularity },
+            dynamicsDb = mean { it.dynamicsDb },
         )
     }
+
+    /** How danceable the beat is: steady and confidently detected, 0..1. */
+    fun groove(p: AudioProfile): Float =
+        (p.beatRegularity.coerceIn(0f, 1f) * (0.4f + 0.6f * p.beatConfidence.coerceIn(0f, 1f))).coerceIn(0f, 1f)
 
     /**
      * One number for "how intense": loud, bright, busy and fast. Roughly 0

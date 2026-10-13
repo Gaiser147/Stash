@@ -46,6 +46,16 @@ data class AutoplayCandidate(
     val skipPenalty: Float = 0f,
     val recentPenalty: Float = 0f,
     val flow: Float = AudioFlow.NEUTRAL,
+    /**
+     * How well the song's sound fits the session's [MoodCorridor]; 1 inside
+     * the band or when the song isn't analysed, towards 0 far outside.
+     */
+    val corridorFit: Float = 1f,
+    /**
+     * How well its mood tags fit the session's moods ([MoodSpace.fit]);
+     * [MoodSpace.NEUTRAL] when unknown. The only mood signal a discovery has.
+     */
+    val tagFit: Float = MoodSpace.NEUTRAL,
 ) {
     /** Lowercased artist for spread / session-block comparisons. */
     val artistKey: String get() = artist.trim().lowercase()

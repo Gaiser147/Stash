@@ -42,4 +42,14 @@ class DiagnosticsRedactorTest {
         val text = "java.lang.NoSuchMethodError at FFmpegBridge.kt:98\nrefreshing 13 Stash Mix(es)"
         assertTrue(DiagnosticsRedactor.redact(text) == text)
     }
+
+    @Test fun `strips subsonic auth from navidrome urls`() {
+        val out = DiagnosticsRedactor.redact(
+            "--> GET https://nd.example/rest/search3?u=root&t=54c01460178cc9d350478598b3dd4f90&s=cb9e5c225e02be8c&v=1.16.1",
+        )
+        assertFalse(out.contains("54c01460178cc9d350478598b3dd4f90"))
+        assertFalse(out.contains("cb9e5c225e02be8c"))
+        assertTrue(out.contains("t=[REDACTED]"))
+        assertTrue(out.contains("v=1.16.1"))
+    }
 }

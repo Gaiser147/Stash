@@ -73,6 +73,18 @@ interface ListeningEventDao {
      * v0.9.13: Mark a listening event as having crossed the completion
      * threshold. Called by [ListeningRecorder] at insert time.
      */
+    /**
+     * v35: records how far the listener got, once the track changes. Only
+     * ever raises the value, so a late duplicate update can't shrink it.
+     */
+    @Query(
+        """
+        UPDATE listening_events SET listened_ms = :listenedMs
+        WHERE id = :eventId AND (listened_ms IS NULL OR listened_ms < :listenedMs)
+        """
+    )
+    suspend fun updateListened(eventId: Long, listenedMs: Long)
+
     @Query("UPDATE listening_events SET completed_at = :ts WHERE id = :eventId")
     suspend fun markCompleted(eventId: Long, ts: Long)
 
@@ -195,7 +207,10 @@ interface ListeningEventDao {
         """
         SELECT track_id AS trackId,
                COUNT(*) AS total,
-               SUM(CASE WHEN completed_at IS NOT NULL THEN 1 ELSE 0 END) AS completed
+               SUM(CASE
+                   WHEN listened_ms IS NOT NULL AND duration_ms > 0
+                       THEN CASE WHEN listened_ms * 10 >= duration_ms * 8 THEN 1 ELSE 0 END
+                   WHEN completed_at IS NOT NULL THEN 1 ELSE 0 END) AS completed
         FROM listening_events
         WHERE track_id IN (:trackIds) AND started_at >= :sinceMs
         GROUP BY track_id
