@@ -47,6 +47,7 @@ enum class TopLevelDestination(val selectedIcon: ImageVector, val unselectedIcon
 @Serializable data object SettingsAppearanceRoute
 @Serializable data object SettingsAboutRoute
 @Serializable data class MixBuilderRoute(val recipeId: Long? = null)
+@Serializable data object StatsRoute
 
 @Serializable
 data class SearchArtistRoute(

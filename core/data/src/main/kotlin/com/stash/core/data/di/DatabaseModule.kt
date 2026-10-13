@@ -139,4 +139,7 @@ object DatabaseModule {
     @Provides
     fun provideDiscoveryFeedbackDao(db: StashDatabase): com.stash.core.data.db.dao.DiscoveryFeedbackDao =
         db.discoveryFeedbackDao()
+
+    @Provides
+    fun provideStatsDao(db: StashDatabase): com.stash.core.data.db.dao.StatsDao = db.statsDao()
 }

@@ -129,6 +129,7 @@ fun HomeScreen(
     onNavigateToLikedSongs: (String?) -> Unit = {},
     onNavigateToSettings: () -> Unit = {},
     onNavigateToMixBuilder: (Long?) -> Unit = {},
+    onNavigateToStats: () -> Unit = {},
     viewModel: HomeViewModel = hiltViewModel(),
 ) {
     val uiState by viewModel.uiState.collectAsStateWithLifecycle()
@@ -327,6 +328,12 @@ fun HomeScreen(
                 modifier = Modifier
                     .padding(horizontal = 16.dp)
                     .padding(top = 8.dp, bottom = 4.dp),
+            )
+        }
+        item {
+            StatsTeaserCard(
+                onClick = onNavigateToStats,
+                modifier = Modifier.padding(horizontal = 16.dp).padding(bottom = 4.dp),
             )
         }
 

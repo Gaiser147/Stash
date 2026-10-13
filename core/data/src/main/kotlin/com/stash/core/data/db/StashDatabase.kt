@@ -125,6 +125,7 @@ abstract class StashDatabase : RoomDatabase() {
 
     abstract fun audioFeaturesDao(): AudioFeaturesDao
     abstract fun discoveryFeedbackDao(): DiscoveryFeedbackDao
+    abstract fun statsDao(): com.stash.core.data.db.dao.StatsDao
 
 
     companion object {

@@ -32,4 +32,10 @@
     <string name="mood_party">Party</string>
     <string name="mood_melancholy">Melancholy</string>
     <string name="mood_romantic">Romantic</string>
+    <string name="stats_teaser_title">Your stats</string>
+    <string name="stats_teaser_subtitle">Listening time, top songs and what the algorithm knows</string>
+    <string name="stats_teaser_week_artist">%1$s this week · mostly %2$s</string>
+    <string name="stats_teaser_week">%1$s this week</string>
+    <string name="stats_teaser_hours">%1$d h %2$d min</string>
+    <string name="stats_teaser_minutes">%1$d min</string>
 </resources>

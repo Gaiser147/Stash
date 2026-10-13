@@ -69,6 +69,13 @@ fun StashNavHost(
                 onNavigateToMixBuilder = { recipeId ->
                     navController.navigate(MixBuilderRoute(recipeId))
                 },
+                onNavigateToStats = { navController.navigate(StatsRoute) { launchSingleTop = true } },
+            )
+        }
+        composable<StatsRoute> {
+            com.stash.feature.stats.StatsScreen(
+                onBack = { navController.popBackStack() },
+                onOpenArtist = { artistName -> navController.navigate(ArtistDetailRoute(artistName)) },
             )
         }
         composable<MixBuilderRoute> {
