@@ -905,8 +905,9 @@ class PlayerRepositoryImpl @Inject constructor(
         val engine = autoplayEngine ?: return
         val generation = disarmAutoplay()
         if (queue.isEmpty()) return
+        val request = pendingMixRequest
         scope.launch {
-            val session = runCatching { engine.start(queue) }
+            val session = runCatching { engine.start(queue, request = request) }
                 .onFailure { Log.w(TAG, "autoplay arm failed", it) }
                 .getOrNull() ?: return@launch
             // Another queue, a station or a library shuffle may have started meanwhile.
@@ -986,7 +987,7 @@ class PlayerRepositoryImpl @Inject constructor(
         return true
     }
 
-    override fun adoptExternalQueue(tracks: List<Track>, personalMix: Boolean) {
+    override fun adoptExternalQueue(tracks: List<Track>, personalMix: Boolean, request: com.stash.core.data.autoplay.MixRequest?) {
         scope.launch {
             // Same state reset as setQueueInternal, minus touching the player:
             // the queue is already on it.
@@ -997,33 +998,47 @@ class PlayerRepositoryImpl @Inject constructor(
             _radioSeedLabel.value = null
             currentQueueTracks = tracks
             startingPersonalMix = personalMix
+            pendingMixRequest = request
             try {
                 armAutoplay(tracks)
             } finally {
                 startingPersonalMix = false
+                pendingMixRequest = null
             }
             _personalMixActive.value = personalMix && tracks.isNotEmpty()
             Log.i(TAG, "adopted external queue: ${tracks.size} tracks, mix=$personalMix")
         }
     }
 
-    override suspend fun startPersonalMix(): Boolean {
+    /** Wish of the personal mix being installed; read by [armAutoplay]. */
+    @Volatile private var pendingMixRequest: com.stash.core.data.autoplay.MixRequest? = null
+
+    override suspend fun libraryArtists(limit: Int): List<String> =
+        runCatching { trackDao.getTopArtistsByTrackCount(limit) }.getOrDefault(emptyList())
+
+    override suspend fun startPersonalMix(): Boolean = startPersonalMix(null)
+
+    override suspend fun startPersonalMix(request: com.stash.core.data.autoplay.MixRequest?): Boolean {
         val engine = autoplayEngine ?: return false
         ensureController() ?: return false
         val canStream = canStreamNow()
         val mix = runCatching {
-            // buildMix ranks on its own private session, so it needs no session lock.
+            // The mix ranks on its own private session, so it needs no session lock.
             withContext(Dispatchers.Default) {
-                engine.buildMix(includeStreamable = canStream, allowDiscovery = canStream)
+                if (request == null) engine.buildMix(includeStreamable = canStream, allowDiscovery = canStream)
+                else engine.buildRequestedMix(request, includeStreamable = canStream, allowDiscovery = canStream).second
             }
         }.onFailure { Log.w(TAG, "personal mix failed", it) }.getOrDefault(emptyList())
         if (mix.isEmpty()) return false
         startingPersonalMix = true
+        // The autoplay session armed for this queue keeps the wish's mood.
+        pendingMixRequest = request
         try {
             // Arms autoplay with the mix as its start queue, so it continues seamlessly.
             setQueueInternal(mix, startIndex = 0, startPositionMs = 0L)
         } finally {
             startingPersonalMix = false
+            pendingMixRequest = null
         }
         // Only claim the mix is playing if setQueue actually installed it.
         val mixIds = mix.mapTo(HashSet()) { it.id }

@@ -189,7 +189,17 @@ interface PlayerRepository {
      * and starts it. Autoplay continues it when it runs out.
      * Returns false when there was nothing to build a mix from.
      */
-    suspend fun startPersonalMix(): Boolean
+    suspend fun startPersonalMix(): Boolean = startPersonalMix(null)
+
+    /**
+     * "Mix für mich" for a wish (mood, pace, genres, artists, share of new
+     * songs). Autoplay keeps that wish when the mix runs out. Null = the
+     * plain personal mix.
+     */
+    suspend fun startPersonalMix(request: com.stash.core.data.autoplay.MixRequest?): Boolean = false
+
+    /** Library artists, most songs first — the mix wish's artist picker and text matching. */
+    suspend fun libraryArtists(limit: Int = 3000): List<String> = emptyList()
 
     /**
      * A queue someone else installed on the player — Android Auto browsing,
@@ -199,7 +209,11 @@ interface PlayerRepository {
      *
      * @param personalMix the queue is a generated "Mix für mich".
      */
-    fun adoptExternalQueue(tracks: List<Track>, personalMix: Boolean = false)
+    fun adoptExternalQueue(
+        tracks: List<Track>,
+        personalMix: Boolean = false,
+        request: com.stash.core.data.autoplay.MixRequest? = null,
+    )
 
     /**
      * The player items for [tracks], built exactly as [setQueue] builds them

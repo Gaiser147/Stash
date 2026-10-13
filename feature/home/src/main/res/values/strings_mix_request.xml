@@ -1,0 +1,35 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="mix_customize">Customize</string>
+    <string name="mix_request_title">What do you want to hear?</string>
+    <string name="mix_request_hint">e.g. calm, rather slow, like Billie Eilish</string>
+    <string name="mix_request_understood">Understood</string>
+    <string name="mix_request_recent">Recent wishes</string>
+    <string name="mix_request_mood">Mood</string>
+    <string name="mix_request_energy">Energy</string>
+    <string name="mix_request_energy_any">Any</string>
+    <string name="mix_request_energy_calm">Calm</string>
+    <string name="mix_request_energy_loud">Intense</string>
+    <string name="mix_request_tempo">Tempo</string>
+    <string name="mix_request_tempo_any">Any</string>
+    <string name="mix_request_tempo_slow">Slow</string>
+    <string name="mix_request_tempo_medium">Medium</string>
+    <string name="mix_request_tempo_fast">Fast</string>
+    <string name="mix_request_familiarity">Known ↔ New</string>
+    <string name="mix_request_known">Known</string>
+    <string name="mix_request_new">New</string>
+    <string name="mix_request_genres">Genres</string>
+    <string name="mix_request_artists">Artists</string>
+    <string name="mix_request_artist_search">Search your artists</string>
+    <string name="mix_request_length">Length</string>
+    <string name="mix_request_songs">%d songs</string>
+    <string name="mix_request_start">Start mix</string>
+    <string name="mix_request_reset">Reset</string>
+    <string name="mix_request_failed">No songs fit this wish yet. Try a wider one.</string>
+    <string name="mood_chill">Calm</string>
+    <string name="mood_energetic">Energy</string>
+    <string name="mood_focus">Focus</string>
+    <string name="mood_party">Party</string>
+    <string name="mood_melancholy">Melancholy</string>
+    <string name="mood_romantic">Romantic</string>
+</resources>

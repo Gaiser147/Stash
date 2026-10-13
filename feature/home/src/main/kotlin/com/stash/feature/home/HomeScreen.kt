@@ -56,6 +56,7 @@ import androidx.compose.material.icons.filled.Favorite
 import androidx.compose.material.icons.filled.FavoriteBorder
 import androidx.compose.material.icons.filled.MusicNote
 import androidx.compose.material.icons.filled.PlayArrow
+import androidx.compose.material.icons.filled.Tune
 import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.Edit
 import androidx.compose.material.icons.filled.PlaylistAdd
@@ -137,6 +138,13 @@ fun HomeScreen(
     // time kill-switch (StashConstants.STREAMING_ENGINE_ENABLED) is off.
     val streamingEnabled by viewModel.streamingEnabled.collectAsStateWithLifecycle()
     val buildingPersonalMix by viewModel.buildingPersonalMix.collectAsStateWithLifecycle()
+    var showMixRequest by remember { mutableStateOf(false) }
+    if (showMixRequest) {
+        com.stash.feature.home.mixrequest.MixRequestSheet(
+            onDismiss = { showMixRequest = false },
+            onFailed = viewModel::showMessage,
+        )
+    }
 
     // Bottom-sheet state for the playback-mode picker triggered by the
     // top-bar chip. The sheet is the chip's tap target — keeps the chip
@@ -315,6 +323,7 @@ fun HomeScreen(
             PersonalMixHeroCard(
                 building = buildingPersonalMix,
                 onClick = viewModel::startPersonalMix,
+                onCustomize = { showMixRequest = true },
                 modifier = Modifier
                     .padding(horizontal = 16.dp)
                     .padding(top = 8.dp, bottom = 4.dp),
@@ -1590,6 +1599,7 @@ private fun CreateMixCard(
 private fun PersonalMixHeroCard(
     building: Boolean,
     onClick: () -> Unit,
+    onCustomize: () -> Unit,
     modifier: Modifier = Modifier,
 ) {
     val accent = MaterialTheme.colorScheme.primary
@@ -1653,6 +1663,32 @@ private fun PersonalMixHeroCard(
                     maxLines = 1,
                     overflow = TextOverflow.Ellipsis,
                 )
+            }
+            Spacer(Modifier.width(8.dp))
+            Surface(
+                shape = RoundedCornerShape(16.dp),
+                color = onAccent.copy(alpha = 0.18f),
+                modifier = Modifier
+                    .clip(RoundedCornerShape(16.dp))
+                    .clickable(enabled = !building, onClick = onCustomize),
+            ) {
+                Row(
+                    modifier = Modifier.padding(horizontal = 10.dp, vertical = 6.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    Icon(
+                        imageVector = Icons.Filled.Tune,
+                        contentDescription = null,
+                        tint = onAccent,
+                        modifier = Modifier.size(16.dp),
+                    )
+                    Spacer(Modifier.width(4.dp))
+                    Text(
+                        text = androidx.compose.ui.res.stringResource(com.stash.feature.home.R.string.mix_customize),
+                        style = MaterialTheme.typography.labelMedium,
+                        color = onAccent,
+                    )
+                }
             }
             Spacer(Modifier.width(12.dp))
             Box(

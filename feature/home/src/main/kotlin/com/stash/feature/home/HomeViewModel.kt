@@ -371,6 +371,11 @@ class HomeViewModel @Inject constructor(
         }
     }
 
+    /** Shows a one-off message in the Home snackbar. */
+    fun showMessage(message: String) {
+        _userMessages.tryEmit(message)
+    }
+
     fun playTrack(tracks: List<Track>, index: Int) {
         viewModelScope.launch {
             playerRepository.setQueue(tracks, index)

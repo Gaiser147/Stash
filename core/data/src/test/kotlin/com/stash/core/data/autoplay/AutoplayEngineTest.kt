@@ -35,9 +35,10 @@ class AutoplayEngineTest {
     private val matcher = TrackMatcher()
 
     private val audioFeatures: AudioFeaturesDao = mockk(relaxed = true)
+    private val trackTagDao: com.stash.core.data.db.dao.TrackTagDao = mockk(relaxed = true)
     private val engine = AutoplayEngine(
         trackDao, listeningEventDao, signals, library, discovery, lastFm, yt, matcher, preference, audioFeatures,
-        mockk(relaxed = true),
+        mockk(relaxed = true), trackTagDao,
     )
 
     private val libraryRows = (1L..12L).map {

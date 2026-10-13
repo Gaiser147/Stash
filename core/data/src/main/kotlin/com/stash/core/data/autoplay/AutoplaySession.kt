@@ -66,6 +66,15 @@ class AutoplaySession internal constructor(
     /** Moods asked for (a mix request); blended into the session's own moods. */
     var requestedMoods: Map<String, Float> = emptyMap()
 
+    /** Tags asked for (moods' tags + genres); blended into the session tag vector. */
+    var requestedTags: Map<String, Float> = emptyMap()
+
+    /** Lowercased artists asked for; they stay at full closeness all session. */
+    var requestedArtists: Set<String> = emptySet()
+
+    /** Share of new songs asked for; null = the learned [acceptance] share. */
+    var fixedShare: Float? = null
+
     /** Artists the user rejected this session (early-skipped discovery, or twice a library song). */
     internal val blockedArtists: MutableSet<String> = HashSet()
 

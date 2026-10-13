@@ -6,6 +6,7 @@ import com.stash.core.data.db.dao.DiscoveryFeedbackDao
 import com.stash.core.data.db.entity.DiscoveryFeedbackEntity
 import com.stash.core.data.db.dao.ListeningEventDao
 import com.stash.core.data.db.dao.TrackDao
+import com.stash.core.data.db.dao.TrackTagDao
 import com.stash.core.data.db.entity.TrackEntity
 import com.stash.core.data.lastfm.LastFmApiClient
 import com.stash.core.data.mapper.toDomain
@@ -63,17 +64,95 @@ class AutoplayEngine @Inject constructor(
     private val preference: AutoplayPreference,
     private val audioFeatures: AudioFeaturesDao,
     private val feedbackDao: DiscoveryFeedbackDao,
+    private val trackTagDao: TrackTagDao,
 ) {
 
     suspend fun isEnabled(): Boolean = runCatching { preference.isEnabled() }.getOrDefault(false)
 
-    /** Starts a session for the queue the user just started. */
-    suspend fun start(queue: List<Track>, random: Random = Random(System.nanoTime())): AutoplaySession {
+    /**
+     * Starts a session for the queue the user just started. With a
+     * [request] (a mix wish) the session keeps that mood, those artists and
+     * that share of new songs for as long as autoplay continues it.
+     */
+    suspend fun start(
+        queue: List<Track>,
+        random: Random = Random(System.nanoTime()),
+        request: MixRequest? = null,
+    ): AutoplaySession {
         val longTerm = runCatching { preference.acceptance() }.getOrDefault(DiscoveryAcceptance())
         val seeds = queue.map {
             AutoplaySession.SeedSong(it.id, it.artist, it.title, AutoplaySession.keyOf(matcher, it.artist, it.title))
         }
-        return AutoplaySession(seeds, random, longTerm)
+        return AutoplaySession(seeds, random, longTerm).also { s -> request?.let { applyRequest(s, it) } }
+    }
+
+    private fun applyRequest(session: AutoplaySession, request: MixRequest) {
+        session.fixedCorridor = request.corridor()
+        session.requestedMoods = request.moods.associateWith { 1f }
+        session.requestedTags = request.tags()
+        session.requestedArtists = request.artists.mapTo(HashSet()) { it.trim().lowercase() }
+        session.fixedShare = request.familiarity?.let { (1f - it).coerceIn(0f, MixRequest.MAX_DISCOVERY_SHARE) }
+    }
+
+    /**
+     * "Mix für mich" for a wish ([MixRequest]): seeds from the asked-for
+     * artists, else from library songs carrying the asked-for moods/genres
+     * inside the asked-for sound, else from recent listening. Request seeds
+     * may appear in the mix (a wish for an artist should play that artist).
+     * Returns the session so autoplay can continue in the same mood.
+     */
+    suspend fun buildRequestedMix(
+        request: MixRequest,
+        includeStreamable: Boolean,
+        allowDiscovery: Boolean,
+        random: Random = Random(System.nanoTime()),
+    ): Pair<AutoplaySession, List<Track>> {
+        if (request.isEmpty) {
+            val session = start(recentSeeds(), random)
+            return buildMixFrom(session, includeStreamable, allowDiscovery, request.size, ArcShape.RISE)
+        }
+        val pool = trackDao.getAllPlayable(includeStreamable)
+        val corridor = request.corridor()
+        val profiles = if (corridor == null) emptyMap() else audioProfiles(pool.map { it.id })
+        fun fits(t: TrackEntity) = corridor == null || profiles[t.id]?.let { corridor.fit(it) >= 0.5f } ?: true
+
+        val seeds = ArrayList<Track>()
+        var seedsPlayable = false
+        if (request.artists.isNotEmpty()) {
+            val wanted = request.artists.map { MixRequestParser.norm(it) }
+            val byArtist = pool.filter { t -> MixRequestParser.norm(t.artist).let { a -> wanted.any { w -> a == w || a.contains(w) } } }
+            seeds += byArtist.filter(::fits).ifEmpty { byArtist }.shuffled(random).take(MIX_SEEDS).map { it.toDomain() }
+            // Artists not in the library: their best-known songs seed discoveries.
+            val missing = request.artists.filter { name -> byArtist.none { MixRequestParser.norm(it.artist).contains(MixRequestParser.norm(name)) } }
+            missing.forEachIndexed { i, name ->
+                lastFm.getArtistTopTracks(name, limit = 3).getOrDefault(emptyList()).forEachIndexed { j, t ->
+                    seeds += Track(id = -(1000L * (i + 1) + j), title = t.title, artist = t.artist.ifBlank { name })
+                }
+            }
+            seedsPlayable = true
+        } else if (request.tags().isNotEmpty()) {
+            val tagged = runCatching { trackTagDao.getTrackIdsMatchingAny(request.tags().keys.toList()) }
+                .getOrDefault(emptyList()).toHashSet()
+            val matches = pool.filter { it.id in tagged }
+            seeds += matches.filter(::fits).ifEmpty { matches }.shuffled(random).take(MIX_SEEDS).map { it.toDomain() }
+            seedsPlayable = true
+        }
+        if (seeds.isEmpty() && corridor != null) {
+            // Only a sound was asked for: recent songs that fit it, else any that do.
+            val recent = recentSeeds()
+            val recentFit = recent.filter { t -> profiles[t.id]?.let { corridor.fit(it) >= 0.5f } ?: false }
+            seeds += recentFit.ifEmpty {
+                pool.filter { t -> profiles[t.id]?.let { corridor.fit(it) >= 0.7f } ?: false }
+                    .shuffled(random).take(MIX_SEEDS).map { it.toDomain() }.also { seedsPlayable = true }
+            }
+        }
+        if (seeds.isEmpty()) seeds += recentSeeds()
+
+        val session = start(seeds, random, request)
+        // A wish for an artist or genre should play those songs, not only songs like them.
+        if (seedsPlayable) session.emittedKeys.clear()
+        Log.d(TAG, "requested mix: $request seeds=${seeds.size} corridor=${session.fixedCorridor ?: "-"} share=${session.fixedShare ?: "learned"}")
+        return buildMixFrom(session, includeStreamable, allowDiscovery, request.size, request.arcShape())
     }
 
     /**
@@ -191,7 +270,7 @@ class AutoplayEngine @Inject constructor(
             emptyList()
         }
 
-        val share = if (discCands.isEmpty()) 0f else session.acceptance.sampleShare(session.random)
+        val share = if (discCands.isEmpty()) 0f else session.fixedShare ?: session.acceptance.sampleShare(session.random)
         // Over-provision: a discovery that fails to resolve is dropped, not retried.
         val picks = AutoplayRanker.assemble(
             library = libCands,
@@ -323,6 +402,7 @@ class AutoplayEngine @Inject constructor(
             val id = libId(n.trackId) ?: continue
             tagsById[id]?.forEach { (tag, w) -> tagAcc[tag] = (tagAcc[tag] ?: 0f) - NEGATIVE_TAG_WEIGHT * w }
         }
+        session.requestedTags.forEach { (tag, w) -> tagAcc[tag] = (tagAcc[tag] ?: 0f) + REQUEST_TAG_WEIGHT * w }
         val tagVector = l2Normalize(tagAcc.filterValues { it > 0f })
         // Session moods: what the seeds' tags say, plus what a request asked for.
         val moods = blendMoods(MoodSpace.moodsOf(tagVector), session.requestedMoods)
@@ -335,6 +415,7 @@ class AutoplayEngine @Inject constructor(
             artistAcc[k] = maxOf(artistAcc[k] ?: 0f, w)
         }
         seeds.forEach { bump(it.artist, it.weight) }
+        session.requestedArtists.forEach { bump(it, 1f) }
         if (online) {
             val topArtists = seeds.groupBy { it.artist.trim().lowercase() }
                 .map { (_, v) -> v.first().artist to v.maxOf { it.weight } }
@@ -472,6 +553,9 @@ class AutoplayEngine @Inject constructor(
         /** Library songs fitting the corridor at least this well join the shortlist. */
         private const val CORRIDOR_SHORTLIST_FIT = 0.7f
         private const val TIME_OF_DAY_WINDOW_MS = 90L * 24 * 60 * 60 * 1000
+
+        /** Weight of a request's tags in the session tag vector (seed tags sum to roughly 1–3). */
+        private const val REQUEST_TAG_WEIGHT = 1.5f
 
         /** Weight of a request's moods against the seeds' own moods. */
         private const val REQUEST_MOOD_WEIGHT = 2f

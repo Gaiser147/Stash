@@ -27,4 +27,10 @@
     <string name="auto_more_like_this">Mehr wie dieser</string>
     <string name="auto_streaming_unavailable">Streaming nicht erreichbar – nur heruntergeladene Songs</string>
     <string name="auto_nothing_playable">Gerade nichts abspielbar – Songs herunterladen oder Streaming erlauben</string>
+    <string name="auto_group_moods">Stimmungen</string>
+    <string name="auto_mix_calm">Ruhig</string>
+    <string name="auto_mix_energy">Energie</string>
+    <string name="auto_mix_focus">Fokus</string>
+    <string name="auto_mix_party">Party</string>
+    <string name="auto_mix_mood_subtitle">Mix in dieser Stimmung</string>
 </resources>

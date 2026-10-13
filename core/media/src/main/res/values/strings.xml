@@ -27,4 +27,10 @@
     <string name="auto_more_like_this">More like this</string>
     <string name="auto_streaming_unavailable">Streaming unavailable – playing downloaded songs only</string>
     <string name="auto_nothing_playable">Nothing playable right now – download songs or allow streaming</string>
+    <string name="auto_group_moods">Moods</string>
+    <string name="auto_mix_calm">Calm</string>
+    <string name="auto_mix_energy">Energy</string>
+    <string name="auto_mix_focus">Focus</string>
+    <string name="auto_mix_party">Party</string>
+    <string name="auto_mix_mood_subtitle">Mix in this mood</string>
 </resources>

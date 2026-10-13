@@ -185,6 +185,15 @@ class StashPlaybackService : MediaLibraryService() {
         // "New" tab so AUTOQ ids cached by the car keep resolving.
         private const val FOR_YOU_ID = "FOR_YOU"
         private const val MIX_FOR_ME_ID = "MIX_FOR_ME"
+
+        /** Fixed mood mixes under "Mix for you" (id → wish). */
+        private const val MIX_MOOD_PREFIX = "MIX_MOOD_"
+        private val MOOD_MIXES: List<Pair<String, com.stash.core.data.autoplay.MixRequest>> = listOf(
+            "CALM" to com.stash.core.data.autoplay.MixRequest.CALM,
+            "ENERGY" to com.stash.core.data.autoplay.MixRequest.ENERGY,
+            "FOCUS" to com.stash.core.data.autoplay.MixRequest.FOCUS,
+            "PARTY" to com.stash.core.data.autoplay.MixRequest.PARTY,
+        )
         private const val CONTINUE_ID = "CONTINUE"
 
         /** Songs in the "New" tab. */
@@ -1095,6 +1104,7 @@ class StashPlaybackService : MediaLibraryService() {
             val startIndex: Int,
             val shuffle: Boolean?,
             val personalMix: Boolean = false,
+            val request: com.stash.core.data.autoplay.MixRequest? = null,
         )
 
         private fun carQueueOf(entities: List<TrackEntity>, startIndex: Int, shuffle: Boolean?): CarQueue? {
@@ -1108,15 +1118,19 @@ class StashPlaybackService : MediaLibraryService() {
         }
 
         /** "Mix for you", built like the in-app button; falls back to a library shuffle. */
-        private suspend fun mixForYouQueue(canStream: Boolean): CarQueue? {
+        private suspend fun mixForYouQueue(
+            canStream: Boolean,
+            request: com.stash.core.data.autoplay.MixRequest? = null,
+        ): CarQueue? {
             val mix = runCatching {
                 kotlinx.coroutines.withContext(Dispatchers.Default) {
-                    autoplayEngine.buildMix(includeStreamable = canStream, allowDiscovery = canStream)
+                    if (request == null) autoplayEngine.buildMix(includeStreamable = canStream, allowDiscovery = canStream)
+                    else autoplayEngine.buildRequestedMix(request, includeStreamable = canStream, allowDiscovery = canStream).second
                 }
             }.onFailure { android.util.Log.w("StashPlayback", "car mix failed", it) }.getOrDefault(emptyList())
             if (mix.isNotEmpty()) {
                 val items = playerRepository.get().queueItemsFor(mix)
-                return CarQueue(items, mix, 0, shuffle = false, personalMix = true)
+                return CarQueue(items, mix, 0, shuffle = false, personalMix = true, request = request)
             }
             // No listening history yet: never let the tile do nothing.
             val library = trackDao.getRecentlyAdded(MIX_FALLBACK_SIZE).first()
@@ -1146,6 +1160,10 @@ class StashPlaybackService : MediaLibraryService() {
         /** The queue a browse id stands for, or null when it isn't a car queue id. */
         private suspend fun browseQueue(mediaId: String, canStream: Boolean): CarQueue? {
             if (mediaId == MIX_FOR_ME_ID) return mixForYouQueue(canStream)
+            if (mediaId.startsWith(MIX_MOOD_PREFIX)) {
+                val request = MOOD_MIXES.firstOrNull { "$MIX_MOOD_PREFIX${it.first}" == mediaId }?.second ?: return null
+                return mixForYouQueue(canStream, request)
+            }
             if (mediaId.startsWith(SHUFFLE_PLAY_PREFIX)) {
                 val playlistId = mediaId.removePrefix(SHUFFLE_PLAY_PREFIX).toLongOrNull() ?: return null
                 // isPlayableInAuto, NOT the bare is_streamable flag:
@@ -1209,7 +1227,7 @@ class StashPlaybackService : MediaLibraryService() {
                         // After the queue reaches the player: autoplay continues
                         // it, exactly as in the app (it used to just end).
                         serviceScope.launch {
-                            playerRepository.get().adoptExternalQueue(queue.tracks, queue.personalMix)
+                            playerRepository.get().adoptExternalQueue(queue.tracks, queue.personalMix, queue.request)
                         }
                         return@future MediaSession.MediaItemsWithStartPosition(
                             queue.items,
@@ -1217,7 +1235,9 @@ class StashPlaybackService : MediaLibraryService() {
                             C.TIME_UNSET,
                         )
                     }
-                    if (query != null || single.mediaId == MIX_FOR_ME_ID || single.mediaId == CONTINUE_ID) {
+                    if (query != null || single.mediaId == MIX_FOR_ME_ID || single.mediaId == CONTINUE_ID ||
+                        single.mediaId.startsWith(MIX_MOOD_PREFIX)
+                    ) {
                         // Asked for something and nothing can play: say so in the car.
                         showCarMessage(getString(R.string.auto_nothing_playable))
                     }
@@ -1374,6 +1394,21 @@ class StashPlaybackService : MediaLibraryService() {
             styleExtras(group = group),
         )
 
+        private fun moodMixItem(key: String, group: String?) = action(
+            "$MIX_MOOD_PREFIX$key",
+            getString(
+                when (key) {
+                    "CALM" -> R.string.auto_mix_calm
+                    "ENERGY" -> R.string.auto_mix_energy
+                    "FOCUS" -> R.string.auto_mix_focus
+                    else -> R.string.auto_mix_party
+                },
+            ),
+            getString(R.string.auto_mix_mood_subtitle),
+            iconUri("ic_auto_mix"),
+            styleExtras(group = group),
+        )
+
         private fun continueItem(group: String?) = action(
             CONTINUE_ID,
             getString(R.string.auto_continue),
@@ -1405,6 +1440,11 @@ class StashPlaybackService : MediaLibraryService() {
                         return@future LibraryResult.ofItem(tabs().first { it.mediaId == mediaId }, null)
                     MIX_FOR_ME_ID -> return@future LibraryResult.ofItem(mixForYouItem(null), null)
                     CONTINUE_ID -> return@future LibraryResult.ofItem(continueItem(null), null)
+                }
+                if (mediaId.startsWith(MIX_MOOD_PREFIX)) {
+                    MOOD_MIXES.firstOrNull { "$MIX_MOOD_PREFIX${it.first}" == mediaId }?.let {
+                        return@future LibraryResult.ofItem(moodMixItem(it.first, null), null)
+                    }
                 }
                 // Browse-child ids (AUTOQ_…) resolve to their track,
                 // keeping the parent-carrying mediaId intact so a
@@ -1475,10 +1515,11 @@ class StashPlaybackService : MediaLibraryService() {
                         val mixes = getString(R.string.auto_group_mixes)
                         val library = getString(R.string.auto_group_library)
                         val playlists = AutoBrowseTree.forYou(playlistDao.getAllVisible(includeStreamable = canStream).first())
+                        val moodGroup = getString(R.string.auto_group_moods)
                         listOfNotNull(
                             mixForYouItem(start),
                             continueItem(start),
-                        ) + playlists.map { playlistFolder(it, if (AutoBrowseTree.isMix(it)) mixes else library) }
+                        ) + MOOD_MIXES.map { moodMixItem(it.first, moodGroup) } + playlists.map { playlistFolder(it, if (AutoBrowseTree.isMix(it)) mixes else library) }
                     }
                     PLAYLISTS_ID ->
                         // Stream-only playlists appear only while streaming can work.

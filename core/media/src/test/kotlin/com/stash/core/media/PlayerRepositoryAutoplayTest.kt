@@ -71,7 +71,7 @@ class PlayerRepositoryAutoplayTest {
         coEvery { streamingPreference.current() } returns true
         every { connectivity.isConnected() } returns false
         coEvery { engine.isEnabled() } returns true
-        coEvery { engine.start(any(), any()) } returns session
+        coEvery { engine.start(any(), any(), any()) } returns session
         coEvery { engine.nextBatch(session, any(), any(), any()) } returns listOf(track(10), track(11))
         // No timeline by default → growers use the logical queue count.
         every { controller.currentTimeline } returns Timeline.EMPTY
@@ -106,7 +106,7 @@ class PlayerRepositoryAutoplayTest {
 
         repo.growAutoplay()
 
-        coVerify { engine.start(match { q -> q.map { it.id } == listOf(1L, 2L) }, any()) }
+        coVerify { engine.start(match { q -> q.map { it.id } == listOf(1L, 2L) }, any(), any()) }
         // Offline (no connectivity) → no stream-only rows and no discoveries requested.
         coVerify { engine.nextBatch(session, includeStreamable = false, allowDiscovery = false, any()) }
         verify { controller.addMediaItems(match<List<MediaItem>> { it.size == 2 }) }
@@ -193,7 +193,7 @@ class PlayerRepositoryAutoplayTest {
     }
 
     @Test fun `startPersonalMix plays the generated mix and flags it`() = runTest {
-        coEvery { engine.buildMix(any(), any(), any(), any()) } returns listOf(track(21), track(22), track(23))
+        coEvery { engine.buildMix(any(), any(), any(), any(), any()) } returns listOf(track(21), track(22), track(23))
 
         val started = repo.startPersonalMix()
 
@@ -207,7 +207,7 @@ class PlayerRepositoryAutoplayTest {
     }
 
     @Test fun `startPersonalMix reports failure when nothing could be built`() = runTest {
-        coEvery { engine.buildMix(any(), any(), any(), any()) } returns emptyList()
+        coEvery { engine.buildMix(any(), any(), any(), any(), any()) } returns emptyList()
 
         assertThat(repo.startPersonalMix()).isFalse()
         assertThat(repo.personalMixActive.value).isFalse()
@@ -220,7 +220,7 @@ class PlayerRepositoryAutoplayTest {
 
         repo.growAutoplay()
 
-        coVerify { engine.start(match { q -> q.map { it.id } == listOf(1L, 2L) }, any()) }
+        coVerify { engine.start(match { q -> q.map { it.id } == listOf(1L, 2L) }, any(), any()) }
         coVerify { engine.nextBatch(session, any(), any(), any()) }
         verify { controller.addMediaItems(match<List<MediaItem>> { it.size == 2 }) }
         assertThat(repo.personalMixActive.value).isFalse()
@@ -250,7 +250,7 @@ class PlayerRepositoryAutoplayTest {
         every { controller.currentMediaItemIndex } returns 1
         every { controller.mediaItemCount } returns 5
         repo._playerState.value = PlayerState(currentTrack = track(2), queue = (1L..5L).map(::track), currentIndex = 1)
-        coEvery { engine.start(listOf(track(2)), any()) } returns session
+        coEvery { engine.start(listOf(track(2)), any(), any()) } returns session
         coEvery { engine.nextBatch(session, any(), any(), 15) } returns listOf(track(30), track(31))
 
         assertThat(repo.moreLikeThis()).isTrue()
@@ -285,7 +285,7 @@ class PlayerRepositoryAutoplayTest {
         assertThat(repo.armFromPlayerQueue()).isTrue()
         repo.growAutoplay()
 
-        coVerify { engine.start(match { q -> q.map { it.id } == listOf(1L, 2L) }, any()) }
+        coVerify { engine.start(match { q -> q.map { it.id } == listOf(1L, 2L) }, any(), any()) }
         verify { controller.addMediaItems(match<List<MediaItem>> { it.size == 2 }) }
     }
 
@@ -295,6 +295,6 @@ class PlayerRepositoryAutoplayTest {
         repo._playerState.value = PlayerState(currentTrack = track(1), queue = listOf(track(1)), currentIndex = 0)
 
         assertThat(repo.armFromPlayerQueue()).isFalse()
-        coVerify(exactly = 0) { engine.start(any(), any()) }
+        coVerify(exactly = 0) { engine.start(any(), any(), any()) }
     }
 }
