@@ -37,6 +37,7 @@ class AutoplayEngineTest {
     private val audioFeatures: AudioFeaturesDao = mockk(relaxed = true)
     private val engine = AutoplayEngine(
         trackDao, listeningEventDao, signals, library, discovery, lastFm, yt, matcher, preference, audioFeatures,
+        mockk(relaxed = true),
     )
 
     private val libraryRows = (1L..12L).map {
@@ -46,7 +47,8 @@ class AutoplayEngineTest {
     init {
         coEvery { trackDao.getAllPlayable(any()) } returns libraryRows
         coEvery { preference.acceptance() } returns DiscoveryAcceptance()
-        coEvery { signals.tagsOf(any()) } returns emptyMap()
+        coEvery { signals.tagsOf(any<Long>()) } returns emptyMap()
+        coEvery { signals.tagsOf(any<Collection<Long>>()) } returns emptyMap()
         coEvery { lastFm.getSimilarArtists(any(), any()) } returns Result.success(emptyList())
         coEvery { library.candidates(any(), any(), any(), any()) } answers {
             @Suppress("UNCHECKED_CAST")
@@ -54,7 +56,7 @@ class AutoplayEngineTest {
             val keyOf = thirdArg<(TrackEntity) -> String>()
             pool.map { AutoplayCandidate(keyOf(it), it.artist, it.title, AutoplayOrigin.LIBRARY, track = it, sessionSim = 0.5f) }
         }
-        coEvery { discovery.candidates(any(), any(), any(), any(), any()) } returns
+        coEvery { discovery.candidates(any(), any(), any(), any(), any(), any(), any()) } returns
             (1..10).map {
                 AutoplayCandidate("new $it|fresh $it", "New $it", "Fresh $it", AutoplayOrigin.DISCOVERY, lastFmMatch = 0.9f)
             }
@@ -82,7 +84,7 @@ class AutoplayEngineTest {
 
         assertTrue(batch.isNotEmpty())
         assertTrue(batch.all { it.id in 1L..12L })
-        coVerify(exactly = 0) { discovery.candidates(any(), any(), any(), any(), any()) }
+        coVerify(exactly = 0) { discovery.candidates(any(), any(), any(), any(), any(), any(), any()) }
     }
 
     @Test fun `first batch opens with a familiar song`() = runTest {
@@ -113,7 +115,7 @@ class AutoplayEngineTest {
 
         val blocked = mutableListOf<Set<String>>()
         engine.nextBatch(session, includeStreamable = true, allowDiscovery = true)
-        coVerify { discovery.candidates(any(), any(), capture(blocked), any(), any()) }
+        coVerify { discovery.candidates(any(), any(), capture(blocked), any(), any(), any(), any()) }
         assertTrue(song.artist.lowercase() in blocked.last())
     }
 
@@ -199,8 +201,9 @@ class AutoplayEngineTest {
                 AutoplayCandidate(key = "k$id", artist = "A$id", title = "T$id", origin = AutoplayOrigin.LIBRARY, track = libraryRows[(id - 1).toInt()])
             },
         ).associate { it.track!!.id to it.flow }
-        // Same tempo and loudness, a fifth away (Camelot neighbour) beats a slow, quiet song.
-        assertTrue("close ${scored[2]} vs far ${scored[3]}", scored.getValue(2L) > 0.8f && scored.getValue(3L) < 0.4f)
+        // Same tempo and loudness, a fifth away (Camelot neighbour) beats a slow, quiet song
+        // (same groove and dynamics, so the far one keeps a little similarity).
+        assertTrue("close ${scored[2]} vs far ${scored[3]}", scored.getValue(2L) > 0.8f && scored.getValue(3L) < 0.45f)
         // Not analysed: neutral.
         assertEquals(AudioFlow.NEUTRAL, scored.getValue(4L), 0f)
     }

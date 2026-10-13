@@ -49,6 +49,7 @@ class MixGeneratorExcludeIdsTest {
         coEvery { listeningEventDao.getPlayCountsSinceWithLatest(any()) } returns emptyList()
         coEvery { listeningEventDao.getTrackIdsPlayedSince(any()) } returns emptyList()
         coEvery { trackTagDao.getByTrack(any()) } returns emptyList()
+        coEvery { trackTagDao.getByTracks(any()) } returns emptyList()
 
         val result = generator.generate(
             recipe = stubRecipe(discoveryRatio = 0.0f, targetLength = 10),
@@ -67,6 +68,7 @@ class MixGeneratorExcludeIdsTest {
         coEvery { listeningEventDao.getPlayCountsSinceWithLatest(any()) } returns emptyList()
         coEvery { listeningEventDao.getTrackIdsPlayedSince(any()) } returns emptyList()
         coEvery { trackTagDao.getByTrack(any()) } returns emptyList()
+        coEvery { trackTagDao.getByTracks(any()) } returns emptyList()
 
         val result = generator.generate(stubRecipe(discoveryRatio = 0.0f, targetLength = 10))
 

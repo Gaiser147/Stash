@@ -51,6 +51,21 @@ class AutoplaySession internal constructor(
     /** Autoplay picks by the synthetic/library track id the player sees. */
     internal val picksById: MutableMap<Long, AutoplayCandidate> = HashMap()
 
+    /** YouTube video id of each discovery the session played, by player track id (radio seeds). */
+    internal val videoIdsById: MutableMap<Long, String> = HashMap()
+
+    /**
+     * A fixed band of sound for the whole session (a mix request: "calm",
+     * "slow"); null = follow what is being heard.
+     */
+    var fixedCorridor: MoodCorridor? = null
+
+    /** Band used only while nothing heard has an analysis (time-of-day default). */
+    var fallbackCorridor: MoodCorridor? = null
+
+    /** Moods asked for (a mix request); blended into the session's own moods. */
+    var requestedMoods: Map<String, Float> = emptyMap()
+
     /** Artists the user rejected this session (early-skipped discovery, or twice a library song). */
     internal val blockedArtists: MutableSet<String> = HashSet()
 

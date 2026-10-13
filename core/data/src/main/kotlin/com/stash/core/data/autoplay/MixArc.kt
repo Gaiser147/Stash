@@ -13,19 +13,44 @@ import kotlin.math.abs
  * and a mix where fewer than [MIN_ANALYSED_SHARE] of the songs are analysed
  * is returned unchanged rather than half-sorted.
  */
+/** Energy curve a mix follows from start to end. */
+enum class ArcShape {
+    /** Ease in, peak around two thirds, come down a little (default). */
+    RISE,
+
+    /** Calm/focus: stay level with gentle waves — no build-up. */
+    FLAT,
+
+    /** Party: get going quickly, stay high, ease off at the very end. */
+    PEAK_EARLY,
+}
+
 object MixArc {
 
     const val MIN_ANALYSED_SHARE = 0.6f
 
     /** Target energy percentile at position [i] of [n]: 0.3 → 0.9 at 65 % → 0.6. */
-    fun target(i: Int, n: Int): Float {
+    fun target(i: Int, n: Int, shape: ArcShape = ArcShape.RISE): Float {
         if (n <= 1) return 0.5f
         val x = i.toFloat() / (n - 1)
-        return if (x <= PEAK_AT) 0.3f + (0.9f - 0.3f) * (x / PEAK_AT)
-        else 0.9f - (0.9f - 0.6f) * ((x - PEAK_AT) / (1f - PEAK_AT))
+        return when (shape) {
+            ArcShape.RISE ->
+                if (x <= PEAK_AT) 0.3f + (0.9f - 0.3f) * (x / PEAK_AT)
+                else 0.9f - (0.9f - 0.6f) * ((x - PEAK_AT) / (1f - PEAK_AT))
+            ArcShape.FLAT -> 0.5f + 0.15f * kotlin.math.sin(x * 3f * Math.PI.toFloat())
+            ArcShape.PEAK_EARLY ->
+                if (x <= EARLY_PEAK_AT) 0.5f + (0.95f - 0.5f) * (x / EARLY_PEAK_AT)
+                else if (x <= 0.85f) 0.95f - 0.15f * ((x - EARLY_PEAK_AT) / (0.85f - EARLY_PEAK_AT))
+                else 0.8f - 0.2f * ((x - 0.85f) / 0.15f)
+        }
     }
 
-    fun <T> arrange(items: List<T>, energyOf: (T) -> Float?, artistOf: (T) -> String): List<T> {
+    fun <T> arrange(
+        items: List<T>,
+        energyOf: (T) -> Float?,
+        artistOf: (T) -> String,
+        shape: ArcShape = ArcShape.RISE,
+    ): List<T> {
         if (items.size < 4) return items
         val energies = items.map(energyOf)
         val analysed = energies.count { it != null }
@@ -39,7 +64,7 @@ object MixArc {
         val remaining = (1 until items.size).toMutableList()
         val out = arrayListOf(0)
         while (remaining.isNotEmpty()) {
-            val want = target(out.size, items.size)
+            val want = target(out.size, items.size, shape)
             val recent = out.takeLast(AutoplayRanker.ARTIST_GAP - 1).map { artistOf(items[it]) }
             val previous = recent.last()
             val left = remaining.groupingBy { artistOf(items[it]) }.eachCount()
@@ -64,5 +89,6 @@ object MixArc {
     }
 
     private const val PEAK_AT = 0.65f
+    private const val EARLY_PEAK_AT = 0.25f
     private const val SPREAD_BIAS = 0.08f
 }

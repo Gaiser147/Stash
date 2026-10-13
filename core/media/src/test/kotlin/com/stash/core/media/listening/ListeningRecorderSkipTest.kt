@@ -175,6 +175,59 @@ class ListeningRecorderSkipTest {
     }
 
     @Test
+    fun `skip records the position the listener actually reached`() = runTest {
+        val playerRepo = FakePlayerRepository(PlayerState(currentTrack = trackA, positionMs = 0))
+        val skipDao = mockk<TrackSkipEventDao>(relaxed = true)
+        val skipCapture = slot<TrackSkipEventEntity>()
+        coEvery { skipDao.insert(capture(skipCapture)) } returns 1L
+        val recorder = ListeningRecorder(
+            playerRepository = playerRepo,
+            listeningEventDao = mockk(relaxed = true),
+            trackSkipEventDao = skipDao,
+            scrobbler = mockk(relaxed = true),
+            scope = backgroundScope,
+        )
+        recorder.start()
+        runCurrent()
+        playerRepo.setPosition(12_000)
+        runCurrent()
+        playerRepo.setPosition(41_000)
+        runCurrent()
+        playerRepo.setState(PlayerState(currentTrack = trackB, positionMs = 0))
+        runCurrent()
+        advanceUntilIdle()
+
+        assertEquals(41_000L, skipCapture.captured.positionMs)
+    }
+
+    @Test
+    fun `a counted play stores how far it was heard when the track changes`() = runTest {
+        val playerRepo = FakePlayerRepository(PlayerState(currentTrack = trackA, positionMs = 0))
+        val listeningDao = mockk<ListeningEventDao>(relaxed = true)
+        val listenCapture = slot<ListeningEventEntity>()
+        coEvery { listeningDao.insert(capture(listenCapture)) } returns 77L
+        val recorder = ListeningRecorder(
+            playerRepository = playerRepo,
+            listeningEventDao = listeningDao,
+            trackSkipEventDao = mockk(relaxed = true),
+            scrobbler = mockk(relaxed = true),
+            scope = backgroundScope,
+        )
+        recorder.start()
+        runCurrent()
+        advanceTimeBy(95_000)
+        runCurrent()
+        playerRepo.setPosition(170_000)
+        runCurrent()
+        playerRepo.setState(PlayerState(currentTrack = trackB, positionMs = 0))
+        runCurrent()
+        advanceUntilIdle()
+
+        assertEquals(180_000L, listenCapture.captured.durationMs)
+        coVerify { listeningDao.updateListened(77L, 170_000L) }
+    }
+
+    @Test
     fun `repeat-one loop restart schedules a new scrobble session`() = runTest {
         val playerRepo = FakePlayerRepository(
             PlayerState(currentTrack = trackA, repeatMode = RepeatMode.ONE, positionMs = 0),

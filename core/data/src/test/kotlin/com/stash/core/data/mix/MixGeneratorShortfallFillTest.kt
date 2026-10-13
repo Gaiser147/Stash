@@ -44,6 +44,7 @@ class MixGeneratorShortfallFillTest {
         coEvery { listeningEventDao.getPlayCountsSinceWithLatest(any()) } returns emptyList()
         coEvery { listeningEventDao.getTrackIdsPlayedSince(any()) } returns emptyList()
         coEvery { trackTagDao.getByTrack(any()) } returns emptyList()
+        coEvery { trackTagDao.getByTracks(any()) } returns emptyList()
     }
 
     @Test fun `shortfall fill triggers at discoveryRatio = 0_4`() = runTest {

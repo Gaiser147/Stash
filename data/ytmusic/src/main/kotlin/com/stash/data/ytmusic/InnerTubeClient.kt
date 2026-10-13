@@ -247,11 +247,15 @@ class InnerTubeClient @Inject constructor(
      * @param videoId The YouTube video ID.
      * @return The parsed JSON response, or null on failure.
      */
-    suspend fun next(videoId: String): JsonObject? = withContext(Dispatchers.IO) {
+    suspend fun next(videoId: String, playlistId: String? = null): JsonObject? = withContext(Dispatchers.IO) {
         val variant = InnerTubeVariant.WEB_REMIX
         val body = buildJsonObject {
             put("context", buildContext(variant))
             put("videoId", videoId)
+            if (playlistId != null) {
+                put("playlistId", playlistId)
+                put("isAudioOnly", true)
+            }
         }
         executeRequest("$BASE_URL/next", body, null, variant)
     }

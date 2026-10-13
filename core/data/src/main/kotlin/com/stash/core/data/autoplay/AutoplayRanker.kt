@@ -10,10 +10,14 @@ import kotlin.random.Random
  *
  * ## Scoring
  * ```
- * score = 0.31·sessionSim + 0.22·affinity + 0.18·transition
- *       + 0.09·completion + 0.08·lastFmMatch + 0.12·flow
- *       − skipPenalty − recentPenalty
+ * score = 0.26·sessionSim + 0.18·affinity + 0.13·transition
+ *       + 0.07·completion + 0.06·lastFmMatch + 0.18·flow + 0.12·tagFit
+ *       − 0.35·(1 − corridorFit) − skipPenalty − recentPenalty
  * ```
+ * The corridor term keeps the mood: an analysed song far outside the
+ * session's energy/tempo band ([MoodCorridor]) loses more than any song can
+ * gain from the other features. `tagFit` is the mood check for songs without
+ * an analysis (discoveries).
  * `sessionSim` dominates on purpose: autoplay should continue the mood of
  * what is playing *now*, with long-term taste as the tie-breaker. `flow`
  * adds how the song *sounds* next to the last one (tempo, loudness, key;
@@ -36,12 +40,14 @@ import kotlin.random.Random
  */
 object AutoplayRanker {
 
-    const val W_SESSION = 0.31f
-    const val W_AFFINITY = 0.22f
-    const val W_TRANSITION = 0.18f
-    const val W_COMPLETION = 0.09f
-    const val W_LASTFM = 0.08f
-    const val W_FLOW = 0.12f
+    const val W_SESSION = 0.26f
+    const val W_AFFINITY = 0.18f
+    const val W_TRANSITION = 0.13f
+    const val W_COMPLETION = 0.07f
+    const val W_LASTFM = 0.06f
+    const val W_FLOW = 0.18f
+    const val W_TAG_FIT = 0.12f
+    const val CORRIDOR_PENALTY = 0.35f
 
     /** Softmax temperature. Lower = greedier. Scores span roughly 0..1. */
     const val TEMPERATURE = 0.08f
@@ -55,7 +61,9 @@ object AutoplayRanker {
             W_TRANSITION * c.transition +
             W_COMPLETION * c.completion +
             W_LASTFM * c.lastFmMatch +
-            W_FLOW * c.flow -
+            W_FLOW * c.flow +
+            W_TAG_FIT * c.tagFit -
+            CORRIDOR_PENALTY * (1f - c.corridorFit) -
             c.skipPenalty -
             c.recentPenalty
 

@@ -2,6 +2,8 @@ package com.stash.core.data.autoplay
 
 import android.util.Log
 import com.stash.core.data.db.dao.AudioFeaturesDao
+import com.stash.core.data.db.dao.DiscoveryFeedbackDao
+import com.stash.core.data.db.entity.DiscoveryFeedbackEntity
 import com.stash.core.data.db.dao.ListeningEventDao
 import com.stash.core.data.db.dao.TrackDao
 import com.stash.core.data.db.entity.TrackEntity
@@ -60,6 +62,7 @@ class AutoplayEngine @Inject constructor(
     private val matcher: TrackMatcher,
     private val preference: AutoplayPreference,
     private val audioFeatures: AudioFeaturesDao,
+    private val feedbackDao: DiscoveryFeedbackDao,
 ) {
 
     suspend fun isEnabled(): Boolean = runCatching { preference.isEnabled() }.getOrDefault(false)
@@ -86,16 +89,49 @@ class AutoplayEngine @Inject constructor(
         allowDiscovery: Boolean,
         size: Int = MIX_SIZE,
         random: Random = Random(System.nanoTime()),
-    ): List<Track> {
+        shape: ArcShape = ArcShape.RISE,
+    ): List<Track> = buildMixFrom(
+        session = start(recentSeeds(), random),
+        includeStreamable = includeStreamable,
+        allowDiscovery = allowDiscovery,
+        size = size,
+        shape = shape,
+    ).second
+
+    /** The songs heard most recently, oldest first (the session treats the end as "just heard"). */
+    internal suspend fun recentSeeds(): List<Track> {
         val ids = listeningEventDao.getRecentlyHeardTrackIds(MIX_SEEDS)
         val byId = if (ids.isEmpty()) emptyMap() else trackDao.getByIds(ids).associateBy { it.id }
-        // Oldest first: the session treats the end of its start queue as "just heard".
-        val seeds = ids.mapNotNull { byId[it]?.toDomain() }.asReversed()
-        val session = start(seeds, random)
+        return ids.mapNotNull { byId[it]?.toDomain() }.asReversed()
+    }
+
+    /**
+     * Fills [session] with a [size]-song mix and orders it along [shape].
+     * Returns the session too, so the caller can keep autoplay going in the
+     * same mood once the mix ends.
+     */
+    internal suspend fun buildMixFrom(
+        session: AutoplaySession,
+        includeStreamable: Boolean,
+        allowDiscovery: Boolean,
+        size: Int,
+        shape: ArcShape,
+    ): Pair<AutoplaySession, List<Track>> {
+        if (session.fixedCorridor == null) {
+            // Until something analysed has been heard, aim at what this time
+            // of day usually sounds like.
+            session.fallbackCorridor = timeOfDayCorridor()
+        }
         val mix = nextBatch(session, includeStreamable, allowDiscovery, size)
-        // Shape the mix like a set: ease in, build to a peak, come down.
         val energy = audioProfiles(mix.map { it.id }).mapValues { AudioFlow.energy(it.value) }
-        return MixArc.arrange(mix, energyOf = { energy[it.id] }, artistOf = { it.artist.trim().lowercase() })
+        return session to MixArc.arrange(mix, energyOf = { energy[it.id] }, artistOf = { it.artist.trim().lowercase() }, shape = shape)
+    }
+
+    /** Typical energy of the current three-hour window, as a corridor; null without enough history. */
+    internal suspend fun timeOfDayCorridor(now: Long = System.currentTimeMillis()): MoodCorridor? {
+        val rows = runCatching { audioFeatures.heardSoundSince(now - TIME_OF_DAY_WINDOW_MS) }.getOrDefault(emptyList())
+        val energy = TimeOfDayEnergy.profile(rows)[TimeOfDayEnergy.bucketOf(now)] ?: return null
+        return MoodCorridor(energyCenter = energy, energyWidth = MoodCorridor.DEFAULT_ENERGY_WIDTH * 1.5f)
     }
 
     /**
@@ -122,8 +158,22 @@ class AutoplayEngine @Inject constructor(
             pool += t
         }
 
-        val context = buildContext(session, libraryIds, online = allowDiscovery)
-        val libCands = withFlow(context, library.candidates(context, pool, ::keyOf, session.random))
+        val baseContext = buildContext(session, libraryIds, online = allowDiscovery)
+        // Mood corridor: the session's (or the request's) band of sound,
+        // widened until enough of the library fits it.
+        val poolProfiles = audioProfiles(pool.map { it.id })
+        val corridor = (session.fixedCorridor ?: baseContext.audioTarget?.let(MoodCorridor::around) ?: session.fallbackCorridor)
+            ?.let { MoodCorridor.fitted(it, poolProfiles.values) }
+        val corridorIds = if (corridor == null) emptyList() else
+            poolProfiles.entries.filter { corridor.fit(it.value) >= CORRIDOR_SHORTLIST_FIT }.map { it.key }.shuffled(session.random)
+        val context = baseContext.copy(corridor = corridor, corridorTrackIds = corridorIds)
+
+        val libCands = withFlow(context, library.candidates(context, pool, ::keyOf, session.random), poolProfiles)
+        val byId = all.associateBy { it.id }
+        val seedVideoIds = context.seeds.mapNotNull { s ->
+            s.libraryId?.let { byId[it]?.youtubeId }
+        } + session.history.asReversed().filter { it.outcome == ListenOutcome.COMPLETED }
+            .mapNotNull { h -> h.trackId?.let(session.videoIdsById::get) }
         val discCands = if (allowDiscovery) {
             runCatching {
                 discovery.candidates(
@@ -132,6 +182,8 @@ class AutoplayEngine @Inject constructor(
                     blockedArtists = session.blockedArtists,
                     userArtistAffinity = userArtistAffinity(),
                     keyOf = { a, t -> AutoplaySession.keyOf(matcher, a, t) },
+                    seedVideoIds = seedVideoIds,
+                    variantShare = VariantKind.shares(all.map { "${it.artist} ${it.title}" }),
                 )
             }.onFailure { Log.w(TAG, "discovery candidates failed; library only", it) }
                 .getOrDefault(emptyList())
@@ -158,10 +210,20 @@ class AutoplayEngine @Inject constructor(
             if (out.any { it.id == track.id }) continue
             session.emittedKeys += pick.key
             session.picksById[track.id] = pick
+            if (pick.origin == AutoplayOrigin.DISCOVERY) track.youtubeId?.let { session.videoIdsById[track.id] = it }
             out += track
         }
         session.batches++
-        Log.d(TAG, "batch ${session.batches}: ${out.size} songs, share=$share, lib=${libCands.size}, disc=${discCands.size}")
+        val chosen = out.mapNotNull { session.picksById[it.id] }
+        Log.d(
+            TAG,
+            "batch ${session.batches}: ${out.size} songs, share=$share, lib=${libCands.size}, disc=${discCands.size}, " +
+                "corridor=${corridor ?: "-"} inCorridor=${corridorIds.size}, moods=${context.moods.topMoods()}, " +
+                "fit=%.2f tagFit=%.2f".format(
+                    chosen.map { it.corridorFit }.average().takeIf { !it.isNaN() } ?: 1.0,
+                    chosen.map { it.tagFit }.average().takeIf { !it.isNaN() } ?: 0.5,
+                ),
+        )
         return out
     }
 
@@ -185,6 +247,18 @@ class AutoplayEngine @Inject constructor(
             outcome = outcome,
         )
         val isDiscovery = pick?.origin == AutoplayOrigin.DISCOVERY
+        if (isDiscovery && outcome != ListenOutcome.PLAYED) {
+            runCatching {
+                feedbackDao.insert(
+                    DiscoveryFeedbackEntity(
+                        canonicalKey = pick!!.key,
+                        artistKey = artistKey,
+                        outcome = outcome.name,
+                        at = System.currentTimeMillis(),
+                    ),
+                )
+            }.onFailure { Log.w(TAG, "discovery feedback not stored", it) }
+        }
         when (outcome) {
             ListenOutcome.EARLY_SKIP -> {
                 val skips = (session.artistSkips[artistKey] ?: 0) + 1
@@ -234,19 +308,24 @@ class AutoplayEngine @Inject constructor(
         }
 
         // Session tag vector: seeds minus half of recent early skips.
-        val tagAcc = HashMap<String, Float>()
-        for (s in seeds) {
-            val id = s.libraryId ?: continue
-            signals.tagsOf(id).forEach { (tag, w) -> tagAcc[tag] = (tagAcc[tag] ?: 0f) + w * s.weight }
-        }
         val negatives = session.history.asReversed()
             .take(NEGATIVE_WINDOW)
             .filter { it.outcome == ListenOutcome.EARLY_SKIP }
+        val tagsById = signals.tagsOf(
+            seeds.mapNotNull { it.libraryId } + negatives.mapNotNull { libId(it.trackId) },
+        )
+        val tagAcc = HashMap<String, Float>()
+        for (s in seeds) {
+            val id = s.libraryId ?: continue
+            tagsById[id]?.forEach { (tag, w) -> tagAcc[tag] = (tagAcc[tag] ?: 0f) + w * s.weight }
+        }
         for (n in negatives) {
             val id = libId(n.trackId) ?: continue
-            signals.tagsOf(id).forEach { (tag, w) -> tagAcc[tag] = (tagAcc[tag] ?: 0f) - NEGATIVE_TAG_WEIGHT * w }
+            tagsById[id]?.forEach { (tag, w) -> tagAcc[tag] = (tagAcc[tag] ?: 0f) - NEGATIVE_TAG_WEIGHT * w }
         }
         val tagVector = l2Normalize(tagAcc.filterValues { it > 0f })
+        // Session moods: what the seeds' tags say, plus what a request asked for.
+        val moods = blendMoods(MoodSpace.moodsOf(tagVector), session.requestedMoods)
 
         // Artist neighbourhood: seed artists, plus Last.fm neighbours online.
         val artistAcc = HashMap<String, Float>()
@@ -300,6 +379,7 @@ class AutoplayEngine @Inject constructor(
             recentArtists = recentArtists,
             lastAudio = weighted.firstOrNull()?.first,
             audioTarget = AudioFlow.blend(weighted),
+            moods = moods,
         )
     }
 
@@ -308,14 +388,24 @@ class AutoplayEngine @Inject constructor(
      * mostly the song just heard (the transition), partly the session's
      * blended sound (so one outlier doesn't steer everything).
      */
-    internal suspend fun withFlow(context: AutoplayContext, candidates: List<AutoplayCandidate>): List<AutoplayCandidate> {
-        val last = context.lastAudio ?: return candidates
+    internal suspend fun withFlow(
+        context: AutoplayContext,
+        candidates: List<AutoplayCandidate>,
+        known: Map<Long, AudioProfile>? = null,
+    ): List<AutoplayCandidate> {
+        val last = context.lastAudio
+        val corridor = context.corridor
+        if (last == null && corridor == null) return candidates
         val target = context.audioTarget ?: last
-        val profiles = audioProfiles(candidates.mapNotNull { it.track?.id })
+        val profiles = known ?: audioProfiles(candidates.mapNotNull { it.track?.id })
         if (profiles.isEmpty()) return candidates
         return candidates.map { c ->
             val p = c.track?.id?.let(profiles::get) ?: return@map c
-            c.copy(flow = FLOW_LAST * AudioFlow.similarity(last, p) + (1 - FLOW_LAST) * AudioFlow.similarity(target, p))
+            c.copy(
+                flow = if (last == null || target == null) c.flow
+                    else FLOW_LAST * AudioFlow.similarity(last, p) + (1 - FLOW_LAST) * AudioFlow.similarity(target, p),
+                corridorFit = corridor?.fit(p) ?: 1f,
+            )
         }
     }
 
@@ -378,6 +468,23 @@ class AutoplayEngine @Inject constructor(
         private const val NEIGHBOUR_SEED_ARTISTS = 3
         private const val NEIGHBOURS_PER_ARTIST = 30
         private const val NEIGHBOUR_DISCOUNT = 0.8f
+
+        /** Library songs fitting the corridor at least this well join the shortlist. */
+        private const val CORRIDOR_SHORTLIST_FIT = 0.7f
+        private const val TIME_OF_DAY_WINDOW_MS = 90L * 24 * 60 * 60 * 1000
+
+        /** Weight of a request's moods against the seeds' own moods. */
+        private const val REQUEST_MOOD_WEIGHT = 2f
+
+        internal fun blendMoods(own: Map<String, Float>, requested: Map<String, Float>): Map<String, Float> {
+            if (requested.isEmpty()) return own
+            val acc = HashMap(own)
+            requested.forEach { (m, w) -> acc[m] = (acc[m] ?: 0f) + REQUEST_MOOD_WEIGHT * w }
+            return l2Normalize(acc)
+        }
+
+        private fun Map<String, Float>.topMoods(): String =
+            entries.sortedByDescending { it.value }.take(2).joinToString("+") { it.key }.ifEmpty { "-" }
 
         /** Share of `flow` that comes from the song just heard (rest: the session's blend). */
         private const val FLOW_LAST = 0.6f

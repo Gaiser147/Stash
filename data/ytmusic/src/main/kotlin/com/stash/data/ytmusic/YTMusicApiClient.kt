@@ -1318,6 +1318,16 @@ class YTMusicApiClient @Inject constructor(
         maxPages: Int = MAX_PAGES,
         parsePage: (JsonObject) -> List<T>,
     ): PaginationResult<T> = paginateBrowse(initialResponse, maxPages, parsePage)
+
+    /**
+     * YouTube Music's radio for a song: up to [limit] songs it would play
+     * after [videoId]. Anonymous (no cookie), like the search used for
+     * matching. Empty on any failure.
+     */
+    suspend fun getRadio(videoId: String, limit: Int = 25): List<RadioTrack> = runCatching {
+        val response = innerTubeClient.next(videoId, YTMusicRadio.playlistIdFor(videoId)) ?: return emptyList()
+        YTMusicRadio.parse(response, seedVideoId = videoId).take(limit)
+    }.onFailure { Log.w(TAG, "getRadio($videoId) failed", it) }.getOrDefault(emptyList())
 }
 
 // ── JsonElement navigation extensions ────────────────────────────────────────

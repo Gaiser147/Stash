@@ -128,12 +128,21 @@ class TrackSignals @Inject constructor(
     ): Map<Long, Float> {
         if (vector.isEmpty()) return emptyMap()
         val result = HashMap<Long, Float>(pool.size)
-        for (track in pool) {
-            val tags = tagsOf(track.id)
+        for ((id, tags) in tagsOf(pool.map { it.id })) {
             if (tags.isEmpty()) continue
-            result[track.id] = UserTagAffinity.cosine(tags, vector)
+            result[id] = UserTagAffinity.cosine(tags, vector)
         }
         return result
+    }
+
+    /** [tagsOf] for many tracks at once (one query per 900 ids instead of one per track). */
+    suspend fun tagsOf(trackIds: Collection<Long>): Map<Long, Map<String, Float>> {
+        if (trackIds.isEmpty()) return emptyMap()
+        return trackIds.distinct().chunked(900)
+            .flatMap { trackTagDao.getByTracks(it) }
+            .filter { it.tag != UNTAGGABLE }
+            .groupBy { it.trackId }
+            .mapValues { (_, rows) -> rows.associate { it.tag.lowercase() to it.weight } }
     }
 
     /** A track's tag-weight vector, lowercase keys, sentinel rows dropped. */
